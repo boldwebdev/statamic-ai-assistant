@@ -1,5 +1,7 @@
 {
     "name": "bold-web/statamic-ai-assistant",
+    "description": "Statamic Ai Assistant is a Statamic addon that provide AI text generation and refactoring to the users.",
+    "keywords": ["statamic","ai"],
     "autoload": {
         "psr-4": {
             "BoldWeb\\StatamicAiAssistant\\": "src"
@@ -26,7 +28,7 @@
     "extra": {
         "statamic": {
             "name": "Statamic AI Assistant",
-            "description": "Statamic AI Assistant addon for your text fields in the Control Panel."
+            "description": "Statamic Ai Assistant is a Statamic addon that provide AI text generation and refactoring to the users."
         },
         "laravel": {
             "providers": [
