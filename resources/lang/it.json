@@ -1,0 +1,15 @@
+{
+  "title": "Assistente IA",
+  "loading": "elaborazione...",
+  "generate": "Genera",
+  "back": "Indietro",
+  "edit": "Modifica",
+  "apply_refactor": "Genera",
+  "description": "Genera con IA",
+  "apply_changes": "Applica modifiche",
+  "prompt_placeholder": "Descrivi l’articolo che desideri creare",
+  "current_text": "Testo attuale",
+  "refactor_description": "Inserisci un’istruzione per aggiornare il testo corrente.",
+  "refactor_placeholder": "Descrivi la tua modifica",
+  "new_text": "Nuovo testo"
+}

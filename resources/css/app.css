@@ -1,0 +1,103 @@
+/* LOADING animation for textareas and bardareas */
+.loader {
+    width: 25px;
+    height: 25px;
+    border-radius: 50%;
+    position: relative;
+    animation: rotate 1s linear infinite;
+}
+
+.loader::before,
+.loader::after {
+    content: "";
+    box-sizing: border-box;
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 3px solid #fff;
+    animation: prixClipFix 2s linear infinite;
+}
+
+.loader::after {
+    transform: rotate3d(90, 90, 0, 180deg);
+    border-color: #0a55e0;
+}
+
+@keyframes rotate {
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes prixClipFix {
+    0% {
+        clip-path: polygon(50% 50%, 0 0, 0 0, 0 0, 0 0, 0 0);
+    }
+
+    50% {
+        clip-path: polygon(50% 50%, 0 0, 100% 0, 100% 0, 100% 0, 100% 0);
+    }
+
+    75%,
+    100% {
+        clip-path: polygon(50% 50%, 0 0, 100% 0, 100% 100%, 100% 100%, 100% 100%);
+    }
+}
+
+/* TRANSLATIONS dropdown */
+/* Translation button styling */
+.button-translate {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 1.2rem;
+}
+
+/* Translation dropdown styling */
+.translation-wrapper {
+    position: relative;
+    display: inline-block;
+}
+
+.translate-dropdown {
+    position: absolute;
+    top: 45px;
+    padding: 5px;
+    z-index: 9999;
+    width: 120px;
+}
+
+.translate-option {
+    cursor: pointer;
+    padding: 2px 5px;
+}
+
+.translate-option:hover {
+    background-color: rgba(42, 66, 112, 0.2);
+}
+
+/* OTHER */
+.absolute-btn-close {
+    top: 1rem;
+    right: 1rem;
+}
+
+.text-area-result {
+    overflow-y: auto;
+    min-height: 250px;
+}
+
+/* We fix issue with lists*/
+.text-area-result li {
+    list-style-position: inside;
+    padding-left: 10px;
+}
+
+.text-area-result li p {
+    margin: 0;
+    display: inline;
+}

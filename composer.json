@@ -1,0 +1,39 @@
+{
+    "name": "bold-web/statamic-ai-assistant",
+    "autoload": {
+        "psr-4": {
+            "BoldWeb\\StatamicAiAssistant\\": "src"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "BoldWeb\\StatamicAiAssistant\\Tests\\": "tests"
+        }
+    },
+    "require": {
+        "statamic/cms": "^5.0",
+        "edalzell/forma": "^3.1",
+        "lucianotonet/groq-laravel": "^0.0.10"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0"
+    },
+    "config": {
+        "allow-plugins": {
+            "pixelfear/composer-dist-plugin": true
+        }
+    },
+    "extra": {
+        "statamic": {
+            "name": "Statamic AI Assistant",
+            "description": "Statamic AI Assistant addon for your text fields in the Control Panel."
+        },
+        "laravel": {
+            "providers": [
+                "BoldWeb\\StatamicAiAssistant\\ServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}

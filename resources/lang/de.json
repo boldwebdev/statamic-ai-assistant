@@ -1,0 +1,15 @@
+{
+  "title": "AI Assistant",
+  "loading": "verarbeiten...",
+  "generate": "Generieren",
+  "back": "Zurück",
+  "edit": "Anpassen",
+  "apply_refactor": "Generieren",
+  "description": "Mit KI generieren",
+  "apply_changes": "Übernehmen",
+  "prompt_placeholder": "Beschreibe den Artikel, den du erstellen möchtest",
+  "current_text": "Aktueller Text",
+  "refactor_description": "Gib eine Anweisung ein, um den aktuellen Text zu aktualisieren.",
+  "refactor_placeholder": "Beschreibe deine Anpassung",
+  "new_text": "Neuer Text"
+}
