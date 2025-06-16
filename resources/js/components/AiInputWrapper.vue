@@ -29,8 +29,9 @@
         </div>
       </div>
   
+      <div ref="aiBoldContainer" class="ai-bold-wrapper">
       <!-- AI Icon Button -->
-      <div ref="aiIconContainer" class="ai-icon-wrapper">
+      <div class="ai-icon-wrapper">
         <button type="button" @click="openModal(() => internalValue)">
           <AiIcon class="w-5 h-5 text-blue v-popper--has-tooltip" />
         </button>
@@ -40,7 +41,6 @@
       <div
         v-show="languages.length > 0"
         :class="!internalValue ? 'opacity-50' : ''"
-        ref="translationContainer"
         class="translation-wrapper"
       >
         <button
@@ -62,6 +62,7 @@
           </div>
         </div>
       </div>
+    </div>
   
       <!-- AI Prompt/Result/Refactor Modal -->
       <modal
@@ -237,8 +238,7 @@
         const group = this.$el.closest(".form-group");
         if (!group) return;
         const label = group.querySelector("label");
-        if (label && this.$refs.aiIconContainer)      label.appendChild(this.$refs.aiIconContainer);
-        if (label && this.$refs.translationContainer) label.appendChild(this.$refs.translationContainer);
+        if (label && this.$refs.aiBoldContainer)      label.appendChild(this.$refs.aiBoldContainer);
       });
   
       this.editor = {
@@ -309,6 +309,11 @@
   <style scoped>
   .cursor-help {
     background: #242628;
+  }
+
+  .ai-bold-wrapper{
+    display:flex;
+    align-items: center;
   }
 
   .ai-icon-wrapper,
