@@ -19,12 +19,7 @@ export const BoldAiBardService = Node.create({
           });
 
           // Return the refactored content if available.
-          if (response?.data?.content) {
-            return response.data.content;
-          }
-
-          // fallback to the original text.
-          return initialHTMLText;
+          return response.data.content;
         } catch (error) {
           console.error("Error refactoring combined content:", error);
           return initialHTMLText;

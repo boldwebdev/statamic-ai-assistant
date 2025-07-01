@@ -44,11 +44,11 @@
                     </p>
                     <div :disabled="hadInitialValue" rows="4" ref="resulteditor" v-html="result"
                         class="mt-1 prose input-text text-area-result" placeholder=""></div>
-                        <div class="flex items-center justify-between">
+                        <div class="flex justify-between items-center">
                     <label class="block mt-4 mb-1 font-bold">
                         {{ transWithFallback('edit', 'Describe your adjustment.') }}
                         <span
-                        class="inline-flex items-center justify-center w-5 h-5 ml-1 text-white rounded-full cursor-help"
+                        class="inline-flex justify-center items-center ml-1 w-5 h-5 text-white rounded-full cursor-help"
                         :title="transWithFallback('refactor_description','Enter an instruction to update the current text.')"
                         >?</span>
                     </label>
@@ -140,7 +140,7 @@ export default {
                 if (!response?.data || !response.data.content) return;
                 this.result = response.data.content;
                 if (response.data.content === "") {
-                    throw new Error("Empty response from API. Service might be unavailable.");
+                    throw new Error("Empty response from API. Verify your API key.");
                 }
                 this.modalMode = "result";
             } catch (error) {
@@ -158,12 +158,13 @@ export default {
                     refactorPrompt: this.refactorPrompt,
                 });
                 if (!newHTML || newHTML.trim() === "") {
-                    throw new Error("Empty response from API. Service might be unavailable.");
+                    Statamic.$toast.error('Empty response from API. Verify your API key', { duration: 10000 });
                 }
-                console.log("responseHTMLText:",newHTML)
-                this.result = newHTML;
-                Statamic.$toast.success(__('Your content has been refactored.'));
-                this.modalMode = "result";
+                else{
+                    this.result = newHTML;
+                    Statamic.$toast.success(__('Your content has been refactored.'));
+                    this.modalMode = "result";
+                }
             } catch (error) {
                 console.error("Error refactoring AI text:", error);
             } finally {

@@ -1,33 +1,6 @@
 <template>
-    <div>
-      <!-- Main editor (textarea vs. input) -->
-      <div class="relative">
-        <input
-          v-if="inputType === 'input'"
-          key="input"
-          ref="editor"
-          v-model="internalValue"
-          class="input-text"
-        />
-  
-        <textarea
-          v-else
-          key="textarea"
-          ref="editor"
-          v-model="internalValue"
-          rows="4"
-          class="input-text"
-        ></textarea>
-  
-        <!-- Loading overlay -->
-        <div
-          v-if="loadingTranslation"
-          class="absolute top-0 left-0 flex items-center justify-center w-full h-full"
-        >
-          <span class="z-10 loader"></span>
-          <div class="absolute top-0 left-0 w-full h-full bg-black rounded-sm opacity-50"></div>
-        </div>
-      </div>
+    <div class="bold-ai-statamic-assistant">
+
   
       <div ref="aiBoldContainer" class="ai-bold-wrapper">
       <!-- AI Icon Button -->
@@ -63,6 +36,34 @@
         </div>
       </div>
     </div>
+          <!-- Main editor (textarea vs. input) -->
+          <div class="relative">
+        <input
+          v-if="inputType === 'input'"
+          key="input"
+          ref="editor"
+          v-model="internalValue"
+          class="input-text"
+        />
+  
+        <textarea
+          v-else
+          key="textarea"
+          ref="editor"
+          v-model="internalValue"
+          rows="4"
+          class="input-text"
+        ></textarea>
+  
+        <!-- Loading overlay -->
+        <div
+          v-if="loadingTranslation"
+          class="flex absolute top-0 left-0 justify-center items-center w-full h-full"
+        >
+          <span class="z-10 loader"></span>
+          <div class="absolute top-0 left-0 w-full h-full bg-black rounded-sm opacity-50"></div>
+        </div>
+      </div>
   
       <!-- AI Prompt/Result/Refactor Modal -->
       <modal
@@ -127,11 +128,11 @@
               :value="result"
               disabled
             ></textarea>
-            <div class="flex items-center justify-between">
+            <div class="flex justify-between items-center">
               <label class="block mt-4 mb-1 font-bold">
                 {{ transWithFallback('edit', 'Describe your adjustment.') }}
                 <span
-                  class="inline-flex items-center justify-center w-5 h-5 ml-1 text-white rounded-full cursor-help"
+                  class="inline-flex justify-center items-center ml-1 w-5 h-5 text-white rounded-full cursor-help"
                   :title="transWithFallback('refactor_description','Enter an instruction to update the current text.')"
                 >?</span>
               </label>
@@ -235,12 +236,23 @@
     mounted() {
       this.getLocalizations();
       this.$nextTick(() => {
-        const group = this.$el.closest(".form-group");
+        // grid-cell need a special treatment
+        const group = this.$el.closest('.grid-cell') || this.$el.closest('.form-group');
         if (!group) return;
-        const label = group.querySelector("label");
-        if (label && this.$refs.aiBoldContainer)      label.appendChild(this.$refs.aiBoldContainer);
+
+        const label = group.querySelector('label');
+        const container = this.$refs.aiBoldContainer;
+        if (label && container) {
+          // modern browsers
+          if (label.prepend) {
+            label.prepend(container);
+          } else {
+            // older browsers
+            label.insertBefore(container, label.firstChild);
+          }
+        }
       });
-  
+
       this.editor = {
         commands: { focus: () => this.$refs.editor.focus() },
         setEditable: e => (this.$refs.editor.disabled = !e),
@@ -260,7 +272,7 @@
             prompt = "generate MAXIMUM 12 words! " + prompt;
           }
           const { data } = await axios.post("/cp/prompt", { title: prompt });
-          if (!data.content) throw new Error("Empty response from API.");
+          if (!data.content || data.content.trim() === "") throw new Error("Empty response from API. Verify your API key");
           this.result = data.content;
           Statamic.$toast.success(__('Your content has been generated.'));
           this.modalMode = "result";
@@ -284,7 +296,7 @@
             text: this.result,
             prompt: refactorPrompt,
           });
-          if (!data.content) throw new Error("Empty response from API.");
+          if (!data.content || data.content.trim() === "") throw new Error("Empty response from API. Verify your API key");
           this.result = data.content;
           Statamic.$toast.success(__('Your content has been refactored.'));
           this.modalMode = "result";
@@ -306,7 +318,13 @@
   };
   </script>
   
-  <style scoped>
+  <style>
+  label:has(.ai-bold-wrapper){
+    display: flex!important;
+    align-items: center;
+    gap: 10px;
+  }
+
   .cursor-help {
     background: #242628;
   }
@@ -314,6 +332,7 @@
   .ai-bold-wrapper{
     display:flex;
     align-items: center;
+    order: 2;
   }
 
   .ai-icon-wrapper,

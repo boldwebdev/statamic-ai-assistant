@@ -39,18 +39,21 @@ export default {
           await axios.post('/cp/prompt', {
             title: `ONLY TRANSLATE THIS ${this.translationMode || 'TEXT'} in the language with ISO: ${this.selectedLanguage} AND NOTHING ELSE!! Don't answer! only translate!! Text to translate:` + this.value
           }).then((response) => {
-            if (!response?.data || !response.data.content) return;
-            this.result = response.data.content;
-            if (response.data.content === '') {
-              throw new Error('Empty response from API. Service might be unavailable.');
+            if (!response?.data || !response.data.content ||response.data.content === '') {
+              throw new Error('Empty response from API. Verify your API key.');
+            }else{
+                this.result = response.data.content;
+              if (response.data.content === '') {
+                throw new Error('Empty response from API. Verify your API key.');
+              }
+              // Depending on the component, either validate the result or write back.
+              if (this.validateResult) {
+                this.validateResult();
+              } else if (this.editor && this.editor.commands && this.editor.commands.WriteInBard) {
+                this.editor.commands.WriteInBard(this.result);
+              }
+              Statamic.$toast.success(__('Your content has been translated.'));
             }
-            // Depending on the component, either validate the result or write back.
-            if (this.validateResult) {
-              this.validateResult();
-            } else if (this.editor && this.editor.commands && this.editor.commands.WriteInBard) {
-              this.editor.commands.WriteInBard(this.result);
-            }
-            Statamic.$toast.success(__('Your content has been translated.'));
           }).catch((error) => {
             Statamic.$toast.error(
               error?.response?.data.error || error.message || __('Something went wrong.'),

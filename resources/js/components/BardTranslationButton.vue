@@ -14,7 +14,7 @@
             </div>
         </div>
         <div ref="loadingBard" :style="{ display: loadingTranslation ? 'flex' : 'none' }"
-            class="absolute top-0 left-0 z-10 items-center justify-center w-full h-full">
+            class="absolute top-0 left-0 z-10 justify-center items-center w-full h-full">
             <span class="z-10 loader"></span>
             <div class="absolute top-0 left-0 w-full h-full bg-black rounded-sm opacity-50"></div>
         </div>
@@ -71,13 +71,13 @@ export default {
                     // in the future let's integrate deepl api: https://developers.deepl.com/docs/xml-and-html-handling/html
                     title: `ONLY TRANSLATE THIS HTML in the language with ISO: ${this.selectedLanguage} AND NOTHING ELSE!! KEEP THE HTML STRUCTURE EXACTLY THE SAME. Don't answer! only translate!! Text to translate:` + this.value
                 }).then((response) => {
-                    if (!response?.data || !response.data.content) return;
-                    this.result = response.data.content;
-                    if (response.data.content === '') {
-                        throw new Error('Empty response from API. Service might be unavailable.');
+                    if (!response?.data || !response.data.content ||response.data.content === '') {
+                        throw new Error('Empty response from API. Verify your API key.');
+                    }else{
+                        this.result = response.data.content;
+                        this.editor.commands.WriteInBard(this.result);
+                        Statamic.$toast.success(__('Your content has been translated.'));
                     }
-                    this.editor.commands.WriteInBard(this.result);
-                    Statamic.$toast.success(__('Your content has been translated.'));
 
                 }).catch((error) => {
                     Statamic.$toast.error(
