@@ -2,6 +2,7 @@
 
 namespace BoldWeb\StatamicAiAssistant;
 
+use BoldWeb\StatamicAiAssistant\Actions\TranslateEntry;
 use BoldWeb\StatamicAiAssistant\Controllers\PromptController;
 use BoldWeb\StatamicAiAssistant\Fieldtypes\AiTextarea;
 use BoldWeb\StatamicAiAssistant\Fieldtypes\AiText;
@@ -22,6 +23,10 @@ class ServiceProvider extends AddonServiceProvider
   protected $fieldtypes = [
     AiTextarea::class,
     AiText::class,
+  ];
+
+  protected $actions = [
+    TranslateEntry::class,
   ];
 
   public function bootAddon()

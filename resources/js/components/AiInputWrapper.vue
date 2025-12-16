@@ -338,8 +338,7 @@
   .ai-icon-wrapper,
   .translation-wrapper {
     border-radius: .25rem;
-    padding: .25rem;
-    height: 28px;
+    padding: 0 .25rem;
     width: 28px;
     cursor: pointer;
   }
