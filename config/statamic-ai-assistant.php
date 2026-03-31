@@ -22,7 +22,7 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Translation functionality 
+    | Translation functionality
     |--------------------------------------------------------------------------
     |
     | This allows you to disable the translations functionality.
@@ -120,5 +120,38 @@ return [
 
     'temperature' => env('STATAMIC_AI_ASSISTANT_TEMPERATURE', 0.5),
     'max_tokens' => env('STATAMIC_AI_ASSISTANT_MAX_TOKENS', 1000),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Translation Settings
+    |--------------------------------------------------------------------------
+    |
+    | Configure how the bulk translation system works.
+    |
+    | translation_mode: 'sync' (always synchronous), 'async' (always use queue),
+    |                   'auto' (sync for small batches, async for larger)
+    | translation_sync_threshold: when mode is 'auto', batches above this count use async
+    | translation_queue: the queue name for async translation jobs
+    |
+    */
+
+    'translation_mode' => env('STATAMIC_AI_ASSISTANT_TRANSLATION_MODE', 'auto'),
+    'translation_sync_threshold' => 3,
+    'translation_queue' => env('STATAMIC_AI_ASSISTANT_TRANSLATION_QUEUE', 'translations'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Linked entries (DeepL translation graph depth)
+    |--------------------------------------------------------------------------
+    |
+    | When translating an entry, linked entries (entries/link fields, Bard entry
+    | links, nested replicator data) can be translated recursively so IDs point
+    | to localized siblings. This value is the maximum depth of that recursion
+    | (0 = only remap IDs if a translation already exists; 1 = one hop, default).
+    | Admins override via .env — the Control Panel does not expose this control.
+    |
+    */
+
+    'linked_entries_max_depth' => max(0, min(5, (int) env('STATAMIC_AI_ASSISTANT_LINKED_ENTRIES_MAX_DEPTH', 1))),
 
 ];

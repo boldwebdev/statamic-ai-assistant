@@ -2,6 +2,10 @@ import AiTextarea from "./components/AiTextarea.vue";
 import AiText from "./components/AiText.vue";
 import BardAiButton from "./components/BardAiButton.vue";
 import BardTranslationButton from "./components/BardTranslationButton.vue";
+import TranslationPage from "./components/TranslationPage.vue";
+import TranslationActionPreflightFieldtype from "./components/TranslationActionPreflightFieldtype.vue";
+import TranslationTargetLanguagesFieldtype from "./components/TranslationTargetLanguagesFieldtype.vue";
+import TranslationProgress from "./components/TranslationProgress.vue";
 import { BoldAiBardService } from "./BoldAiBardService";
 import { TranslationInfoDisplay } from "./utils/TranslationInfoDisplay";
 
@@ -9,6 +13,20 @@ Statamic.booting(() => {
   Statamic.$components.register("ai_textarea-fieldtype", AiTextarea);
 
   Statamic.$components.register("ai_text-fieldtype", AiText);
+
+  Statamic.$components.register("translation-page", TranslationPage);
+
+  Statamic.$components.register("translation-progress", TranslationProgress);
+
+  Statamic.$components.register(
+    "translation_action_preflight-fieldtype",
+    TranslationActionPreflightFieldtype
+  );
+
+  Statamic.$components.register(
+    "translation_target_languages-fieldtype",
+    TranslationTargetLanguagesFieldtype
+  );
 
   Statamic.$bard.addExtension(() => BoldAiBardService);
 
@@ -29,10 +47,8 @@ Statamic.booting(() => {
   });
 });
 
-
 // Initialize translation-related services
 Statamic.booted(() => {
-  // Initialize translation info display
   const translationInfoDisplay = new TranslationInfoDisplay();
   translationInfoDisplay.init();
 });

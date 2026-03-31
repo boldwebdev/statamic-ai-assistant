@@ -1,7 +1,7 @@
 <template>
     <div>
         <div ref="translationContainer" class="class-type-wrapper translate-me__d-flex">
-            <button v-tooltip="'AI Translation'" type="button" @click="toggleTranslateDropdown"
+            <button v-tooltip="'DeepL Translation'" type="button" @click="toggleTranslateDropdown"
                 class="bard-toolbar-button translate-me__btn translate-me__btn--bard">
                 <Translation class="w-4 h-4 text-green-600" />
             </button>
@@ -66,29 +66,27 @@ export default {
             this.selectedLanguage = lang;
             this.showTranslateDropdown = false;
             this.loadingTranslation = true;
-            try {
-                await axios.post('/cp/prompt', {
-                    // in the future let's integrate deepl api: https://developers.deepl.com/docs/xml-and-html-handling/html
-                    title: `ONLY TRANSLATE THIS HTML in the language with ISO: ${this.selectedLanguage} AND NOTHING ELSE!! KEEP THE HTML STRUCTURE EXACTLY THE SAME. Don't answer! only translate!! Text to translate:` + this.value
-                }).then((response) => {
-                    if (!response?.data || !response.data.content ||response.data.content === '') {
-                        throw new Error('Empty response from API. Verify your API key.');
-                    }else{
-                        this.result = response.data.content;
-                        this.editor.commands.WriteInBard(this.result);
-                        Statamic.$toast.success(__('Your content has been translated.'));
-                    }
 
-                }).catch((error) => {
-                    Statamic.$toast.error(
-                        error?.response?.data.error || error.message || __('Something went wrong.'),
-                        { duration: 10000 }
-                    );
-                }).finally(() => {
-                    this.loadingTranslation = false;
-                })
+            try {
+                const response = await axios.post('/cp/ai-translations/field', {
+                    text: this.value,
+                    target_locale: lang,
+                });
+
+                if (!response?.data?.translated || response.data.translated === '') {
+                    throw new Error('Empty response from DeepL. Verify your API key.');
+                }
+
+                this.result = response.data.translated;
+                this.editor.commands.WriteInBard(this.result);
+                Statamic.$toast.success(__('Your content has been translated.'));
             } catch (error) {
-                console.error("Error generating AI text:", error);
+                Statamic.$toast.error(
+                    error?.response?.data?.error || error.message || __('Translation failed.'),
+                    { duration: 10000 }
+                );
+            } finally {
+                this.loadingTranslation = false;
             }
         },
     }

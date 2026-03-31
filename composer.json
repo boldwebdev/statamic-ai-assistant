@@ -15,7 +15,8 @@
     "require": {
         "statamic/cms": "^5.0",
         "edalzell/forma": "^3.1",
-        "lucianotonet/groq-laravel": "^0.0.10"
+        "lucianotonet/groq-laravel": "^0.0.10",
+        "deeplcom/deepl-php": "^1.9"
     },
     "require-dev": {
         "orchestra/testbench": "^9.0"
