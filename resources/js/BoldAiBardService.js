@@ -1,4 +1,5 @@
 import axios from "axios";
+import { applyBardWriteContent } from "./utils/applyBardWriteContent";
 import { normalizeAiOutput } from "./utils/normalizeAiOutput";
 
 export const BoldAiBardService = ({ tiptap }) => {
@@ -28,7 +29,9 @@ export const BoldAiBardService = ({ tiptap }) => {
         WriteInBard: (content) => ({ editor }) => {
           const html =
             typeof content === "string" ? normalizeAiOutput(content) : content;
-          editor.commands.setContent(html);
+          applyBardWriteContent(editor, () => {
+            editor.chain().focus().setContent(html).run();
+          });
           return true;
         },
 
