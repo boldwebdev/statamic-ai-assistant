@@ -1,4 +1,5 @@
 import axios from "axios";
+import { normalizeAiOutput } from "../utils/normalizeAiOutput";
 
 export default {
   data() {
@@ -57,7 +58,10 @@ export default {
           throw new Error(__('Empty response from DeepL. Verify your API key.'));
         }
 
-        this.result = response.data.translated;
+        this.result =
+          typeof this.normalizeAiFieldValue === "function"
+            ? this.normalizeAiFieldValue(response.data.translated)
+            : normalizeAiOutput(response.data.translated);
 
         if (this.validateResult) {
           this.validateResult();
@@ -76,16 +80,23 @@ export default {
       }
     },
     handleClickOutside(event) {
-      if (this.$refs.translationContainer && !this.$refs.translationContainer.contains(event.target)) {
+      if (!this.showTranslateDropdown) {
+        return;
+      }
+      const el = this.$refs.translationContainer;
+      if (!el || !(el instanceof Node)) {
+        return;
+      }
+      if (!el.contains(event.target)) {
         this.showTranslateDropdown = false;
       }
-    }
+    },
   },
   mounted() {
     this.getLocalizations();
     document.addEventListener('click', this.handleClickOutside);
   },
-  beforeDestroy() {
+  beforeUnmount() {
     document.removeEventListener('click', this.handleClickOutside);
   }
 };

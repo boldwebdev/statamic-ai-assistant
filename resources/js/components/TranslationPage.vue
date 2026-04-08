@@ -16,8 +16,18 @@
           <li>{{ __('Overwrite confirmation bullet 2') }}</li>
         </ul>
         <div class="translation-page__modal-actions">
-          <button type="button" class="btn" :disabled="bulkRequestInFlight" @click="showOverwriteConfirm = false">{{ __('Cancel') }}</button>
-          <button type="button" class="btn-primary" :disabled="bulkRequestInFlight" @click="confirmOverwriteAndStart">{{ __('Yes, replace existing translations') }}</button>
+          <Button
+            variant="default"
+            :disabled="bulkRequestInFlight"
+            :text="__('Cancel')"
+            @click="showOverwriteConfirm = false"
+          />
+          <Button
+            variant="primary"
+            :disabled="bulkRequestInFlight"
+            :text="__('Yes, replace existing translations')"
+            @click="confirmOverwriteAndStart"
+          />
         </div>
       </div>
     </div>
@@ -46,7 +56,7 @@
       <div v-else-if="deeplUsage && deeplUsage.error" class="translation-page__usage-card translation-page__usage-card--error">
         <div class="translation-page__usage-error-row">
           <span class="translation-page__usage-error-text">{{ __('Could not load DeepL usage.') }}</span>
-          <button type="button" class="btn" :disabled="translationUiLocked" @click="loadDeeplUsage">{{ __('Refresh') }}</button>
+          <Button variant="default" size="sm" :disabled="translationUiLocked" :text="__('Refresh')" @click="loadDeeplUsage" />
         </div>
         <p class="translation-page__usage-error-detail">{{ deeplUsage.error }}</p>
       </div>
@@ -64,7 +74,14 @@
               >
             </p>
           </div>
-          <button type="button" class="btn translation-page__usage-refresh" :disabled="translationUiLocked" @click="loadDeeplUsage">{{ __('Refresh') }}</button>
+          <Button
+            variant="default"
+            size="sm"
+            class="translation-page__usage-refresh"
+            :disabled="translationUiLocked"
+            :text="__('Refresh')"
+            @click="loadDeeplUsage"
+          />
         </div>
         <div v-if="deeplUsage.any_limit_reached" class="translation-page__usage-alert" role="alert">
           {{ __('DeepL usage limit reached') }}
@@ -131,7 +148,7 @@
       </div>
       <div v-else-if="deeplUsage && deeplUsage.enabled && !usageCharacter" class="translation-page__usage-card translation-page__usage-card--muted">
         <p class="translation-page__usage-muted-text">{{ __('DeepL usage not available for account') }}</p>
-        <button type="button" class="btn" :disabled="translationUiLocked" @click="loadDeeplUsage">{{ __('Refresh') }}</button>
+        <Button variant="default" size="sm" :disabled="translationUiLocked" :text="__('Refresh')" @click="loadDeeplUsage" />
       </div>
     </div>
 
@@ -218,10 +235,23 @@
             class="translation-page__entry-row"
           >
             <span class="translation-page__col-check">
-              <input type="checkbox" :value="entry.id" v-model="selectedEntries" />
+              <input
+                type="checkbox"
+                :value="entry.id"
+                v-model="selectedEntries"
+                @change="syncSelectAllFromSelectedEntries"
+              />
             </span>
             <span class="translation-page__col-title">
-              <span class="translation-page__entry-title">{{ entry.title }}</span>
+              <span
+                class="translation-page__entry-title"
+                role="button"
+                tabindex="0"
+                :aria-label="__('Toggle entry selection')"
+                @click="toggleEntrySelection(entry)"
+                @keydown.enter.prevent="toggleEntrySelection(entry)"
+                @keydown.space.prevent="toggleEntrySelection(entry)"
+              >{{ entry.title }}</span>
               <a
                 :href="entry.edit_url"
                 target="_blank"
@@ -274,13 +304,13 @@
       </div>
 
       <div class="translation-page__actions">
-        <button
-          class="btn-primary"
+        <Button
+          variant="primary"
           :disabled="selectedEntries.length === 0 || translationUiLocked"
           @click="goToConfigure"
         >
           {{ __('Continue') }} ({{ selectedEntries.length }} {{ __('selected') }})
-        </button>
+        </Button>
       </div>
     </div>
 
@@ -306,11 +336,11 @@
         <p class="translation-page__help">{{ __('Target languages help') }}</p>
         <translation-target-language-list
           :sites="targetSiteOptions"
-          :value="destinationLocales"
+          :value="normalizedDestinationLocales"
           :conflict-predicate="targetLocaleHasConflict"
-          @input="destinationLocales = $event"
+          @input="onDestinationLocalesInput"
         />
-        <p v-if="destinationLocales.length === 0" class="translation-page__error-inline translation-page__error-inline--soft">
+        <p v-if="normalizedDestinationLocales.length === 0" class="translation-page__error-inline translation-page__error-inline--soft">
           {{ __('Select at least one target language') }}
         </p>
       </div>
@@ -350,14 +380,13 @@
       </div>
 
       <div class="translation-page__actions">
-        <button class="btn" :disabled="bulkRequestInFlight" @click="step = 1">{{ __('Back') }}</button>
-        <button
-          class="btn-primary"
+        <Button variant="default" :disabled="bulkRequestInFlight" :text="__('Back')" @click="step = 1" />
+        <Button
+          variant="primary"
           :disabled="!canStartTranslation || bulkRequestInFlight"
+          :text="__('Start translation')"
           @click="onClickStartTranslation"
-        >
-          {{ __('Start translation') }}
-        </button>
+        />
       </div>
     </div>
 
@@ -380,8 +409,8 @@
       ></translation-progress>
 
       <div v-if="isTranslationDone" class="translation-page__actions">
-        <button class="btn" @click="resetWizard">{{ __('Translate more') }}</button>
-        <button class="btn-primary" @click="goToCollection">{{ __('View entries') }}</button>
+        <Button variant="default" :text="__('Translate more')" @click="resetWizard" />
+        <Button variant="primary" :text="__('View entries')" @click="goToCollection" />
       </div>
     </div>
   </div>
@@ -389,11 +418,14 @@
 
 <script>
 import axios from 'axios';
+import { Button } from '@statamic/cms/ui';
 import TranslationProgress from './TranslationProgress.vue';
 import TranslationTargetLanguageList from './TranslationTargetLanguageList.vue';
+import { normalizeDestinationLocales } from '../utils/normalizeDestinationLocales.js';
 
 export default {
   components: {
+    Button,
     TranslationProgress,
     TranslationTargetLanguageList,
   },
@@ -486,6 +518,10 @@ export default {
       return (this.availableSites || []).filter((s) => s.locale !== this.sourceLocale);
     },
 
+    normalizedDestinationLocales() {
+      return normalizeDestinationLocales(this.destinationLocales);
+    },
+
     filteredEntries() {
       if (!this.hideFullyTranslated) {
         return this.collectionEntries;
@@ -505,7 +541,7 @@ export default {
     },
 
     totalOperations() {
-      const m = (this.destinationLocales || []).length;
+      const m = this.normalizedDestinationLocales.length;
       if (m === 0) {
         return 0;
       }
@@ -515,7 +551,7 @@ export default {
     estimateSummary() {
       const n = this.selectedEntries.length;
       const langs = this.destinationLanguageNames;
-      if (!n || !(this.destinationLocales || []).length) {
+      if (!n || !this.normalizedDestinationLocales.length) {
         return this.__('Choose sources and targets to see the estimate.');
       }
       return this.__('Will translate :entries entries into :langs (:ops operations) using DeepL.', {
@@ -527,7 +563,7 @@ export default {
 
     destinationLanguageNames() {
       const names = [];
-      (this.destinationLocales || []).forEach((loc) => {
+      this.normalizedDestinationLocales.forEach((loc) => {
         const site = this.availableSites.find((s) => s.locale === loc);
         names.push(site ? site.name : loc);
       });
@@ -538,7 +574,7 @@ export default {
       return this.selectedEntries.some((id) => {
         const entry = this.collectionEntries.find((e) => e.id === id);
         if (!entry) return false;
-        return this.destinationLocales.some((loc) => {
+        return this.normalizedDestinationLocales.some((loc) => {
           const site = this.availableSites.find((s) => s.locale === loc);
           if (!site) return false;
           return entry.locales[site.handle] === 'translated';
@@ -551,7 +587,7 @@ export default {
         return [];
       }
       const locales = [];
-      (this.destinationLocales || []).forEach((loc) => {
+      this.normalizedDestinationLocales.forEach((loc) => {
         const site = this.availableSites.find((s) => s.locale === loc);
         if (!site) {
           return;
@@ -609,11 +645,11 @@ export default {
       if (
         this.selectedEntries.length === 0 ||
         !this.sourceLocale ||
-        this.destinationLocales.length === 0
+        this.normalizedDestinationLocales.length === 0
       ) {
         return false;
       }
-      if (this.destinationLocales.some((l) => l === this.sourceLocale)) {
+      if (this.normalizedDestinationLocales.some((l) => l === this.sourceLocale)) {
         return false;
       }
       if (this.hasConflictWithoutOverwrite) {
@@ -667,7 +703,7 @@ export default {
     this.loadDeeplUsage();
   },
 
-  beforeDestroy() {
+  beforeUnmount() {
     this.stopPolling();
   },
 
@@ -720,7 +756,7 @@ export default {
       if (this.overwrite || !site) {
         return false;
       }
-      if (!(this.destinationLocales || []).includes(site.locale)) {
+      if (!this.normalizedDestinationLocales.includes(site.locale)) {
         return false;
       }
       return this.selectedEntries.some((id) => {
@@ -740,8 +776,12 @@ export default {
       this.ensureDestinationDefaults();
     },
 
+    onDestinationLocalesInput(v) {
+      this.destinationLocales = normalizeDestinationLocales(v);
+    },
+
     ensureDestinationDefaults() {
-      if (this.destinationLocales.length > 0) {
+      if (this.normalizedDestinationLocales.length > 0) {
         return;
       }
       const targets = (this.availableSites || [])
@@ -817,6 +857,24 @@ export default {
       }
     },
 
+    syncSelectAllFromSelectedEntries() {
+      const ids = this.filteredEntries.map((e) => e.id);
+      this.selectAll =
+        ids.length > 0 && ids.every((rowId) => this.selectedEntries.includes(rowId));
+    },
+
+    toggleEntrySelection(entry) {
+      const id = entry.id;
+      const next = new Set(this.selectedEntries);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      this.selectedEntries = Array.from(next);
+      this.syncSelectAllFromSelectedEntries();
+    },
+
     applyFilter() {
       this.selectedEntries = [];
       this.selectAll = false;
@@ -857,7 +915,7 @@ export default {
 
       const pairs = [];
       for (const entryId of this.selectedEntries) {
-        for (const locale of this.destinationLocales) {
+        for (const locale of this.normalizedDestinationLocales) {
           pairs.push({ entryId, locale });
         }
       }

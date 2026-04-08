@@ -1,269 +1,271 @@
 <template>
     <div class="bold-ai-statamic-assistant">
-
-  
       <div ref="aiBoldContainer" class="ai-bold-wrapper">
-      <!-- AI Icon Button -->
-      <div class="ai-icon-wrapper">
-        <button type="button" @click="openModal(() => internalValue)">
-          <AiIcon class="w-5 h-5 text-blue v-popper--has-tooltip" />
-        </button>
-      </div>
-  
-      <!-- Translation Button & Dropdown -->
-      <div
-        v-show="languages.length > 0"
-        :class="!internalValue ? 'opacity-50' : ''"
-        class="translation-wrapper"
-      >
-        <button
-          :disabled="!internalValue"
-          type="button"
-          @click="toggleTranslateDropdown"
-          class="button-translate"
+        <!-- AI Icon Button -->
+        <div class="ai-icon-wrapper">
+          <button type="button" @click="openModal(() => internalValue)">
+            <AiIcon class="size-4 text-blue" />
+          </button>
+        </div>
+
+        <!-- Translation Button & Dropdown -->
+        <div
+          ref="translationContainer"
+          v-show="languages.length > 0"
+          :class="!internalValue ? 'opacity-50' : ''"
+          class="translation-wrapper"
         >
-          <Translation class="w-4 h-4 text-green-600" />
-        </button>
-        <div v-if="showTranslateDropdown" class="translate-dropdown vs__dropdown-menu">
-          <div
-            v-for="lang in languages"
-            :key="lang.code"
-            class="translate-option vs__dropdown-option"
-            @click="translateTo(lang.code)"
+          <button
+            :disabled="!internalValue"
+            type="button"
+            @click="toggleTranslateDropdown"
           >
-            {{ lang.label }}
+            <Translation class="w-4 h-4 text-green-600" />
+          </button>
+          <div v-if="showTranslateDropdown" class="ai-translate-dropdown">
+            <div
+              v-for="lang in languages"
+              :key="lang.code"
+              class="ai-translate-dropdown__item"
+              @click="translateTo(lang.code)"
+            >
+              {{ lang.label }}
+            </div>
           </div>
         </div>
       </div>
-    </div>
-          <!-- Main editor (textarea vs. input) -->
-          <div class="relative">
-        <input
+
+      <!-- Main editor (textarea vs. input) -->
+      <div class="relative">
+        <ui-input
           v-if="inputType === 'input'"
           key="input"
           ref="editor"
-          v-model="internalValue"
-          class="input-text"
+          :model-value="internalValue"
+          @update:model-value="internalValue = $event"
         />
-  
-        <textarea
+        <ui-textarea
           v-else
           key="textarea"
           ref="editor"
-          v-model="internalValue"
-          rows="4"
-          class="input-text"
-        ></textarea>
-  
-        <!-- Loading overlay -->
-        <div
-          v-if="loadingTranslation"
-          class="flex absolute top-0 left-0 justify-center items-center w-full h-full"
-        >
-          <span class="z-10 loader"></span>
-          <div class="absolute top-0 left-0 w-full h-full bg-black rounded-sm opacity-50"></div>
-        </div>
+          :model-value="internalValue"
+          @update:model-value="internalValue = $event"
+          :rows="4"
+        />
+
+        <AiModalLoadingOverlay
+          :show="loadingTranslation"
+          compact
+          :label="transWithFallback('translating', 'Translating…')"
+        />
       </div>
-  
+
       <!-- AI Prompt/Result/Refactor Modal -->
-      <modal
-        v-if="showModal"
-        name="ai-prompt-modal"
-        width="600px"
-        height="auto"
-        @closed="closeModal"
+      <ui-modal
+        ref="aiModal"
+        v-model:open="showModal"
+        @dismissed="onModalDismissed"
+        :title="modalTitle"
+        blur
       >
         <div
-          slot-scope="{ close }"
-          class="relative p-4"
-          @keyup.enter.ctrl="handleEnter(close)"
-          @keyup.enter.meta="handleEnter(close)"
+          class="ai-modal-body"
+          :class="{ 'ai-modal-body--busy': loading }"
+          @keyup.enter.ctrl="handleEnter()"
+          @keyup.enter.meta="handleEnter()"
         >
-          <button
-            type="button"
-            class="absolute text-gray-500 absolute-btn-close hover:text-gray-700"
-            @click="closeModal(close)"
-          >
-            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M6 18L18 6M6 6l12 12"
-              ></path>
-            </svg>
-          </button>
-  
+          <AiModalLoadingOverlay
+            :show="loading"
+            :label="transWithFallback('generating', 'Generating…')"
+          />
+
           <!-- Prompt mode -->
-          <div v-if="modalMode === 'prompt'">
-            <h3 class="mb-2 text-lg font-bold">
-              {{ transWithFallback('title', 'AI assistant') }}
-            </h3>
-            <p class="mb-4 help-block">
-              {{ transWithFallback('prompt_placeholder', 'Describe the article you want to generate') }}
-            </p>
-            <textarea rows="4" v-model="prompt" class="input-text"></textarea>
+          <div v-if="modalMode === 'prompt'" class="space-y-4">
+            <ui-description :text="transWithFallback('prompt_placeholder', 'Describe the article you want to generate')" />
+            <ui-textarea
+              v-model="prompt"
+              :rows="4"
+              :focus="true"
+              :placeholder="transWithFallback('prompt_textarea_placeholder', 'Enter your prompt...')"
+            />
           </div>
-  
+
           <!-- Result mode -->
-          <div v-else-if="modalMode === 'result'">
-            <textarea
-              :disabled="hadInitialValue"
-              rows="4"
-              ref="resulteditor"
+          <div v-else-if="modalMode === 'result'" class="space-y-4">
+            <ui-description :text="transWithFallback('result_description', 'Review the generated content below.')" />
+            <ui-textarea
               v-model="result"
-              class="mt-1 input-text text-area-result"
-            ></textarea>
+              :rows="6"
+              ref="resulteditor"
+              :read-only="hadInitialValue"
+            />
           </div>
-  
+
           <!-- Refactor mode -->
-          <div v-else-if="modalMode === 'refactor'">
-            <label class="block mb-1 font-bold">{{ transWithFallback('current_text', 'Current Text') }}</label>
-            <p class="mb-4 help-block">
-              {{ transWithFallback('prompt_placeholder', 'Describe the article you want to generate') }}
-            </p>
-            <textarea
-              rows="4"
-              class="mt-1 input-text text-area-result"
-              :value="result"
-              disabled
-            ></textarea>
-            <div class="flex justify-between items-center">
-              <label class="block mt-4 mb-1 font-bold">
-                {{ transWithFallback('edit', 'Describe your adjustment.') }}
-                <span
-                  class="inline-flex justify-center items-center ml-1 w-5 h-5 text-white rounded-full cursor-help"
-                  :title="transWithFallback('refactor_description','Enter an instruction to update the current text.')"
-                >?</span>
-              </label>
-            </div>
-            <textarea
-              rows="4"
-              v-model="refactorPrompt"
-              class="mt-1 input-text"
-              :placeholder="transWithFallback('refactor_placeholder','Describe your adjustment')"
-            ></textarea>
-          </div>
-  
-          <!-- Modal buttons -->
-          <div class="flex justify-between mt-4 space-x-2">
-            <!-- Prompt -->
-            <template v-if="modalMode === 'prompt'">
-              <span></span>
-              <button
-                type="button"
-                @click="submitPrompt(close)"
-                class="btn-primary"
-                :disabled="loading || prompt === ''"
-              >
-                <template v-if="loading"><span class="loader"></span></template>
-                <span v-else>
-                  {{ transWithFallback('go', 'go!') }} [<kbd>Ctrl</kbd> + <kbd>Enter</kbd>]
-                </span>
-              </button>
-            </template>
-  
-            <!-- Result -->
-            <template v-else-if="modalMode === 'result'">
-              <button type="button" @click="resetToPrompt()" class="btn">
-                {{ transWithFallback('back', 'Back') }}
-              </button>
-              <button type="button" @click="setRefactorMode()" class="btn">
-                {{ transWithFallback('refactor', 'Refactor') }}
-              </button>
-              <button type="button" @click="validateResult(close)" class="btn-primary">
-                {{ transWithFallback('apply_changes', 'Validate') }}
-              </button>
-            </template>
-  
-            <!-- Refactor -->
-            <template v-else-if="modalMode === 'refactor'">
-              <button type="button" @click="cancelRefactor()" class="btn">
-                {{ transWithFallback('back', 'Back') }}
-              </button>
-              <button
-                type="button"
-                @click="submitRefactor(close)"
-                class="btn-primary"
-                :disabled="loading || refactorPrompt === ''"
-              >
-                <template v-if="loading"><span class="loader"></span></template>
-                <span v-else>{{ transWithFallback('apply_refactor', 'Apply Refactor') }}</span>
-              </button>
-            </template>
+          <div v-else-if="modalMode === 'refactor'" class="space-y-4">
+            <ui-field :label="transWithFallback('current_text', 'Current text')">
+              <ui-textarea
+                :model-value="result"
+                :rows="4"
+                read-only
+              />
+            </ui-field>
+            <ui-field
+              :label="transWithFallback('edit', 'Describe your adjustment')"
+              :instructions="transWithFallback('refactor_description', 'Enter an instruction to update the current text.')"
+            >
+              <ui-textarea
+                ref="refactorPromptInput"
+                v-model="refactorPrompt"
+                :rows="3"
+                :placeholder="transWithFallback('refactor_placeholder', 'Describe your adjustment')"
+              />
+            </ui-field>
           </div>
         </div>
-      </modal>
+
+        <template #footer>
+          <div class="flex items-center pt-3 pb-1" :class="modalMode === 'prompt' ? 'justify-end' : 'justify-between'">
+            <!-- Prompt -->
+            <template v-if="modalMode === 'prompt'">
+              <ui-button
+                :text="transWithFallback('go', 'Generate')"
+                variant="primary"
+                icon="ai-sparks"
+                :loading="loading"
+                :disabled="loading || prompt === ''"
+                @click="submitPrompt()"
+              />
+            </template>
+
+            <!-- Result -->
+            <template v-else-if="modalMode === 'result'">
+              <ui-button
+                :text="transWithFallback('back', 'Back')"
+                variant="ghost"
+                @click="resetToPrompt()"
+              />
+              <div class="flex items-center space-x-3">
+                <ui-button
+                  :text="transWithFallback('refactor', 'Refactor')"
+                  @click="setRefactorMode()"
+                />
+                <ui-button
+                  :text="transWithFallback('apply_changes', 'Apply')"
+                  variant="primary"
+                  @click="validateResult()"
+                />
+              </div>
+            </template>
+
+            <!-- Refactor -->
+            <template v-else-if="modalMode === 'refactor'">
+              <ui-button
+                :text="transWithFallback('back', 'Back')"
+                variant="ghost"
+                @click="cancelRefactor()"
+              />
+              <ui-button
+                :text="transWithFallback('apply_refactor', 'Apply Refactor')"
+                variant="primary"
+                :loading="loading"
+                :disabled="loading || refactorPrompt === ''"
+                @click="submitRefactor()"
+              />
+            </template>
+          </div>
+        </template>
+      </ui-modal>
     </div>
   </template>
-  
+
   <script>
   import axios from "axios";
+  import { normalizeAiPlainTextOutput, normalizeAiOutput } from "../utils/normalizeAiOutput";
+  import { FieldtypeMixin as StatamicFieldtypeMixin } from '@statamic/cms';
   import aiModalMixin from "../mixins/aiModalMixin";
   import aiTranslationMixin from "../mixins/aiTranslationMixin";
   import Translation from "./icons/TranslationIcon.vue";
   import AiIcon from "./icons/AiIcon.vue";
-  
+  import AiModalLoadingOverlay from "./AiModalLoadingOverlay.vue";
+
   export default {
     name: "AiInputWrapper",
-    mixins: [Fieldtype, aiModalMixin, aiTranslationMixin],
-    components: { Translation, AiIcon },
-  
+    mixins: [StatamicFieldtypeMixin, aiModalMixin, aiTranslationMixin],
+    components: { Translation, AiIcon, AiModalLoadingOverlay },
+
     props: {
       value: { type: String, default: "" },
-      inputType: { type: String, default: "textarea" }, // "input" or "textarea"
+      inputType: { type: String, default: "textarea" },
     },
-  
+
     data() {
       return {
         internalValue: this.value,
       };
     },
-  
+
+    computed: {
+      modalTitle() {
+        if (this.modalMode === 'result') return this.transWithFallback('result_title', 'Generated content');
+        if (this.modalMode === 'refactor') return this.transWithFallback('refactor_title', 'Refactor content');
+        return this.transWithFallback('title', 'AI assistant');
+      },
+    },
+
     watch: {
-      // Sync local → parent
       internalValue(newVal) {
         this.update(newVal);
       },
-      // Sync parent → local
       value(newVal) {
         if (newVal !== this.internalValue) {
           this.internalValue = newVal;
         }
       },
     },
-  
+
     mounted() {
       this.getLocalizations();
       this.$nextTick(() => {
-        // grid-cell need a special treatment
         const group = this.$el.closest('.grid-cell') || this.$el.closest('.form-group');
         if (!group) return;
 
         const label = group.querySelector('label');
         const container = this.$refs.aiBoldContainer;
         if (label && container) {
-          // modern browsers
           if (label.prepend) {
             label.prepend(container);
           } else {
-            // older browsers
             label.insertBefore(container, label.firstChild);
           }
         }
       });
 
       this.editor = {
-        commands: { focus: () => this.$refs.editor.focus() },
-        setEditable: e => (this.$refs.editor.disabled = !e),
+        commands: { focus: () => this.focusStatamicFieldRef('editor') },
+        setEditable: () => {},
       };
       this.resulteditor = {
-        commands: { focus: () => this.$refs.resulteditor?.focus() },
+        commands: { focus: () => this.focusStatamicFieldRef('resulteditor') },
       };
     },
-  
+
     methods: {
-      async submitPrompt(close) {
+      /**
+       * ai_text / ai_textarea: plain text (no HTML). Bard fieldtypes override via missing normalizeAiFieldValue.
+       */
+      normalizeAiFieldValue(value) {
+        if (this.inputType === "textarea") {
+          return normalizeAiPlainTextOutput(value);
+        }
+        if (this.inputType === "input") {
+          const plain = normalizeAiPlainTextOutput(value);
+          return typeof plain === "string" ? plain.replace(/\s+/g, " ").trim() : plain;
+        }
+        return normalizeAiOutput(value);
+      },
+
+      async submitPrompt() {
         if (!this.prompt) return;
         this.loading = true;
         try {
@@ -272,19 +274,24 @@
             prompt = "generate MAXIMUM 12 words! " + prompt;
           }
           const { data } = await axios.post("/cp/prompt", { title: prompt });
-          if (!data.content || data.content.trim() === "") throw new Error("Empty response from API. Verify your API key");
-          this.result = data.content;
+          if (!data.content || String(data.content).trim() === "") {
+            throw new Error("Empty response from API. Verify your API key");
+          }
+          const normalized = this.normalizeAiFieldValue(data.content);
+          if (!normalized || String(normalized).trim() === "") {
+            throw new Error("Empty response from API. Verify your API key");
+          }
+          this.result = normalized;
           Statamic.$toast.success(__('Your content has been generated.'));
           this.modalMode = "result";
         } catch (err) {
           Statamic.$toast.error(err.response?.data.error || err.message, { duration: 10000 });
         } finally {
           this.loading = false;
-          this.resulteditor.commands.focus();
         }
       },
-  
-      async submitRefactor(close) {
+
+      async submitRefactor() {
         if (!this.refactorPrompt) return;
         this.loading = true;
         try {
@@ -296,74 +303,93 @@
             text: this.result,
             prompt: refactorPrompt,
           });
-          if (!data.content || data.content.trim() === "") throw new Error("Empty response from API. Verify your API key");
-          this.result = data.content;
+          if (!data.content || String(data.content).trim() === "") {
+            throw new Error("Empty response from API. Verify your API key");
+          }
+          const normalized = this.normalizeAiFieldValue(data.content);
+          if (!normalized || String(normalized).trim() === "") {
+            throw new Error("Empty response from API. Verify your API key");
+          }
+          this.result = normalized;
           Statamic.$toast.success(__('Your content has been refactored.'));
           this.modalMode = "result";
         } catch (err) {
           Statamic.$toast.error(err.response?.data.error || err.message, { duration: 10000 });
         } finally {
           this.loading = false;
-          this.resulteditor.commands.focus();
         }
       },
-  
-      validateResult(close) {
-        this.update(this.result);
-        this.editor.commands.focus();
-        this.editor.setEditable(true);
-        this.closeModal(close);
+
+      validateResult() {
+        try {
+          this.update(this.normalizeAiFieldValue(this.result));
+        } finally {
+          if (this.showModal) {
+            this.closeModal();
+          }
+        }
+        // After the modal tears down (when it was open), focus the field — avoids CP focus trap and
+        // ui-textarea ref.focus being a boolean prop, not a function.
+        this.$nextTick(() => {
+          this.editor.commands.focus();
+          this.editor.setEditable(true);
+        });
       },
     },
   };
   </script>
-  
+
   <style>
-  label:has(.ai-bold-wrapper){
-    display: flex!important;
+  /*
+   * Icons are prepended into the <label>; we use flex order so the visible order is: title text, then icons.
+   * Statamic often uses justify-between on labels — that pushes title and icons to opposite ends; override so
+   * they stay inline next to each other.
+   */
+  label:has(.ai-bold-wrapper) {
+    display: flex !important;
     align-items: center;
-    gap: 10px;
+    justify-content: flex-start !important;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    width: 100%;
+    box-sizing: border-box;
   }
 
-  .cursor-help {
-    background: #242628;
-  }
-
-  .ai-bold-wrapper{
-    display:flex;
+  .ai-bold-wrapper {
+    display: flex;
     align-items: center;
+    flex-shrink: 0;
+    gap: 2px;
     order: 2;
   }
 
+  /* Fieldtype icon buttons */
   .ai-icon-wrapper,
   .translation-wrapper {
-    border-radius: .25rem;
-    padding: 0 .25rem;
-    width: 28px;
-    cursor: pointer;
+    position: relative;
   }
 
-  .ai-icon-wrapper>button,
-  .translation-wrapper>button {
+  .ai-icon-wrapper > button,
+  .translation-wrapper > button {
     display: flex;
-    justify-content: center;
     align-items: center;
-    aspect-ratio: 1/1;
-    height: 100%;
-    width: 100%;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    border: none;
+    border-radius: 0.375rem;
+    background: transparent;
+    cursor: pointer;
+    transition: background 0.15s;
   }
 
-  /* default (light) */
-  :root .ai-icon-wrapper:hover,
-  :root .translation-wrapper:hover {
-    background-color: rgb(245 248 252 / var(--tw-bg-opacity));
+  .ai-icon-wrapper > button:hover,
+  .translation-wrapper > button:hover {
+    background: rgba(0, 0, 0, 0.05);
   }
 
-  /* dark theme */
-  .dark .ai-icon-wrapper:hover,
-  .dark .translation-wrapper:hover {
-    background-color: rgb(36 38 40 / var(--tw-bg-opacity));
+  .dark .ai-icon-wrapper > button:hover,
+  .dark .translation-wrapper > button:hover {
+    background: rgba(255, 255, 255, 0.07);
   }
-
   </style>
-  

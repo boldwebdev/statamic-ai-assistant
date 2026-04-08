@@ -17,29 +17,17 @@
 </template>
 
 <script>
+import { FieldtypeMixin as StatamicFieldtypeMixin } from '@statamic/cms';
 import TranslationTargetLanguageList from './TranslationTargetLanguageList.vue';
+import { normalizeDestinationLocales } from '../utils/normalizeDestinationLocales.js';
 
 const EVENT = 'statamic-ai-assistant.translation-preflight';
 
-function normalizeLocales(raw) {
-  if (!raw) {
-    return [];
-  }
-  if (!Array.isArray(raw)) {
-    return raw !== '' && raw !== null ? [raw] : [];
-  }
-  return [...new Set(raw.filter(Boolean))];
-}
-
 export default {
-  mixins: [Fieldtype],
+  mixins: [StatamicFieldtypeMixin],
 
   components: {
     TranslationTargetLanguageList,
-  },
-
-  inject: {
-    storeName: { default: null },
   },
 
   data() {
@@ -50,11 +38,7 @@ export default {
 
   computed: {
     publishValues() {
-      const name = this.storeName;
-      if (!name || !this.$store.state.publish[name]) {
-        return {};
-      }
-      return this.$store.state.publish[name].values || {};
+      return this.publishContainer?.values || {};
     },
 
     overwrite() {
@@ -66,7 +50,7 @@ export default {
     },
 
     normalizedValue() {
-      return normalizeLocales(this.value);
+      return normalizeDestinationLocales(this.value);
     },
   },
 
@@ -94,7 +78,7 @@ export default {
     this.$events.$on(EVENT, this._onPreflight);
   },
 
-  beforeDestroy() {
+  beforeUnmount() {
     this.$events.$off(EVENT, this._onPreflight);
   },
 

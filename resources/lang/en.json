@@ -49,6 +49,7 @@
   "Hide fully translated help": "Hides rows that already have a localized page in every other language (nothing left to add).",
   "Title": "Title",
   "Open entry in editor": "Open entry in editor",
+  "Toggle entry selection": "Toggle selection",
   "No entries found in this collection.": "No entries found in this collection.",
   "Loading entries...": "Loading entries...",
   "Continue": "Continue",

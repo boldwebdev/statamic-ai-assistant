@@ -1,119 +1,150 @@
 <template>
     <div>
-        <div class="class-type-wrapper translate-me__d-flex">
-            <button class="bard-toolbar-button translate-me__btn translate-me__btn--bard"
+        <div class="ai-bard-btn-wrapper">
+            <button class="bard-toolbar-button ai-bard-btn"
                 v-tooltip="tooltipText" @click="openModal(editor.commands.getBardContent)" :disabled="disabled || loading">
-                <!-- Display the AI icon -->
-                <AiIcon class="w-5 h-5 text-blue" />
+                <AiIcon class="size-4 text-blue" />
             </button>
         </div>
 
         <!-- Modal for AI prompt / result / refactor -->
-        <modal v-if="showModal" name="ai-prompt-modal" width="600px" height="auto"
-            @closed="closeModal">
-            <div slot-scope="{ close }" class="relative p-4" @keyup.enter.ctrl="handleEnter(close)"
-                @keyup.enter.meta="handleEnter(close)">
-                <button type="button"
-                    class="absolute text-gray-500 absolute-btn-close hover:text-gray-700"
-                    @click="closeModal(close)">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                        xmlns="http://www.w3.org/2000/svg">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M6 18L18 6M6 6l12 12"></path>
-                    </svg>
-                </button>
+        <ui-modal
+            ref="aiModal"
+            v-model:open="showModal"
+            @dismissed="onModalDismissed"
+            :title="modalTitle"
+            blur
+        >
+            <div
+                class="ai-modal-body"
+                :class="{ 'ai-modal-body--busy': loading }"
+                @keyup.enter.ctrl="handleEnter()"
+                @keyup.enter.meta="handleEnter()"
+            >
+                <AiModalLoadingOverlay
+                    :show="loading"
+                    :label="transWithFallback('generating', 'Generating…')"
+                />
 
-                <!-- Render content based on modalMode -->
-                <div v-if="modalMode === 'prompt'">
-                    <h3 class="mb-2 text-lg font-bold">{{ transWithFallback('title', 'AI assistant')
-                    }}</h3>
-                    <p class="mb-4 help-block">
-                        {{ transWithFallback('prompt_placeholder', 'Describe the content you want to generate') }}
-                    </p>
-                    <textarea rows="4" v-model="prompt" class="input-text"
-                        placeholder=""></textarea>
-                </div>
-                <div v-else-if="modalMode === 'result'">
-                    <div :disabled="hadInitialValue" rows="4" ref="resulteditor" v-html="result"
-                        class="mt-1 prose input-text text-area-result" placeholder=""></div>
-                </div>
-                <div v-else-if="modalMode === 'refactor'">
-                    <label class="block mb-1 font-bold">{{ transWithFallback('current_text', 'Current Text') }}</label>
-                    <p class="mb-4 help-block">
-                        {{ transWithFallback('refactor_description', 'Describe the changes you want to make') }}
-                    </p>
-                    <div :disabled="hadInitialValue" rows="4" ref="resulteditor" v-html="result"
-                        class="mt-1 prose input-text text-area-result" placeholder=""></div>
-                        <div class="flex justify-between items-center">
-                    <label class="block mt-4 mb-1 font-bold">
-                        {{ transWithFallback('edit', 'Describe your adjustment.') }}
-                        <span
-                        class="inline-flex justify-center items-center ml-1 w-5 h-5 text-white rounded-full cursor-help"
-                        :title="transWithFallback('refactor_description','Enter an instruction to update the current text.')"
-                        >?</span>
-                    </label>
-                    </div>
-                    <textarea rows="4" v-model="refactorPrompt" class="mt-1 input-text"
-                        :placeholder="transWithFallback('refactor_placeholder', 'Describe your changes')"></textarea>
+                <!-- Prompt mode -->
+                <div v-if="modalMode === 'prompt'" class="space-y-4">
+                    <ui-description :text="transWithFallback('prompt_placeholder', 'Describe the content you want to generate')" />
+                    <ui-textarea
+                        v-model="prompt"
+                        :rows="4"
+                        :focus="true"
+                        :placeholder="transWithFallback('prompt_textarea_placeholder', 'Enter your prompt...')"
+                    />
                 </div>
 
-                <!-- Buttons area -->
-                <div class="flex justify-between mt-4 space-x-2">
-                    <template v-if="modalMode === 'prompt'">
-                        <span></span>
-                        <button type="button" @click="submitPrompt(close)" class="btn-primary"
-                            :disabled="loading || prompt === ''">
-                            <template v-if="loading">
-                                <span class="loader"></span>
-                            </template>
-                            <span v-else>
-                                {{ transWithFallback('go', 'go!') }}
-                            </span>
-                        </button>
-                    </template>
-                    <template v-else-if="modalMode === 'result'">
-                        <button type="button" @click="resetToPrompt()" class="btn">
-                            {{ transWithFallback('back', 'Back') }}
-                        </button>
-                        <button type="button" @click="setRefactorMode()" class="btn">
-                            {{ transWithFallback('refactor', 'Refactor') }}
-                        </button>
-                        <button type="button" @click="validateResult(close)" class="btn-primary">
-                            {{ transWithFallback('apply_changes', 'Validate') }}
-                        </button>
-                    </template>
-                    <template v-else-if="modalMode === 'refactor'">
-                        <button type="button" @click="cancelRefactor()" class="btn">
-                            {{ transWithFallback('back', 'Back') }}
-                        </button>
-                        <button type="button" @click="submitRefactor(close)" class="btn-primary"
-                            :disabled="loading || refactorPrompt === ''">
-                            <template v-if="loading">
-                                <span class="loader"></span>
-                            </template>
-                            <span v-else>
-                                {{ transWithFallback('apply_refactor', 'Generieren') }}
-                            </span>
-                        </button>
-                    </template>
+                <!-- Result mode -->
+                <div v-else-if="modalMode === 'result'" class="space-y-4">
+                    <ui-description :text="transWithFallback('result_description', 'Review the generated content below.')" />
+                    <div
+                        ref="resulteditor"
+                        v-html="result"
+                        class="prose prose-sm max-w-none rounded-lg border border-gray-400/60 bg-gray-100 p-3 dark:border-gray-700 dark:bg-gray-900"
+                    ></div>
+                </div>
+
+                <!-- Refactor mode -->
+                <div v-else-if="modalMode === 'refactor'" class="space-y-4">
+                    <ui-field :label="transWithFallback('current_text', 'Current text')">
+                        <div
+                            ref="resulteditor"
+                            v-html="result"
+                            class="prose prose-sm max-w-none rounded-lg border border-gray-400/60 bg-gray-100 p-3 dark:border-gray-700 dark:bg-gray-900"
+                        ></div>
+                    </ui-field>
+                    <ui-field
+                        :label="transWithFallback('edit', 'Describe your adjustment')"
+                        :instructions="transWithFallback('refactor_description', 'Enter an instruction to update the current text.')"
+                    >
+                        <ui-textarea
+                            ref="refactorPromptInput"
+                            v-model="refactorPrompt"
+                            :rows="3"
+                            :placeholder="transWithFallback('refactor_placeholder', 'Describe your changes')"
+                        />
+                    </ui-field>
                 </div>
             </div>
-        </modal>
+
+            <template #footer>
+                <div class="flex items-center pt-3 pb-1" :class="modalMode === 'prompt' ? 'justify-end' : 'justify-between'">
+                    <!-- Prompt -->
+                    <template v-if="modalMode === 'prompt'">
+                        <ui-button
+                            :text="transWithFallback('go', 'Generate')"
+                            variant="primary"
+                            icon="ai-sparks"
+                            :loading="loading"
+                            :disabled="loading || prompt === ''"
+                            @click="submitPrompt()"
+                        />
+                    </template>
+
+                    <!-- Result -->
+                    <template v-else-if="modalMode === 'result'">
+                        <ui-button
+                            :text="transWithFallback('back', 'Back')"
+                            variant="ghost"
+                            @click="resetToPrompt()"
+                        />
+                        <div class="flex items-center space-x-3">
+                            <ui-button
+                                :text="transWithFallback('refactor', 'Refactor')"
+                                @click="setRefactorMode()"
+                            />
+                            <ui-button
+                                :text="transWithFallback('apply_changes', 'Apply')"
+                                variant="primary"
+                                @click="validateResult()"
+                            />
+                        </div>
+                    </template>
+
+                    <!-- Refactor -->
+                    <template v-else-if="modalMode === 'refactor'">
+                        <ui-button
+                            :text="transWithFallback('back', 'Back')"
+                            variant="ghost"
+                            @click="cancelRefactor()"
+                        />
+                        <ui-button
+                            :text="transWithFallback('apply_refactor', 'Apply Refactor')"
+                            variant="primary"
+                            :loading="loading"
+                            :disabled="loading || refactorPrompt === ''"
+                            @click="submitRefactor()"
+                        />
+                    </template>
+                </div>
+            </template>
+        </ui-modal>
     </div>
 </template>
 
 <script>
 import axios from "axios";
+import { normalizeAiOutput } from "../utils/normalizeAiOutput";
 import AiIcon from "./icons/AiIcon.vue";
 import aiModalMixin from "../mixins/aiModalMixin";
+import AiModalLoadingOverlay from "./AiModalLoadingOverlay.vue";
 
 export default {
-    mixins: [BardToolbarButton,aiModalMixin],
+    mixins: [aiModalMixin],
     name: "BardAiButton",
     components: {
-        AiIcon
+        AiIcon,
+        AiModalLoadingOverlay,
     },
     props: {
+        editor: Object,
+        bard: Object,
+        button: Object,
+        active: Boolean,
+        variant: String,
         config: Object,
         disabled: Boolean
     },
@@ -125,31 +156,38 @@ export default {
             result: "",
             refactorPrompt: "",
             loading: false,
-            // modalMode can be "prompt", "result", or "refactor"
             modalMode: "prompt",
             hadInitialValue: false,
             tooltipText: "AI Assistant"
         };
     },
+    computed: {
+        modalTitle() {
+            if (this.modalMode === 'result') return this.transWithFallback('result_title', 'Generated content');
+            if (this.modalMode === 'refactor') return this.transWithFallback('refactor_title', 'Refactor content');
+            return this.transWithFallback('title', 'AI assistant');
+        },
+    },
     methods: {
-        async submitPrompt(close) {
+        async submitPrompt() {
             if (!this.prompt) return;
             this.loading = true;
             try {
                 const response = await axios.post("/cp/prompt", { title: this.prompt });
                 if (!response?.data || !response.data.content) return;
-                this.result = response.data.content;
-                if (response.data.content === "") {
+                const normalized = normalizeAiOutput(response.data.content);
+                if (!normalized || normalized === "") {
                     throw new Error("Empty response from API. Verify your API key.");
                 }
+                this.result = normalized;
                 this.modalMode = "result";
             } catch (error) {
-                console.error("Error generating AI text:", error);
+                Statamic.$toast.error(error?.response?.data?.error || error.message || __('Generation failed.'), { duration: 10000 });
             } finally {
                 this.loading = false;
             }
         },
-        async submitRefactor(close) {
+        async submitRefactor() {
             if (!this.refactorPrompt) return;
             this.loading = true;
             try {
@@ -161,20 +199,22 @@ export default {
                     Statamic.$toast.error('Empty response from API. Verify your API key', { duration: 10000 });
                 }
                 else{
-                    this.result = newHTML;
+                    this.result = normalizeAiOutput(newHTML);
                     Statamic.$toast.success(__('Your content has been refactored.'));
                     this.modalMode = "result";
                 }
             } catch (error) {
-                console.error("Error refactoring AI text:", error);
+                Statamic.$toast.error(error?.response?.data?.error || error.message || __('Refactor failed.'), { duration: 10000 });
             } finally {
                 this.loading = false;
             }
         },
-        validateResult(close) {
-            console.log("writebard:", this.result)
-            this.editor.commands.WriteInBard(this.result);
-            this.closeModal(close);
+        validateResult() {
+            try {
+                this.editor.commands.WriteInBard(this.result);
+            } finally {
+                this.closeModal();
+            }
         },
     }
 };

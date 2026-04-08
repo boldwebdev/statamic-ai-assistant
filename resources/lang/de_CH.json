@@ -49,6 +49,7 @@
   "Hide fully translated help": "Blendet Zeilen aus, die in allen anderen Sprachen bereits eine lokalisierte Seite haben — es gibt nichts mehr zu ergänzen.",
   "Title": "Titel",
   "Open entry in editor": "Eintrag im Editor öffnen",
+  "Toggle entry selection": "Auswahl umschalten",
   "No entries found in this collection.": "Keine Einträge in dieser Sammlung gefunden.",
   "Loading entries...": "Einträge laden...",
   "Continue": "Weiter",

@@ -49,6 +49,7 @@
   "Hide fully translated help": "Masque les lignes qui ont déjà une page localisée dans toutes les autres langues (rien à ajouter).",
   "Title": "Titre",
   "Open entry in editor": "Ouvrir l'entrée dans l'éditeur",
+  "Toggle entry selection": "Basculer la sélection",
   "No entries found in this collection.": "Aucune entrée trouvée dans cette collection.",
   "Loading entries...": "Chargement des entrées...",
   "Continue": "Continuer",

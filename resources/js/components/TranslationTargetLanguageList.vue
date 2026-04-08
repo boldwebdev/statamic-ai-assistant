@@ -28,6 +28,8 @@
 </template>
 
 <script>
+import { normalizeDestinationLocales } from '../utils/normalizeDestinationLocales.js';
+
 export default {
   props: {
     sites: {
@@ -64,11 +66,11 @@ export default {
     },
 
     isSelected(locale) {
-      return (this.value || []).includes(locale);
+      return normalizeDestinationLocales(this.value).includes(locale);
     },
 
     toggle(locale, checked) {
-      const cur = [...(this.value || [])];
+      const cur = [...normalizeDestinationLocales(this.value)];
       if (checked) {
         if (!cur.includes(locale)) {
           cur.push(locale);

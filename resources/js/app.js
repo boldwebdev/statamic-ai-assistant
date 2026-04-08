@@ -6,6 +6,7 @@ import TranslationPage from "./components/TranslationPage.vue";
 import TranslationActionPreflightFieldtype from "./components/TranslationActionPreflightFieldtype.vue";
 import TranslationTargetLanguagesFieldtype from "./components/TranslationTargetLanguagesFieldtype.vue";
 import TranslationProgress from "./components/TranslationProgress.vue";
+import { AiTextLegacyBardNode } from "./AiTextLegacyBardNode";
 import { BoldAiBardService } from "./BoldAiBardService";
 import { TranslationInfoDisplay } from "./utils/TranslationInfoDisplay";
 
@@ -28,7 +29,8 @@ Statamic.booting(() => {
     TranslationTargetLanguagesFieldtype
   );
 
-  Statamic.$bard.addExtension(() => BoldAiBardService);
+  Statamic.$bard.addExtension(BoldAiBardService);
+  Statamic.$bard.addExtension(AiTextLegacyBardNode);
 
   Statamic.$bard.buttons((buttons) => {
     buttons.push({

@@ -48,47 +48,190 @@
     }
 }
 
-/* TRANSLATIONS dropdown */
-/* Translation button styling */
-.button-translate {
+/* --------------------------------------------------------------------------
+   AI modal / field — generating & translating (Statamic CP)
+   -------------------------------------------------------------------------- */
+
+.ai-modal-body {
+    position: relative;
+    min-height: 0;
+}
+
+.ai-modal-body--busy {
+    min-height: 13rem;
+}
+
+.ai-modal-loading {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    border-radius: 0.75rem;
+    background: rgba(248, 250, 252, 0.88);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+
+html.dark .ai-modal-loading {
+    background: rgba(15, 17, 21, 0.82);
+}
+
+.ai-modal-loading--compact {
+    padding: 0.5rem;
+}
+
+.ai-modal-loading__panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.125rem 1.35rem;
+    max-width: 15rem;
+    text-align: center;
+    border-radius: 0.75rem;
+    background: rgba(255, 255, 255, 0.98);
+    border: 1px solid rgb(226 232 240);
+    box-shadow:
+        0 1px 2px rgb(15 23 42 / 0.05),
+        0 12px 32px -6px rgb(15 23 42 / 0.14);
+}
+
+html.dark .ai-modal-loading__panel {
+    background: rgba(43, 45, 48, 0.98);
+    border-color: rgb(57 59 64);
+    box-shadow: 0 12px 40px rgb(0 0 0 / 0.45);
+}
+
+.ai-modal-loading__panel--compact {
+    flex-direction: row;
+    gap: 0.65rem;
+    max-width: none;
+    padding: 0.65rem 0.9rem;
+    text-align: left;
+}
+
+.ai-modal-loading__spinner {
+    width: 1.75rem;
+    height: 1.75rem;
+    flex-shrink: 0;
+    border: 2.5px solid rgb(226 232 240);
+    border-top-color: rgb(59 130 246);
+    border-radius: 50%;
+    animation: rotate 0.75s linear infinite;
+}
+
+.ai-modal-loading__panel--compact .ai-modal-loading__spinner {
+    width: 1.25rem;
+    height: 1.25rem;
+    border-width: 2px;
+}
+
+html.dark .ai-modal-loading__spinner {
+    border-color: rgb(55 65 81);
+    border-top-color: rgb(96 165 250);
+}
+
+.ai-modal-loading__label {
+    font-size: 0.8125rem;
+    font-weight: 500;
+    line-height: 1.35;
+    letter-spacing: 0.01em;
+    color: rgb(71 85 105);
+}
+
+html.dark .ai-modal-loading__label {
+    color: rgb(203 213 225);
+}
+
+.ai-modal-loading-enter-active,
+.ai-modal-loading-leave-active {
+    transition: opacity 0.18s ease;
+}
+
+.ai-modal-loading-enter-from,
+.ai-modal-loading-leave-to {
+    opacity: 0;
+}
+
+/* Bard toolbar buttons */
+.ai-bard-btn-wrapper {
+    position: relative;
+}
+
+.ai-bard-btn {
+    cursor: pointer;
+}
+
+/* Bard DeepL translate: match ai_text / ai_textarea translation control (size, hover, disabled) */
+.ai-bard-btn-wrapper button.ai-bard-translate-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
     border: none;
+    border-radius: 0.375rem;
     background: transparent;
     cursor: pointer;
-    font-size: 1.2rem;
+    transition: background 0.15s;
 }
 
-/* Translation dropdown styling */
-.translation-wrapper {
-    position: relative;
-    display: inline-block;
+.ai-bard-btn-wrapper button.ai-bard-translate-trigger:disabled {
+    cursor: not-allowed;
 }
 
-.translate-dropdown {
+.ai-bard-btn-wrapper button.ai-bard-translate-trigger:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+html.dark .ai-bard-btn-wrapper button.ai-bard-translate-trigger:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.07);
+}
+
+/* Shared dropdown (Bard + fieldtype) — Statamic 6 style */
+.ai-translate-dropdown {
     position: absolute;
-    top: 45px;
-    padding: 5px;
-    z-index: 9999;
-    width: 120px;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 50;
+    min-width: 140px;
+    padding: 0.375rem;
+    border-radius: 0.75rem;
+    background: white;
+    border: 1px solid rgb(229, 231, 235);
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.07), 0 2px 4px -2px rgb(0 0 0 / 0.05);
 }
 
-.translate-option {
+.dark .ai-translate-dropdown {
+    background: rgb(31, 33, 37);
+    border-color: rgb(0, 0, 0);
+}
+
+.ai-translate-dropdown__item {
+    display: block;
+    width: 100%;
+    padding: 0.375rem 0.5rem;
+    border-radius: 0.5rem;
+    font-size: 0.8125rem;
+    line-height: 1.25rem;
+    color: rgb(55, 65, 81);
     cursor: pointer;
-    padding: 2px 5px;
+    transition: background 0.1s;
 }
 
-.translate-option:hover {
-    background-color: rgba(42, 66, 112, 0.2);
+.dark .ai-translate-dropdown__item {
+    color: rgb(209, 213, 219);
 }
 
-/* OTHER */
-.absolute-btn-close {
-    top: 1rem;
-    right: 1rem;
+.ai-translate-dropdown__item:hover {
+    background: rgb(243, 244, 246);
 }
 
-.text-area-result {
-    overflow-y: auto;
-    min-height: 250px;
+.dark .ai-translate-dropdown__item:hover {
+    background: rgb(55, 65, 81);
 }
 
 /* We fix issue with lists*/
@@ -347,7 +490,7 @@ html.dark .translation-page {
     color: var(--tp-accent);
 }
 
-.translation-page__usage-refresh.btn {
+.translation-page__usage-refresh {
     flex-shrink: 0;
 }
 
@@ -511,7 +654,7 @@ html.dark .translation-page__usage-fill--doc {
     user-select: none;
 }
 
-.translation-page--busy .translation-page__usage .btn[disabled] {
+.translation-page--busy .translation-page__usage button:disabled {
     cursor: not-allowed;
 }
 
@@ -1069,6 +1212,19 @@ html.dark .translation-page__modal-backdrop {
     white-space: nowrap;
     font-weight: 500;
     color: var(--tp-text);
+    cursor: pointer;
+    border-radius: 0.2rem;
+    outline-offset: 2px;
+}
+
+.translation-page__entry-title:hover {
+    color: var(--tp-accent);
+    text-decoration: underline;
+    text-underline-offset: 0.15em;
+}
+
+.translation-page__entry-title:focus-visible {
+    outline: 2px solid var(--tp-accent);
 }
 
 .translation-page__entry-edit {

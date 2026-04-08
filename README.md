@@ -1,6 +1,12 @@
 # Statamic Ai Assistant
 
-> Statamic Ai Assistant is a Statamic addon that use API calls within custom fieldtypes and Bard to provide AI text generation and refactoring to the users.
+> Control Panel addon for **Statamic 6.5+**: AI text generation and refactoring via custom fieldtypes and Bard, plus optional DeepL translation tools.
+
+## Requirements
+
+- **Statamic `^6.5`** (`statamic/cms` is declared in Composer; installs on Statamic 5 will not resolve).
+- A compatible **Laravel** version for your Statamic release (follow [Statamic’s requirements](https://statamic.dev/installation#requirements)).
+- **Statamic 5:** use the **`1.x`** release line / branch, not current `main`.
 
 ## Supported API
 
@@ -18,10 +24,15 @@
 
 ## How to Install
 
-You can install this addon via Composer:
+Install with Composer. Current releases target **Statamic 6.5+**. If you are on **Statamic 5**, require **`^1`** so Composer stays on the compatible major:
 
-``` bash
+```bash
 composer require bold-web/statamic-ai-assistant
+```
+
+```bash
+# Statamic 5 projects only — pin the 1.x line
+composer require bold-web/statamic-ai-assistant:^1
 ```
 
 ## How to Use

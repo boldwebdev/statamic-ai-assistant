@@ -1,7 +1,7 @@
 {
     "name": "bold-web/statamic-ai-assistant",
-    "description": "Statamic Ai Assistant is a Statamic addon that provide AI text generation and refactoring to the users.",
-    "keywords": ["statamic","ai"],
+    "description": "Statamic 6 addon: AI text generation and refactoring in the Control Panel (Ai Text, Bard, DeepL translations). Requires statamic/cms ^6.5.",
+    "keywords": ["statamic", "statamic-6", "ai", "bard", "deepl"],
     "autoload": {
         "psr-4": {
             "BoldWeb\\StatamicAiAssistant\\": "src"
@@ -13,23 +13,23 @@
         }
     },
     "require": {
-        "statamic/cms": "^5.0",
-        "edalzell/forma": "^3.1",
+        "statamic/cms": "^6.5",
         "lucianotonet/groq-laravel": "^0.0.10",
         "deeplcom/deepl-php": "^1.9"
     },
     "require-dev": {
-        "orchestra/testbench": "^9.0"
+        "orchestra/testbench": "^10.0"
     },
     "config": {
         "allow-plugins": {
-            "pixelfear/composer-dist-plugin": true
+            "pixelfear/composer-dist-plugin": true,
+            "php-http/discovery": true
         }
     },
     "extra": {
         "statamic": {
             "name": "Statamic AI Assistant",
-            "description": "Statamic Ai Assistant is a Statamic addon that provide AI text generation and refactoring to the users."
+            "description": "AI-assisted writing and DeepL translations for Statamic 6.5+ (custom fieldtypes and Bard)."
         },
         "laravel": {
             "providers": [

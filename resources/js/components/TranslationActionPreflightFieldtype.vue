@@ -97,8 +97,8 @@
         <li>{{ __('Overwrite confirmation bullet 2') }}</li>
       </ul>
       <div class="translation-page__modal-actions">
-        <button type="button" class="btn" @click="cancelOverwriteConfirm">{{ __('Cancel') }}</button>
-        <button type="button" class="btn-primary" @click="confirmOverwriteAndRun">{{ __('Yes, replace existing translations') }}</button>
+        <Button variant="default" :text="__('Cancel')" @click="cancelOverwriteConfirm" />
+        <Button variant="primary" :text="__('Yes, replace existing translations')" @click="confirmOverwriteAndRun" />
       </div>
     </div>
   </div>
@@ -106,24 +106,16 @@
 </template>
 
 <script>
+import { FieldtypeMixin as StatamicFieldtypeMixin } from '@statamic/cms';
+import { Button } from '@statamic/cms/ui';
+import { normalizeDestinationLocales } from '../utils/normalizeDestinationLocales.js';
+
 const EVENT = 'statamic-ai-assistant.translation-preflight';
 
-function normalizeLocales(raw) {
-  if (!raw) {
-    return [];
-  }
-  if (!Array.isArray(raw)) {
-    return raw !== '' && raw !== null ? [raw] : [];
-  }
-  return [...new Set(raw.filter(Boolean))];
-}
-
 export default {
-  mixins: [Fieldtype],
+  components: { Button },
 
-  inject: {
-    storeName: { default: null },
-  },
+  mixins: [StatamicFieldtypeMixin],
 
   data() {
     return {
@@ -141,11 +133,7 @@ export default {
     },
 
     publishValues() {
-      const name = this.storeName;
-      if (!name || !this.$store.state.publish[name]) {
-        return {};
-      }
-      return this.$store.state.publish[name].values || {};
+      return this.publishContainer?.values || {};
     },
 
     entryIds() {
@@ -161,7 +149,7 @@ export default {
     },
 
     destinationLocales() {
-      return normalizeLocales(this.publishValues.destination_locales);
+      return normalizeDestinationLocales(this.publishValues.destination_locales);
     },
 
     overwrite() {
@@ -291,7 +279,7 @@ export default {
     }
   },
 
-  beforeDestroy() {
+  beforeUnmount() {
     if (this.part === 'footer' && this._onConfirmModalPrimaryClick) {
       document.removeEventListener('click', this._onConfirmModalPrimaryClick, true);
     }

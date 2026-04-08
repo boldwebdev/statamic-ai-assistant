@@ -6,6 +6,7 @@ use BoldWeb\StatamicAiAssistant\Services\CpTranslationBatchRunner;
 use BoldWeb\StatamicAiAssistant\Services\DeeplService;
 use BoldWeb\StatamicAiAssistant\Services\TranslationService;
 use BoldWeb\StatamicAiAssistant\Support\EntryLabel;
+use BoldWeb\StatamicAiAssistant\Support\TrimAiOutput;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Statamic\Facades\Collection;
@@ -179,11 +180,15 @@ class TranslationController
             'text' => 'required|string',
             'source_locale' => 'nullable|string',
             'target_locale' => 'required|string',
+            /** When true, text is HTML (e.g. Bard) and DeepL preserves structure via tag_handling=html. Plain text must omit this or send false — otherwise apostrophes become entities (e.g. &#x27;). */
+            'html' => 'sometimes|boolean',
         ]);
 
         $sourceLocale = isset($data['source_locale']) && trim($data['source_locale']) !== ''
             ? $data['source_locale']
             : null;
+
+        $deeplOptions = ($data['html'] ?? false) ? ['tag_handling' => 'html'] : [];
 
         try {
             /** @var DeeplService $deepl */
@@ -192,10 +197,10 @@ class TranslationController
                 $data['text'],
                 $sourceLocale,
                 $data['target_locale'],
-                ['tag_handling' => 'html'],
+                $deeplOptions,
             );
 
-            return response()->json(['translated' => $translated]);
+            return response()->json(['translated' => TrimAiOutput::normalize($translated)]);
         } catch (\Exception $e) {
             return response()->json([
                 'error' => __('Translation failed: :error', ['error' => $e->getMessage()]),

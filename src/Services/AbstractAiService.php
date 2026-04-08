@@ -2,6 +2,7 @@
 
 namespace BoldWeb\StatamicAiAssistant\Services;
 
+use BoldWeb\StatamicAiAssistant\Support\TrimAiOutput;
 use Statamic\Facades\Site;
 
 abstract class AbstractAiService
@@ -106,6 +107,6 @@ abstract class AbstractAiService
         $content = str_replace("\u{2018}", '-', $content);
         $content = str_replace("\u{0080}", '', $content);
 
-        return $content;
+        return TrimAiOutput::normalize($content);
     }
 }
