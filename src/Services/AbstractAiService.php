@@ -14,6 +14,47 @@ abstract class AbstractAiService
     abstract protected function callApi(array $messages): string;
 
     /**
+     * Send raw messages to the LLM and return the raw response.
+     *
+     * Temporarily overrides max_tokens if $maxTokens is provided.
+     *
+     * @param  array<array{role: string, content: string}>  $messages
+     * @param  callable(string): void|null  $onToken  Invoked with each streamed text delta (OpenAI-compatible providers only)
+     */
+    public function generateFromMessages(array $messages, ?int $maxTokens = null, ?callable $onToken = null): string
+    {
+        $originalMaxTokens = null;
+
+        if ($maxTokens !== null) {
+            $originalMaxTokens = config('statamic-ai-assistant.max_tokens');
+            config(['statamic-ai-assistant.max_tokens' => $maxTokens]);
+        }
+
+        try {
+            if ($onToken !== null) {
+                return $this->callApiStreaming($messages, $onToken);
+            }
+
+            return $this->callApi($messages);
+        } finally {
+            if ($originalMaxTokens !== null) {
+                config(['statamic-ai-assistant.max_tokens' => $originalMaxTokens]);
+            }
+        }
+    }
+
+    /**
+     * Stream chat completion tokens to $onDelta and return the full assistant text.
+     *
+     * @param  array<array{role: string, content: string}>  $messages
+     * @param  callable(string): void  $onDelta
+     */
+    protected function callApiStreaming(array $messages, callable $onDelta): string
+    {
+        throw new \RuntimeException(__('Streaming is not supported for this AI provider.'));
+    }
+
+    /**
      * Generate content using the provided prompt.
      */
     public function generateContentFromPrompt(string $prompt): string
@@ -91,6 +132,43 @@ abstract class AbstractAiService
         $content = $this->callApi($messages);
 
         return $this->cleanResult($content);
+    }
+
+    /**
+     * Extract assistant text from an OpenAI-style chat completion JSON payload.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    protected function extractCompletionMessageContent(array $data): string
+    {
+        $choice = $data['choices'][0] ?? null;
+        if (! is_array($choice)) {
+            return '';
+        }
+
+        $message = $choice['message'] ?? null;
+        if (! is_array($message)) {
+            return '';
+        }
+
+        $content = $message['content'] ?? null;
+
+        if (is_string($content)) {
+            return $content;
+        }
+
+        if (is_array($content)) {
+            $parts = [];
+            foreach ($content as $part) {
+                if (is_array($part) && ($part['type'] ?? '') === 'text' && isset($part['text'])) {
+                    $parts[] = (string) $part['text'];
+                }
+            }
+
+            return implode("\n", $parts);
+        }
+
+        return '';
     }
 
     /**

@@ -6,6 +6,8 @@ import TranslationPage from "./components/TranslationPage.vue";
 import TranslationActionPreflightFieldtype from "./components/TranslationActionPreflightFieldtype.vue";
 import TranslationTargetLanguagesFieldtype from "./components/TranslationTargetLanguagesFieldtype.vue";
 import TranslationProgress from "./components/TranslationProgress.vue";
+import EntryGeneratorPage from "./components/EntryGeneratorPage.vue";
+import EntryGeneratorCpLauncher from "./components/EntryGeneratorCpLauncher.vue";
 import { AiTextLegacyBardNode } from "./AiTextLegacyBardNode";
 import { BoldAiBardService } from "./BoldAiBardService";
 import { TranslationInfoDisplay } from "./utils/TranslationInfoDisplay";
@@ -18,6 +20,10 @@ Statamic.booting(() => {
   Statamic.$components.register("translation-page", TranslationPage);
 
   Statamic.$components.register("translation-progress", TranslationProgress);
+
+  Statamic.$components.register("entry-generator-page", EntryGeneratorPage);
+
+  Statamic.$components.register("entry-generator-cp-launcher", EntryGeneratorCpLauncher);
 
   Statamic.$components.register(
     "translation_action_preflight-fieldtype",
@@ -53,6 +59,10 @@ Statamic.booting(() => {
 Statamic.booted(() => {
   const translationInfoDisplay = new TranslationInfoDisplay();
   translationInfoDisplay.init();
+
+  if (Statamic.$config.get("entryGeneratorEnabled")) {
+    Statamic.$components.append("entry-generator-cp-launcher", { props: {} });
+  }
 });
 
 // Define the callback function for custom actions messages

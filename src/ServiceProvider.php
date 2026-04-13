@@ -11,6 +11,10 @@ use BoldWeb\StatamicAiAssistant\Fieldtypes\TranslationActionPreflight;
 use BoldWeb\StatamicAiAssistant\Fieldtypes\TranslationTargetLanguages;
 use BoldWeb\StatamicAiAssistant\Services\AbstractAiService;
 use BoldWeb\StatamicAiAssistant\Services\DeeplService;
+use BoldWeb\StatamicAiAssistant\Services\EntryGenerationPlanner;
+use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorAssetResolver;
+use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorLinkFallback;
+use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorService;
 use BoldWeb\StatamicAiAssistant\Services\EntryReferenceResolver;
 use BoldWeb\StatamicAiAssistant\Services\EntryTranslator;
 use BoldWeb\StatamicAiAssistant\Services\GroqService;
@@ -76,6 +80,29 @@ class ServiceProvider extends AddonServiceProvider
         $this->app->singleton(TranslationService::class, function ($app) {
             return new TranslationService($app->make(EntryTranslator::class));
         });
+
+        $this->app->singleton(EntryGeneratorAssetResolver::class, function () {
+            return new EntryGeneratorAssetResolver;
+        });
+
+        $this->app->singleton(EntryGeneratorLinkFallback::class, function () {
+            return new EntryGeneratorLinkFallback;
+        });
+
+        $this->app->singleton(EntryGeneratorService::class, function ($app) {
+            return new EntryGeneratorService(
+                $app->make(AbstractAiService::class),
+                $app->make(EntryGeneratorAssetResolver::class),
+                $app->make(EntryGeneratorLinkFallback::class),
+            );
+        });
+
+        $this->app->singleton(EntryGenerationPlanner::class, function ($app) {
+            return new EntryGenerationPlanner(
+                $app->make(AbstractAiService::class),
+                $app->make(EntryGeneratorService::class),
+            );
+        });
     }
 
     public function bootAddon()
@@ -123,6 +150,9 @@ class ServiceProvider extends AddonServiceProvider
             });
         }
 
-        Statamic::provideToScript(['translationsActiv' => config('statamic-ai-assistant.translations')]);
+        Statamic::provideToScript([
+            'translationsActiv' => config('statamic-ai-assistant.translations'),
+            'entryGeneratorEnabled' => config('statamic-ai-assistant.entry_generator', true),
+        ]);
     }
 }

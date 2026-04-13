@@ -6,6 +6,7 @@
   },
   "devDependencies": {
     "@statamic/cms": "file:vendor/statamic/cms/packages/cms",
+    "@vitejs/plugin-vue": "5.2.4",
     "laravel-vite-plugin": "^1.0.0",
     "vite": "^6.0.0",
     "vue": "^3.4.0"

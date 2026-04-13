@@ -1,7 +1,21 @@
 <?php
 
+use BoldWeb\StatamicAiAssistant\Controllers\EntryGeneratorController;
 use BoldWeb\StatamicAiAssistant\Controllers\TranslationController;
 use Illuminate\Support\Facades\Route;
+
+Route::prefix('ai-generate')->name('statamic-ai-assistant.generate.')->group(function () {
+    Route::get('/', function () {
+        return view('statamic-ai-assistant::entry-generator');
+    })->name('page');
+
+    Route::get('/collections', [EntryGeneratorController::class, 'collections'])->name('collections');
+    Route::get('/blueprint-fields', [EntryGeneratorController::class, 'blueprintFields'])->name('blueprint-fields');
+    Route::post('/generate', [EntryGeneratorController::class, 'generate'])->name('generate');
+    Route::post('/generate-stream', [EntryGeneratorController::class, 'generateStream'])->name('generate-stream');
+    Route::post('/create-entry', [EntryGeneratorController::class, 'createEntry'])->name('create-entry');
+    Route::post('/regenerate-field', [EntryGeneratorController::class, 'regenerateField'])->name('regenerate-field');
+});
 
 Route::prefix('ai-translations')->name('statamic-ai-assistant.')->group(function () {
     Route::get('/', function () {

@@ -74,6 +74,20 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Infomaniak HTTP client
+    |--------------------------------------------------------------------------
+    |
+    | Laravel's HTTP client defaults to a 30 second timeout. The entry generator
+    | sends large system prompts (full blueprint schema) and may use up to
+    | generator_max_tokens — Infomaniak often needs longer than 30s to respond.
+    | Keep this in line with the CP axios timeout for /cp/ai-generate/generate (120s).
+    |
+    */
+
+    'infomaniak_http_timeout' => max(30, (int) env('STATAMIC_AI_ASSISTANT_INFOMANIAK_HTTP_TIMEOUT', 120)),
+
+    /*
+    |--------------------------------------------------------------------------
     | Prompt Preface
     |--------------------------------------------------------------------------
     |
@@ -153,5 +167,42 @@ return [
     */
 
     'linked_entries_max_depth' => max(0, min(5, (int) env('STATAMIC_AI_ASSISTANT_LINKED_ENTRIES_MAX_DEPTH', 1))),
+
+    /*
+    |--------------------------------------------------------------------------
+    | AI Entry Generator
+    |--------------------------------------------------------------------------
+    |
+    | Enable or disable the AI entry generator feature.
+    | The generator creates new collection entries from a natural language prompt.
+    |
+    | generator_max_tokens: Higher than the default max_tokens because the
+    | generator produces content for all fields in a single LLM call.
+    |
+    */
+
+    'entry_generator' => env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR', true),
+
+    'generator_max_tokens' => env('STATAMIC_AI_ASSISTANT_GENERATOR_MAX_TOKENS', 4000),
+
+    'prompt_generator_preface' => env(
+        'STATAMIC_AI_ASSISTANT_GENERATOR_PREFACE',
+        'You are a CMS content creation assistant. Your task is to generate structured content for a website entry. You must respond with ONLY a valid JSON object. No markdown code fences, no commentary, no explanation — just the raw JSON.'
+    ),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Entry generator fallback link
+    |--------------------------------------------------------------------------
+    |
+    | When the AI leaves a Statamic "link" field empty, the generator can set
+    | it to a stable internal entry (e.g. home) so the CP always loads valid data.
+    |
+    */
+    'generator_fallback_link' => [
+        'enabled' => env('STATAMIC_AI_ASSISTANT_GENERATOR_FALLBACK_LINK', true),
+        'collection' => env('STATAMIC_AI_ASSISTANT_FALLBACK_LINK_COLLECTION', 'pages'),
+        'slug' => env('STATAMIC_AI_ASSISTANT_FALLBACK_LINK_SLUG', 'home'),
+    ],
 
 ];
