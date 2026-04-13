@@ -1,6 +1,5 @@
 {
     "name": "bold-web/statamic-ai-assistant",
-    "version": "2.0.0",
     "description": "Statamic 6 addon: AI text generation and refactoring in the Control Panel (Ai Text, Bard, DeepL translations). Requires statamic/cms ^6.5.",
     "keywords": ["statamic", "statamic-6", "ai", "bard", "deepl"],
     "autoload": {
