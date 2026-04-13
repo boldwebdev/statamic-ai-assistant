@@ -1,7 +1,11 @@
 <template>
   <!-- ═══ Agentic chat (drawer) — Claude-style flat layout ═══ -->
   <div v-if="drawer" ref="chatRoot" class="eg-chat">
-    <div ref="chatStream" class="eg-chat__stream">
+    <div
+      ref="chatStream"
+      class="eg-chat__stream"
+      @scroll.passive="onChatStreamScroll"
+    >
 
       <!-- Agent: welcome -->
       <div class="eg-chat__msg eg-chat__msg--agent">
@@ -446,6 +450,10 @@ export default {
       // True while the user is being asked to confirm a stop (keep / discard).
       stopConfirmOpen: false,
 
+      // Drawer chat: only auto-scroll when the user is already near the bottom (or we force).
+      chatStickToBottom: true,
+      _chatStreamScrollSilent: false,
+
       // Rotating “under the hood” hints while the planner runs (drawer only).
       planningHintTimer: null,
       planningHintIdx: 0,
@@ -549,8 +557,12 @@ export default {
   },
 
   watch: {
-    renderedStep() {
-      this.$nextTick(() => this.scrollChatToBottom());
+    renderedStep(newVal, oldVal) {
+      this.$nextTick(() => {
+        if (!this.drawer) return;
+        const stepChanged = oldVal !== undefined && newVal !== oldVal;
+        this.scrollChatToBottom(stepChanged);
+      });
     },
     'store.entries': {
       handler() {
@@ -579,7 +591,12 @@ export default {
     active: {
       immediate: true,
       handler(now) {
-        if (this.drawer) setActive(now);
+        if (!this.drawer) return;
+        setActive(now);
+        if (now) {
+          this.chatStickToBottom = true;
+          this.$nextTick(() => this.scrollChatToBottom(true));
+        }
       },
     },
   },
@@ -625,10 +642,36 @@ export default {
       }
     },
 
-    scrollChatToBottom() {
+    /** Distance from bottom of `el` in px; smaller = nearer the end. */
+    chatStreamDistanceFromBottom(el) {
+      if (!el) return 0;
+      return el.scrollHeight - el.scrollTop - el.clientHeight;
+    },
+
+    onChatStreamScroll() {
+      if (!this.drawer || this._chatStreamScrollSilent) return;
+      const el = this.$refs.chatStream;
+      if (!el) return;
+      const threshold = 80;
+      this.chatStickToBottom = this.chatStreamDistanceFromBottom(el) <= threshold;
+    },
+
+    /**
+     * @param {boolean} force  When true, always jump to bottom (new run, drawer opened, step change).
+     */
+    scrollChatToBottom(force = false) {
       if (!this.drawer) return;
       const el = this.$refs.chatStream;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (!el) return;
+      if (!force && !this.chatStickToBottom) return;
+      this._chatStreamScrollSilent = true;
+      el.scrollTop = el.scrollHeight;
+      this.chatStickToBottom = true;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          this._chatStreamScrollSilent = false;
+        });
+      });
     },
 
     scrollActivityPanels() {
@@ -692,6 +735,7 @@ export default {
     resetForNewRequest() {
       storeReset();
       if (!this.drawer) this.step = 2;
+      this.chatStickToBottom = true;
     },
 
     handleGenerate() {
@@ -709,6 +753,7 @@ export default {
         collection: this.selectedCollection,
         blueprint: this.selectedBlueprint,
       });
+      this.chatStickToBottom = true;
     },
 
     cardStatusOf(id) {
