@@ -18,10 +18,16 @@ class EntryGenerationPlanner
 
     private EntryGeneratorService $generator;
 
-    public function __construct(AbstractAiService $aiService, EntryGeneratorService $generator)
-    {
+    private PromptUrlFetcher $promptUrlFetcher;
+
+    public function __construct(
+        AbstractAiService $aiService,
+        EntryGeneratorService $generator,
+        PromptUrlFetcher $promptUrlFetcher,
+    ) {
         $this->aiService = $aiService;
         $this->generator = $generator;
+        $this->promptUrlFetcher = $promptUrlFetcher;
     }
 
     /**
@@ -61,7 +67,9 @@ class EntryGenerationPlanner
             ? "\n\nAdditional context from an attached document (excerpt):\n".Str::limit($attachmentContent, 6000)
             : '';
 
-        $user = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$prompt}{$attachmentPart}";
+        $urlAug = $this->promptUrlFetcher->buildAugmentation($prompt);
+
+        $user = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$prompt}{$urlAug['appendix']}{$attachmentPart}";
 
         $messages = [
             ['role' => 'system', 'content' => $system],
@@ -73,21 +81,21 @@ class EntryGenerationPlanner
         try {
             $raw = $this->aiService->generateFromMessages($messages, 1024);
         } catch (\Throwable) {
-            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings);
+            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug);
         }
 
         if ($raw === null || trim($raw) === '') {
-            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings);
+            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug);
         }
 
         try {
             $entries = $this->parseAndNormalize($raw, $catalog, $prompt, $warnings);
         } catch (\RuntimeException) {
-            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings);
+            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug);
         }
 
         if ($entries === []) {
-            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings);
+            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug);
         }
 
         if (count($entries) > self::MAX_ENTRIES) {
@@ -97,6 +105,17 @@ class EntryGenerationPlanner
                 'n' => $dropped,
                 'max' => self::MAX_ENTRIES,
             ]);
+        }
+
+        foreach ($urlAug['warnings'] as $w) {
+            $warnings[] = $w;
+        }
+
+        if ($urlAug['appendix'] !== '') {
+            foreach ($entries as &$entry) {
+                $entry['prompt'] = trim((string) ($entry['prompt'] ?? '')).$urlAug['appendix'];
+            }
+            unset($entry);
         }
 
         return ['entries' => $entries, 'warnings' => $warnings];
@@ -249,17 +268,24 @@ class EntryGenerationPlanner
      * Fallback when the planner fails: defer to the existing single-entry resolver.
      *
      * @param  string[]  $warnings
+     * @param  array{appendix: string, warnings: array<int, string>}  $urlAug
      * @return array{entries: array<int, array{collection: string, blueprint: string, prompt: string, label: string}>, warnings: string[]}
      */
-    private function singleEntryFallback(string $prompt, ?string $attachmentContent, array $warnings): array
+    private function singleEntryFallback(string $prompt, ?string $attachmentContent, array $warnings, array $urlAug): array
     {
-        $resolved = $this->generator->resolveTargetFromPrompt($prompt, $attachmentContent);
+        $resolved = $this->generator->resolveTargetFromPrompt($prompt, $attachmentContent, $urlAug);
+
+        foreach ($urlAug['warnings'] as $w) {
+            $warnings[] = $w;
+        }
+
+        $combinedPrompt = trim($prompt.$urlAug['appendix']);
 
         return [
             'entries' => [[
                 'collection' => $resolved['collection'],
                 'blueprint' => $resolved['blueprint'],
-                'prompt' => $prompt,
+                'prompt' => $combinedPrompt,
                 'label' => Str::limit(strip_tags($prompt), 60),
             ]],
             'warnings' => $warnings,

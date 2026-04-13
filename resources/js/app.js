@@ -12,7 +12,27 @@ import { AiTextLegacyBardNode } from "./AiTextLegacyBardNode";
 import { BoldAiBardService } from "./BoldAiBardService";
 import { TranslationInfoDisplay } from "./utils/TranslationInfoDisplay";
 
-Statamic.booting(() => {
+/**
+ * Resolve CP JSON translations from Statamic.initialConfig (same source as the core translator).
+ * Avoids importing Statamic's translator singleton, which would be a separate empty instance in this bundle.
+ */
+function cpTranslate(key, replacements = {}, translations) {
+  const t = translations || {};
+  let message =
+    t[`*.${key}`] ||
+    t[key] ||
+    t[`statamic::${key}`] ||
+    t[`statamic::messages.${key}`] ||
+    key;
+  const opts = replacements || {};
+  for (const replace in opts) {
+    message = String(message).split(":" + replace).join(opts[replace]);
+  }
+  return message;
+}
+
+Statamic.booting((statamic) => {
+  const translations = statamic.initialConfig?.translations || {};
   Statamic.$components.register("ai_textarea-fieldtype", AiTextarea);
 
   Statamic.$components.register("ai_text-fieldtype", AiText);
@@ -41,14 +61,14 @@ Statamic.booting(() => {
   Statamic.$bard.buttons((buttons) => {
     buttons.push({
       name: "BardManagement",
-      text: "AI assistant",
+      text: cpTranslate("AI assistant", {}, translations),
       component: BardAiButton,
     });
 
     if (Statamic.$config.get("translationsActiv")) {
       buttons.push({
         name: "BardManagement",
-        text: "AI translate",
+        text: cpTranslate("AI translate", {}, translations),
         component: BardTranslationButton,
       });
     }

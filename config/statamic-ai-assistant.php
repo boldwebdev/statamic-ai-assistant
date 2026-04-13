@@ -205,4 +205,26 @@ return [
         'slug' => env('STATAMIC_AI_ASSISTANT_FALLBACK_LINK_SLUG', 'home'),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Prompt URL fetching (Jina Reader)
+    |--------------------------------------------------------------------------
+    |
+    | When the user prompt contains http(s) URLs, the server fetches readable
+    | text via https://r.jina.ai/{your-url} and appends it to the LLM context.
+    | Failures (blocked sites, timeouts) become user-visible warnings only.
+    | Set JINA_API_KEY for higher rate limits (optional Bearer token).
+    |
+    */
+
+    'prompt_url_fetch' => [
+        'enabled' => env('STATAMIC_AI_ASSISTANT_PROMPT_URL_FETCH', true),
+        'reader_base' => rtrim(env('STATAMIC_AI_ASSISTANT_JINA_READER_BASE', 'https://r.jina.ai'), '/'),
+        'timeout' => max(5, (int) env('STATAMIC_AI_ASSISTANT_JINA_TIMEOUT', 25)),
+        'max_urls' => max(1, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_URLS', 5)),
+        'max_chars_per_url' => max(1000, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_CHARS', 12000)),
+        'max_total_chars' => max(5000, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_TOTAL_CHARS', 40000)),
+        'api_key' => env('JINA_API_KEY'),
+    ],
+
 ];

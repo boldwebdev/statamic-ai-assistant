@@ -39,14 +39,18 @@ class EntryGeneratorService
 
     private EntryGeneratorLinkFallback $linkFallback;
 
+    private PromptUrlFetcher $promptUrlFetcher;
+
     public function __construct(
         AbstractAiService $aiService,
         ?EntryGeneratorAssetResolver $assetResolver = null,
         ?EntryGeneratorLinkFallback $linkFallback = null,
+        ?PromptUrlFetcher $promptUrlFetcher = null,
     ) {
         $this->aiService = $aiService;
         $this->assetResolver = $assetResolver ?? new EntryGeneratorAssetResolver;
         $this->linkFallback = $linkFallback ?? new EntryGeneratorLinkFallback;
+        $this->promptUrlFetcher = $promptUrlFetcher ?? new PromptUrlFetcher;
     }
 
     /**
@@ -85,7 +89,8 @@ class EntryGeneratorService
 
         $fieldSchema = $this->buildFieldSchema($blueprint);
         $systemMessage = $this->buildSystemMessage($fieldSchema, $locale);
-        $userMessage = $this->buildUserMessage($prompt, $attachmentContent);
+        $urlAug = $this->promptUrlFetcher->buildAugmentation($prompt);
+        $userMessage = $this->buildUserMessage($prompt, $attachmentContent, $urlAug['appendix']);
 
         $messages = [
             ['role' => 'system', 'content' => $systemMessage],
@@ -101,7 +106,13 @@ class EntryGeneratorService
 
         $parsedData = $this->parseResponse($rawResponse);
 
-        return $this->mapToFieldData($parsedData, $blueprint, $locale, $prompt);
+        $result = $this->mapToFieldData($parsedData, $blueprint, $locale, $prompt);
+
+        foreach ($urlAug['warnings'] as $w) {
+            $result['warnings'][] = $w;
+        }
+
+        return $result;
     }
 
     /**
@@ -150,15 +161,18 @@ class EntryGeneratorService
      * Ask the LLM which collection and blueprint best match the user request.
      * Falls back to the "pages" collection when unsure; if missing, the first catalog entry.
      *
+     * @param  array{appendix: string, warnings: array<int, string>}|null  $prefetchedUrlAug  When null, URLs are fetched once from $prompt.
      * @return array{collection: string, blueprint: string}
      */
-    public function resolveTargetFromPrompt(string $prompt, ?string $attachmentContent = null): array
+    public function resolveTargetFromPrompt(string $prompt, ?string $attachmentContent = null, ?array $prefetchedUrlAug = null): array
     {
         $catalog = $this->getCollectionsCatalog();
 
         if ($catalog === []) {
             throw new \RuntimeException(__('No collections with blueprints are available.'));
         }
+
+        $urlAug = $prefetchedUrlAug ?? $this->promptUrlFetcher->buildAugmentation($prompt);
 
         $catalogJson = json_encode($catalog, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         $attachmentPart = $attachmentContent
@@ -171,7 +185,7 @@ class EntryGeneratorService
             .' The blueprint must be one of the blueprints listed for that collection.'
             .' Do not include markdown fences or any text outside the JSON.';
 
-        $user = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$prompt}{$attachmentPart}";
+        $user = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$prompt}{$urlAug['appendix']}{$attachmentPart}";
 
         $messages = [
             ['role' => 'system', 'content' => $system],
@@ -268,7 +282,7 @@ class EntryGeneratorService
         try {
             $decoded = json_decode($jsonStr, true, 512, JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
-            throw new \RuntimeException(__('Invalid JSON in AI response: ').$e->getMessage());
+            throw new \RuntimeException(__('Invalid JSON in AI response: :message', ['message' => $e->getMessage()]));
         }
 
         if (! is_array($decoded) || array_is_list($decoded)) {
@@ -684,9 +698,13 @@ class EntryGeneratorService
             ."- Examples: \"Strasse\" not \"Straße\", \"gross\" not \"groß\", \"heiss\" not \"heiß\", \"dass\" stays \"dass\".\n\n";
     }
 
-    private function buildUserMessage(string $prompt, ?string $attachmentContent): string
+    private function buildUserMessage(string $prompt, ?string $attachmentContent, string $urlAppendix = ''): string
     {
         $message = $prompt;
+
+        if ($urlAppendix !== '') {
+            $message .= $urlAppendix;
+        }
 
         if ($attachmentContent) {
             $message .= "\n\n--- ATTACHED DOCUMENT CONTENT ---\n\n".$attachmentContent;
@@ -722,7 +740,7 @@ class EntryGeneratorService
         try {
             $decoded = json_decode($jsonStr, true, 512, JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
-            throw new \RuntimeException(__('Invalid JSON in AI response: ').$e->getMessage());
+            throw new \RuntimeException(__('Invalid JSON in AI response: :message', ['message' => $e->getMessage()]));
         }
 
         if (! is_array($decoded) || array_is_list($decoded)) {

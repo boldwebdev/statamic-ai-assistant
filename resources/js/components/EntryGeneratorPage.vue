@@ -52,7 +52,7 @@
         <div class="eg-chat__user-wrap">
           <span class="eg-chat__sender">{{ __('You') }}</span>
           <div class="eg-chat__bubble eg-chat__bubble--user">
-            <p>{{ promptRecap }}</p>
+            <p v-html="chatHtml(promptRecap)"></p>
           </div>
         </div>
       </div>
@@ -76,7 +76,8 @@
                 v-for="row in planningActivityLog"
                 :key="row.id"
                 class="eg-chat__activity-line"
-              >{{ row.text }}</li>
+                v-html="chatHtml(row.text)"
+              ></li>
             </transition-group>
           </div>
         </div>
@@ -101,7 +102,7 @@
         </div>
 
         <div v-if="store.plan.warnings && store.plan.warnings.length" class="eg-chat__notice eg-chat__notice--warn">
-          <ul><li v-for="(w, i) in store.plan.warnings" :key="i">{{ w }}</li></ul>
+          <ul><li v-for="(w, i) in store.plan.warnings" :key="i" v-html="chatHtml(w)"></li></ul>
         </div>
 
         <div class="eg-chat__cards">
@@ -146,7 +147,7 @@
         <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
         <div class="eg-chat__notice eg-chat__notice--error">
           <p><strong>{{ __('Something went wrong') }}</strong></p>
-          <p>{{ store.generationError }}</p>
+          <p v-html="chatHtml(store.generationError)"></p>
         </div>
       </div>
     </div>
@@ -322,7 +323,7 @@
       <template v-else-if="store.generationError">
         <div class="entry-generator__error" role="alert">
           <p class="entry-generator__error-title">{{ __('Generation failed') }}</p>
-          <p>{{ store.generationError }}</p>
+          <p v-html="chatHtml(store.generationError)"></p>
           <Button variant="primary" :text="__('Try again')" @click="resetForNewRequest" />
         </div>
       </template>
@@ -337,7 +338,7 @@
         <div v-if="store.plan && store.plan.warnings && store.plan.warnings.length" class="entry-generator__warnings" role="alert">
           <p class="entry-generator__warnings-title">{{ __('Notes') }}</p>
           <ul>
-            <li v-for="(w, i) in store.plan.warnings" :key="i">{{ w }}</li>
+            <li v-for="(w, i) in store.plan.warnings" :key="i" v-html="chatHtml(w)"></li>
           </ul>
         </div>
 
@@ -413,6 +414,7 @@ import {
   setI18n,
   setToaster,
 } from '../store/entryGeneratorStore.js';
+import { formatChatTextWithBoldUrls } from '../formatChatUrls.js';
 
 export default {
   name: 'EntryGeneratorPage',
@@ -432,7 +434,6 @@ export default {
     return {
       // Local UI-only state. Generation/composer state lives in the store.
       step: 1,
-      stepLabels: [],
       collections: [],
       selectedCollection: '',
       selectedBlueprint: '',
@@ -461,6 +462,10 @@ export default {
   },
 
   computed: {
+    stepLabels() {
+      return [this.__('Configure'), this.__('Prompt'), this.__('Preview')];
+    },
+
     availableBlueprints() {
       const col = this.collections.find((c) => c.handle === this.selectedCollection);
       return col ? col.blueprints : [];
@@ -579,10 +584,6 @@ export default {
     },
   },
 
-  created() {
-    this.stepLabels = [this.__('Configure'), this.__('Prompt'), this.__('Preview')];
-  },
-
   mounted() {
     setI18n((s, opts) => this.__(s, opts || {}));
     setToaster({
@@ -606,6 +607,10 @@ export default {
   },
 
   methods: {
+    chatHtml(text) {
+      return formatChatTextWithBoldUrls(text);
+    },
+
     async initializePage() {
       await this.loadCollections();
       const params = new URLSearchParams(window.location.search);

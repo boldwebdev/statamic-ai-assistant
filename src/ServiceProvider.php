@@ -19,6 +19,7 @@ use BoldWeb\StatamicAiAssistant\Services\EntryReferenceResolver;
 use BoldWeb\StatamicAiAssistant\Services\EntryTranslator;
 use BoldWeb\StatamicAiAssistant\Services\GroqService;
 use BoldWeb\StatamicAiAssistant\Services\InfomaniakService;
+use BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher;
 use BoldWeb\StatamicAiAssistant\Services\TranslationService;
 use Illuminate\Support\Facades\Route;
 use Statamic\Facades\CP\Nav;
@@ -89,11 +90,16 @@ class ServiceProvider extends AddonServiceProvider
             return new EntryGeneratorLinkFallback;
         });
 
+        $this->app->singleton(PromptUrlFetcher::class, function () {
+            return new PromptUrlFetcher;
+        });
+
         $this->app->singleton(EntryGeneratorService::class, function ($app) {
             return new EntryGeneratorService(
                 $app->make(AbstractAiService::class),
                 $app->make(EntryGeneratorAssetResolver::class),
                 $app->make(EntryGeneratorLinkFallback::class),
+                $app->make(PromptUrlFetcher::class),
             );
         });
 
@@ -101,6 +107,7 @@ class ServiceProvider extends AddonServiceProvider
             return new EntryGenerationPlanner(
                 $app->make(AbstractAiService::class),
                 $app->make(EntryGeneratorService::class),
+                $app->make(PromptUrlFetcher::class),
             );
         });
     }

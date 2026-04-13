@@ -30,7 +30,8 @@
                 v-for="row in cardActivityLines"
                 :key="row.id"
                 class="eg-entry-card__activity-line"
-              >{{ row.text }}</li>
+                v-html="chatHtml(row.text)"
+              ></li>
             </transition-group>
           </div>
         </div>
@@ -59,7 +60,7 @@
 
     <!-- Error message -->
     <div v-if="entry.status === 'failed'" class="eg-entry-card__error">
-      <p>{{ entry.error || __('Generation failed.') }}</p>
+      <p v-html="chatHtml(entry.error || __('Generation failed.'))"></p>
     </div>
 
     <!-- Saved confirmation -->
@@ -86,7 +87,7 @@
     <div v-if="entry.warnings && entry.warnings.length && (isExpanded || entry.status === 'ready')" class="eg-entry-card__warnings">
       <p class="eg-entry-card__warnings-title">{{ __('Notes') }}</p>
       <ul>
-        <li v-for="(w, i) in entry.warnings" :key="i">{{ w }}</li>
+        <li v-for="(w, i) in entry.warnings" :key="i" v-html="chatHtml(w)"></li>
       </ul>
     </div>
 
@@ -169,6 +170,7 @@
 <script>
 import EntryGeneratorContentPreview from './EntryGeneratorContentPreview.vue';
 import { state as entryGenState, STATUS } from '../store/entryGeneratorStore.js';
+import { formatChatTextWithBoldUrls } from '../formatChatUrls.js';
 
 export default {
   name: 'EntryGeneratorEntryCard',
@@ -264,6 +266,10 @@ export default {
   },
 
   methods: {
+    chatHtml(text) {
+      return formatChatTextWithBoldUrls(text);
+    },
+
     toggleExpand() {
       this.manualExpanded = !this.isExpanded;
     },

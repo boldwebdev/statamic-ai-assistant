@@ -2951,6 +2951,12 @@ html.dark .translation-progress__entry-error {
     word-break: break-word;
 }
 
+/* http(s):// spans rendered via formatChatTextWithBoldUrls */
+.eg-chat__url {
+    font-weight: 700;
+    word-break: break-all;
+}
+
 /* ── Card (tool UI, preview) ── */
 
 .eg-chat__card {
@@ -3295,7 +3301,7 @@ html.dark .translation-progress__entry-error {
 
 .eg-chat__bar {
     flex-shrink: 0;
-    padding: 0.65rem 0.75rem 0.65rem;
+    padding: 1rem 0.75rem 0.65rem;
     padding-bottom: max(0.65rem, env(safe-area-inset-bottom));
     display: flex;
     flex-direction: column;
