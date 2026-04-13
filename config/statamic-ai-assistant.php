@@ -170,6 +170,40 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | BOLD agent settings (set hints)
+    |--------------------------------------------------------------------------
+    |
+    | YAML file path for per-block AI hints (replicator / components sets).
+    | Default is under content/ so it can be versioned in git. Set
+    | STATAMIC_AI_ASSISTANT_SET_HINTS_PATH to an absolute path, or a path
+    | relative to the project root, to override.
+    |
+    | Legacy location (pre–configurable path): storage/app/statamic-ai-assistant/set-hints.yaml
+    | — automatically migrated once when the new file does not exist yet.
+    |
+    */
+
+    'set_hints_path' => env('STATAMIC_AI_ASSISTANT_SET_HINTS_PATH', base_path('content/statamic-ai-assistant/set-hints.yaml')),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Figma OAuth (entry generator design context)
+    |--------------------------------------------------------------------------
+    |
+    | Create an app at https://www.figma.com/developers/apps and register the
+    | redirect URL shown in BOLD agent settings. Store credentials only in .env
+    | (never commit). Run `php artisan config:clear` after changing .env.
+    |
+    | Legacy: credentials were stored in storage/app/statamic-ai-assistant/figma-app.yaml
+    | — delete that file after migrating to these variables.
+    |
+    */
+
+    'figma_oauth_client_id' => env('STATAMIC_AI_ASSISTANT_FIGMA_OAUTH_CLIENT_ID', ''),
+    'figma_oauth_client_secret' => env('STATAMIC_AI_ASSISTANT_FIGMA_OAUTH_CLIENT_SECRET', ''),
+
+    /*
+    |--------------------------------------------------------------------------
     | AI Entry Generator
     |--------------------------------------------------------------------------
     |

@@ -282,6 +282,10 @@ html.dark .ai-bard-btn-wrapper button.ai-bard-translate-trigger:hover:not(:disab
     color: var(--tp-text);
 }
 
+.translation-page--wide {
+    max-width: 67.5rem;
+}
+
 html.dark .translation-page {
     --tp-surface: #2b2d30;
     --tp-surface-muted: #242628;
@@ -368,6 +372,35 @@ html.dark .translation-page {
     margin: 0;
     color: var(--tp-text-muted);
     max-width: 40rem;
+}
+
+/* Hero variant: title block + actions (e.g. BOLD agent settings) */
+.translation-page__hero--agent {
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 1rem 1.25rem;
+}
+
+.translation-page__hero-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 1.25rem;
+    flex: 1 1 18rem;
+    min-width: 0;
+}
+
+.translation-page__hero-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-shrink: 0;
+}
+
+@media (max-width: 720px) {
+    .translation-page__hero-actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
 }
 
 /* DeepL API usage card */

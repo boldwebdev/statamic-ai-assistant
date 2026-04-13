@@ -41,16 +41,24 @@ class EntryGeneratorService
 
     private PromptUrlFetcher $promptUrlFetcher;
 
+    private SetHintsService $setHints;
+
+    private ?FigmaContentFetcher $figma;
+
     public function __construct(
         AbstractAiService $aiService,
         ?EntryGeneratorAssetResolver $assetResolver = null,
         ?EntryGeneratorLinkFallback $linkFallback = null,
         ?PromptUrlFetcher $promptUrlFetcher = null,
+        ?SetHintsService $setHints = null,
+        ?FigmaContentFetcher $figma = null,
     ) {
         $this->aiService = $aiService;
         $this->assetResolver = $assetResolver ?? new EntryGeneratorAssetResolver;
         $this->linkFallback = $linkFallback ?? new EntryGeneratorLinkFallback;
         $this->promptUrlFetcher = $promptUrlFetcher ?? new PromptUrlFetcher;
+        $this->setHints = $setHints ?? new SetHintsService;
+        $this->figma = $figma;
     }
 
     /**
@@ -90,7 +98,9 @@ class EntryGeneratorService
         $fieldSchema = $this->buildFieldSchema($blueprint);
         $systemMessage = $this->buildSystemMessage($fieldSchema, $locale);
         $urlAug = $this->promptUrlFetcher->buildAugmentation($prompt);
-        $userMessage = $this->buildUserMessage($prompt, $attachmentContent, $urlAug['appendix']);
+        $figmaAug = $this->figma ? $this->figma->buildAugmentation($prompt) : ['appendix' => '', 'warnings' => []];
+        $combinedAppendix = $urlAug['appendix'].$figmaAug['appendix'];
+        $userMessage = $this->buildUserMessage($prompt, $attachmentContent, $combinedAppendix);
 
         $messages = [
             ['role' => 'system', 'content' => $systemMessage],
@@ -109,6 +119,10 @@ class EntryGeneratorService
         $result = $this->mapToFieldData($parsedData, $blueprint, $locale, $prompt);
 
         foreach ($urlAug['warnings'] as $w) {
+            $result['warnings'][] = $w;
+        }
+
+        foreach ($figmaAug['warnings'] as $w) {
             $result['warnings'][] = $w;
         }
 
@@ -162,9 +176,10 @@ class EntryGeneratorService
      * Falls back to the "pages" collection when unsure; if missing, the first catalog entry.
      *
      * @param  array{appendix: string, warnings: array<int, string>}|null  $prefetchedUrlAug  When null, URLs are fetched once from $prompt.
+     * @param  array{appendix: string, warnings: array<int, string>}|null  $prefetchedFigmaAug  When null, Figma links are resolved when a fetcher is available.
      * @return array{collection: string, blueprint: string}
      */
-    public function resolveTargetFromPrompt(string $prompt, ?string $attachmentContent = null, ?array $prefetchedUrlAug = null): array
+    public function resolveTargetFromPrompt(string $prompt, ?string $attachmentContent = null, ?array $prefetchedUrlAug = null, ?array $prefetchedFigmaAug = null): array
     {
         $catalog = $this->getCollectionsCatalog();
 
@@ -173,6 +188,7 @@ class EntryGeneratorService
         }
 
         $urlAug = $prefetchedUrlAug ?? $this->promptUrlFetcher->buildAugmentation($prompt);
+        $figmaAug = $prefetchedFigmaAug ?? ($this->figma ? $this->figma->buildAugmentation($prompt) : ['appendix' => '', 'warnings' => []]);
 
         $catalogJson = json_encode($catalog, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         $attachmentPart = $attachmentContent
@@ -185,7 +201,7 @@ class EntryGeneratorService
             .' The blueprint must be one of the blueprints listed for that collection.'
             .' Do not include markdown fences or any text outside the JSON.';
 
-        $user = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$prompt}{$urlAug['appendix']}{$attachmentPart}";
+        $user = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$prompt}{$urlAug['appendix']}{$figmaAug['appendix']}{$attachmentPart}";
 
         $messages = [
             ['role' => 'system', 'content' => $system],
@@ -472,7 +488,8 @@ class EntryGeneratorService
         if (in_array($type, self::GEN_RECURSIVE_TYPES)) {
             $entry['type'] = 'structured';
             $entry['description'] = ($instructions ? $instructions.' ' : '')
-                .'Provide as an array of ordered blocks. Each object must include a "type" key matching a set handle from the schema "sets" keys (see set_layout_catalog when present for titles and roles). '
+                .'Provide as an array of ordered blocks. Each object must include a "type" key matching a set handle from the schema "sets" keys (see set_layout_catalog when present for titles, ai_description, and when_to_use rules). '
+                .'Choose each block based on its ai_description (what the block is) and when_to_use (the scenarios it was designed for) — pick the block whose purpose genuinely matches the content of that section, rather than reusing a safe default. '
                 .'Use several different block types across the page when the schema offers them — do not default the whole page to one or two repetitive types (for example only plain text or teaser blocks) if other sets exist. '
                 .'Include visual or image-led sets where they fit the narrative, not only text-heavy blocks.';
 
@@ -565,11 +582,25 @@ class EntryGeneratorService
                 continue;
             }
 
-            $catalog[] = [
+            $entry = [
                 'type_handle' => (string) $setHandle,
                 'title' => $title,
                 'content_mix' => $this->describeSetContentMixForCatalog($setFields),
             ];
+
+            $hint = $this->setHints->forSet((string) $setHandle);
+
+            if ($hint !== null) {
+                if (($hint['ai_description'] ?? '') !== '') {
+                    $entry['ai_description'] = $hint['ai_description'];
+                }
+
+                if (! empty($hint['when_to_use'])) {
+                    $entry['when_to_use'] = array_values($hint['when_to_use']);
+                }
+            }
+
+            $catalog[] = $entry;
         }
 
         return $catalog;
@@ -655,8 +686,10 @@ class EntryGeneratorService
         if ($this->fieldSchemaContainsStructuredType($fieldSchema)) {
             $structuredRules = "\n"
                 ."- For fields with type \"structured\" (replicator / components / grid): each array item is one block; include a \"type\" property with the set handle, then that set's field keys.\n"
-                ."- Layout variety: when set_layout_catalog lists multiple type_handle values, deliberately mix several different block types across the page. Avoid composing the page almost entirely from one or two similar blocks (for example only generic text and teaser) if other sets exist.\n"
-                ."- Visual rhythm: include blocks whose content_mix mentions images or visual layout when they support the story — not only text-heavy blocks.\n"
+                ."- Block selection: when set_layout_catalog is provided, treat it as the authoritative guide. For each block, read its \"ai_description\" (what the block is and how it renders) and its \"when_to_use\" list (the concrete scenarios it exists for). Pick a block ONLY when the section you are building matches one of its when_to_use triggers, or clearly fits its ai_description. If none match, pick the closest block by content_mix rather than force-fitting the most generic one.\n"
+                ."- Treat when_to_use as strong editorial rules, not suggestions: if a block says it is for \"hero openers\", do not reuse it mid-page for unrelated content. If multiple blocks could fit, prefer the one whose when_to_use most specifically describes the section.\n"
+                ."- Layout variety: deliberately mix several different type_handle values across the page. Do not default the whole page to one or two repetitive blocks (for example only plain text and teaser) when other sets with matching when_to_use / ai_description exist.\n"
+                ."- Visual rhythm: include blocks whose ai_description, when_to_use, or content_mix mentions images, galleries, heroes, or visual layout when they support the narrative — not only text-heavy blocks.\n"
                 ."- For type \"asset_description\" (inside sets): a concise phrase describing the desired image; empty string is allowed and imagery may be assigned automatically.\n";
         }
 

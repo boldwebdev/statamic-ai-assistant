@@ -309,5 +309,25 @@
   "Unexpected response from Infomaniak.": "Unexpected response from Infomaniak.",
   "The AI returned no text. Check your Infomaniak product ID, model name, and prompt size.": "The AI returned no text. Check your Infomaniak product ID, model name, and prompt size.",
   "Streaming is not supported for this AI provider.": "Streaming is not supported for this AI provider.",
-  "Entry creation failed. Please try again.": "Entry creation failed. Please try again."
+  "Entry creation failed. Please try again.": "Entry creation failed. Please try again.",
+
+  "Figma integration": "Figma integration",
+  "When you paste a Figma file or frame link in the entry generator, we fetch frame names and text layers via the official Figma REST API (OAuth). Register a redirect URL in your Figma app that matches the value below.": "When you paste a Figma file or frame link in the entry generator, we fetch frame names and text layers via the official Figma REST API (OAuth). Register a redirect URL in your Figma app that matches the value below.",
+  "OAuth redirect URL (copy into Figma developer app)": "OAuth redirect URL (copy into Figma developer app)",
+  "Client ID": "Client ID",
+  "Client secret": "Client secret",
+  "Save Figma app credentials": "Save Figma app credentials",
+  "Figma app credentials saved.": "Figma app credentials saved.",
+  "Connect Figma": "Connect Figma",
+  "Disconnect Figma": "Disconnect Figma",
+  "Connected as :handle": "Connected as :handle",
+  "Not connected to Figma.": "Not connected to Figma.",
+  "Only super admins can configure OAuth app credentials.": "Only super admins can configure OAuth app credentials.",
+  "A super admin must add the Figma OAuth app credentials before anyone can connect.": "A super admin must add the Figma OAuth app credentials before anyone can connect.",
+  "Loading Figma status…": "Loading Figma status…",
+  "Could not load Figma status.": "Could not load Figma status.",
+  "Disconnected from Figma.": "Disconnected from Figma.",
+  "Could not save Figma app credentials.": "Could not save Figma app credentials.",
+  "Could not disconnect from Figma.": "Could not disconnect from Figma.",
+  "Client secret is required on first save.": "Client secret is required on first save."
 }

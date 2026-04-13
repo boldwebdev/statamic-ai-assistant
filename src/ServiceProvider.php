@@ -17,9 +17,13 @@ use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorLinkFallback;
 use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorService;
 use BoldWeb\StatamicAiAssistant\Services\EntryReferenceResolver;
 use BoldWeb\StatamicAiAssistant\Services\EntryTranslator;
+use BoldWeb\StatamicAiAssistant\Services\FigmaContentFetcher;
+use BoldWeb\StatamicAiAssistant\Services\FigmaOAuthService;
+use BoldWeb\StatamicAiAssistant\Services\FigmaTokenStore;
 use BoldWeb\StatamicAiAssistant\Services\GroqService;
 use BoldWeb\StatamicAiAssistant\Services\InfomaniakService;
 use BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher;
+use BoldWeb\StatamicAiAssistant\Services\SetHintsService;
 use BoldWeb\StatamicAiAssistant\Services\TranslationService;
 use Illuminate\Support\Facades\Route;
 use Statamic\Facades\CP\Nav;
@@ -94,12 +98,33 @@ class ServiceProvider extends AddonServiceProvider
             return new PromptUrlFetcher;
         });
 
+        $this->app->singleton(FigmaOAuthService::class, function () {
+            return new FigmaOAuthService;
+        });
+
+        $this->app->singleton(FigmaTokenStore::class, function () {
+            return new FigmaTokenStore;
+        });
+
+        $this->app->singleton(FigmaContentFetcher::class, function ($app) {
+            return new FigmaContentFetcher(
+                $app->make(FigmaOAuthService::class),
+                $app->make(FigmaTokenStore::class),
+            );
+        });
+
+        $this->app->singleton(SetHintsService::class, function () {
+            return new SetHintsService;
+        });
+
         $this->app->singleton(EntryGeneratorService::class, function ($app) {
             return new EntryGeneratorService(
                 $app->make(AbstractAiService::class),
                 $app->make(EntryGeneratorAssetResolver::class),
                 $app->make(EntryGeneratorLinkFallback::class),
                 $app->make(PromptUrlFetcher::class),
+                $app->make(SetHintsService::class),
+                $app->make(FigmaContentFetcher::class),
             );
         });
 
@@ -108,6 +133,7 @@ class ServiceProvider extends AddonServiceProvider
                 $app->make(AbstractAiService::class),
                 $app->make(EntryGeneratorService::class),
                 $app->make(PromptUrlFetcher::class),
+                $app->make(FigmaContentFetcher::class),
             );
         });
     }
@@ -154,6 +180,14 @@ class ServiceProvider extends AddonServiceProvider
                 $nav->tools(__('Bulk translations'))
                     ->route('statamic-ai-assistant.translations')
                     ->icon('globe-world-wide-web');
+            });
+        }
+
+        if (config('statamic-ai-assistant.entry_generator', true)) {
+            Nav::extend(function ($nav) {
+                $nav->settings(__('BOLD agent settings'))
+                    ->route('statamic-ai-assistant.block-hints.page')
+                    ->icon('layers-stacks');
             });
         }
 

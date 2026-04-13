@@ -153,6 +153,12 @@ class PromptUrlFetcher
             return (bool) filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
         }
 
+        // Figma URLs are handled by FigmaContentFetcher with OAuth — don't
+        // try to scrape them through the public reader.
+        if ($hostLower === 'figma.com' || str_ends_with($hostLower, '.figma.com')) {
+            return false;
+        }
+
         return true;
     }
 

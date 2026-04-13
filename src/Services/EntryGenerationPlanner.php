@@ -20,14 +20,18 @@ class EntryGenerationPlanner
 
     private PromptUrlFetcher $promptUrlFetcher;
 
+    private ?FigmaContentFetcher $figma;
+
     public function __construct(
         AbstractAiService $aiService,
         EntryGeneratorService $generator,
         PromptUrlFetcher $promptUrlFetcher,
+        ?FigmaContentFetcher $figma = null,
     ) {
         $this->aiService = $aiService;
         $this->generator = $generator;
         $this->promptUrlFetcher = $promptUrlFetcher;
+        $this->figma = $figma;
     }
 
     /**
@@ -68,8 +72,9 @@ class EntryGenerationPlanner
             : '';
 
         $urlAug = $this->promptUrlFetcher->buildAugmentation($prompt);
+        $figmaAug = $this->figma ? $this->figma->buildAugmentation($prompt) : ['appendix' => '', 'warnings' => []];
 
-        $user = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$prompt}{$urlAug['appendix']}{$attachmentPart}";
+        $user = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$prompt}{$urlAug['appendix']}{$figmaAug['appendix']}{$attachmentPart}";
 
         $messages = [
             ['role' => 'system', 'content' => $system],
@@ -81,21 +86,21 @@ class EntryGenerationPlanner
         try {
             $raw = $this->aiService->generateFromMessages($messages, 1024);
         } catch (\Throwable) {
-            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug);
+            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug, $figmaAug);
         }
 
         if ($raw === null || trim($raw) === '') {
-            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug);
+            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug, $figmaAug);
         }
 
         try {
             $entries = $this->parseAndNormalize($raw, $catalog, $prompt, $warnings);
         } catch (\RuntimeException) {
-            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug);
+            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug, $figmaAug);
         }
 
         if ($entries === []) {
-            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug);
+            return $this->singleEntryFallback($prompt, $attachmentContent, $warnings, $urlAug, $figmaAug);
         }
 
         if (count($entries) > self::MAX_ENTRIES) {
@@ -111,9 +116,15 @@ class EntryGenerationPlanner
             $warnings[] = $w;
         }
 
-        if ($urlAug['appendix'] !== '') {
+        foreach ($figmaAug['warnings'] as $w) {
+            $warnings[] = $w;
+        }
+
+        $combinedAppendix = $urlAug['appendix'].$figmaAug['appendix'];
+
+        if ($combinedAppendix !== '') {
             foreach ($entries as &$entry) {
-                $entry['prompt'] = trim((string) ($entry['prompt'] ?? '')).$urlAug['appendix'];
+                $entry['prompt'] = trim((string) ($entry['prompt'] ?? '')).$combinedAppendix;
             }
             unset($entry);
         }
@@ -269,17 +280,22 @@ class EntryGenerationPlanner
      *
      * @param  string[]  $warnings
      * @param  array{appendix: string, warnings: array<int, string>}  $urlAug
+     * @param  array{appendix: string, warnings: array<int, string>}  $figmaAug
      * @return array{entries: array<int, array{collection: string, blueprint: string, prompt: string, label: string}>, warnings: string[]}
      */
-    private function singleEntryFallback(string $prompt, ?string $attachmentContent, array $warnings, array $urlAug): array
+    private function singleEntryFallback(string $prompt, ?string $attachmentContent, array $warnings, array $urlAug, array $figmaAug = ['appendix' => '', 'warnings' => []]): array
     {
-        $resolved = $this->generator->resolveTargetFromPrompt($prompt, $attachmentContent, $urlAug);
+        $resolved = $this->generator->resolveTargetFromPrompt($prompt, $attachmentContent, $urlAug, $figmaAug);
 
         foreach ($urlAug['warnings'] as $w) {
             $warnings[] = $w;
         }
 
-        $combinedPrompt = trim($prompt.$urlAug['appendix']);
+        foreach ($figmaAug['warnings'] as $w) {
+            $warnings[] = $w;
+        }
+
+        $combinedPrompt = trim($prompt.$urlAug['appendix'].$figmaAug['appendix']);
 
         return [
             'entries' => [[
