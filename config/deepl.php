@@ -33,10 +33,11 @@ return [
     | Language Mapping
     |--------------------------------------------------------------------------
     |
-    | Maps your Statamic site handles to DeepL language codes.
+    | Maps your Statamic site handles and locale strings to DeepL language codes.
     | DeepL codes: https://developers.deepl.com/docs/resources/supported-languages
     |
-    | Use en-GB / en-US (not bare "en") for English targets where applicable.
+    | Use en-GB / en-US (not bare "en") for English *targets* where applicable.
+    | Source languages are normalized automatically (en-GB → en, pt-PT → pt, etc.).
     |
     */
 

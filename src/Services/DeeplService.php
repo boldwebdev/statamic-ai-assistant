@@ -3,6 +3,8 @@
 namespace BoldWeb\StatamicAiAssistant\Services;
 
 use DeepL\DeepLClient;
+use DeepL\DeepLException;
+use DeepL\LanguageCode;
 use DeepL\Translator;
 use DeepL\TranslatorOptions;
 use DeepL\Usage;
@@ -67,12 +69,25 @@ class DeeplService
             return $texts;
         }
 
-        $results = $this->client()->translateText(
-            $nonEmptyTexts,
-            $mappedSource,
-            $mappedTarget,
-            $options,
-        );
+        try {
+            $results = $this->client()->translateText(
+                $nonEmptyTexts,
+                $mappedSource,
+                $mappedTarget,
+                $options,
+            );
+        } catch (DeepLException $e) {
+            if ($mappedSource !== null && $this->shouldRetryTranslationWithAutoDetectedSource($e)) {
+                $results = $this->client()->translateText(
+                    $nonEmptyTexts,
+                    null,
+                    $mappedTarget,
+                    $options,
+                );
+            } else {
+                throw $e;
+            }
+        }
 
         $translated = $texts;
         foreach ($results as $i => $result) {
@@ -272,6 +287,11 @@ class DeeplService
 
     /**
      * Resolve and map source language for DeepL, or null for automatic detection.
+     *
+     * `language_mapping` may use target-only codes (e.g. en-GB, pt-PT). DeepL rejects those for
+     * `source_lang` — only base codes are valid (en, pt, de, …). Strip regional variants for sources.
+     *
+     * @see \DeepL\LanguageCode (e.g. ENGLISH_BRITISH is target-only)
      */
     protected function mapSourceLanguageForDeepL(?string $sourceLang): ?string
     {
@@ -279,7 +299,27 @@ class DeeplService
             return null;
         }
 
-        return $this->mapLanguage($this->resolveStatamicLocale($sourceLang));
+        $mapped = $this->mapLanguage($this->resolveStatamicLocale($sourceLang));
+        if ($mapped === '') {
+            return null;
+        }
+
+        try {
+            return LanguageCode::removeRegionalVariant($mapped);
+        } catch (DeepLException) {
+            return null;
+        }
+    }
+
+    /**
+     * When DeepL returns HTTP 400 for an invalid source_lang, retry once with auto-detection.
+     */
+    protected function shouldRetryTranslationWithAutoDetectedSource(DeepLException $e): bool
+    {
+        $msg = strtolower($e->getMessage());
+
+        return str_contains($msg, 'source_lang')
+            || str_contains($msg, 'source language');
     }
 
     protected function primaryLanguageSubtag(string $normalized): ?string
