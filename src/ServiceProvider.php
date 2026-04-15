@@ -22,6 +22,7 @@ use BoldWeb\StatamicAiAssistant\Services\FigmaOAuthService;
 use BoldWeb\StatamicAiAssistant\Services\FigmaTokenStore;
 use BoldWeb\StatamicAiAssistant\Services\GroqService;
 use BoldWeb\StatamicAiAssistant\Services\InfomaniakService;
+use BoldWeb\StatamicAiAssistant\Services\NavigationTreeSyncService;
 use BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher;
 use BoldWeb\StatamicAiAssistant\Services\SetHintsService;
 use BoldWeb\StatamicAiAssistant\Services\TranslationService;
@@ -136,6 +137,13 @@ class ServiceProvider extends AddonServiceProvider
                 $app->make(FigmaContentFetcher::class),
             );
         });
+
+        $this->app->singleton(NavigationTreeSyncService::class, function ($app) {
+            return new NavigationTreeSyncService(
+                $app->make(TranslationService::class),
+                $app->make(DeeplService::class),
+            );
+        });
     }
 
     public function bootAddon()
@@ -156,7 +164,7 @@ class ServiceProvider extends AddonServiceProvider
         $this->publishes([
             __DIR__.'/../config/statamic-ai-assistant.php' => config_path('statamic-ai-assistant.php'),
             __DIR__.'/../config/deepl.php' => config_path('deepl.php'),
-        ], 'statamic-ai-assistant');
+        ], 'statamic-ai-assistant-config');
 
         // Legacy prompt routes
         $this->registerCpRoutes(function () {
@@ -175,7 +183,8 @@ class ServiceProvider extends AddonServiceProvider
             Route::get('/getLocalizations', [PromptController::class, 'getLocalizations']);
         });
 
-        if (config('statamic-ai-assistant.translations', true)) {
+        if (config('statamic-ai-assistant.translations', true)
+            && config('statamic-ai-assistant.bulk_translations', true)) {
             Nav::extend(function ($nav) {
                 $nav->tools(__('Bulk translations'))
                     ->route('statamic-ai-assistant.translations')

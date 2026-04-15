@@ -36,6 +36,10 @@ Route::prefix('ai-block-hints')->name('statamic-ai-assistant.block-hints.')->gro
 
 Route::prefix('ai-translations')->name('statamic-ai-assistant.')->group(function () {
     Route::get('/', function () {
+        if (! config('statamic-ai-assistant.bulk_translations', true)) {
+            abort(404);
+        }
+
         return view('statamic-ai-assistant::translations');
     })->name('translations');
 
@@ -47,4 +51,6 @@ Route::prefix('ai-translations')->name('statamic-ai-assistant.')->group(function
     Route::get('/status', [TranslationController::class, 'status'])->name('translate.status');
     Route::get('/deepl-usage', [TranslationController::class, 'deeplUsage'])->name('translate.deepl-usage');
     Route::get('/collection-entries', [TranslationController::class, 'collectionEntries'])->name('translate.collection-entries');
+    Route::get('/navigation-entries', [TranslationController::class, 'navigationEntries'])->name('translate.navigation-entries');
+    Route::post('/navigation-sync', [TranslationController::class, 'navigationSync'])->name('translate.navigation-sync');
 });

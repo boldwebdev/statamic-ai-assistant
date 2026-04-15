@@ -6,6 +6,7 @@ use BoldWeb\StatamicAiAssistant\Support\EntryLabel;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Statamic\Contracts\Entries\Entry;
+use Statamic\Facades\Nav;
 use Statamic\Facades\Site;
 
 class TranslationService
@@ -62,6 +63,7 @@ class TranslationService
                     'error' => null,
                     'edit_url' => $existingTarget->editUrl(),
                     'destination_locale' => $destinationLocale,
+                    'linked_entries' => [],
                 ];
             }
         }
@@ -74,6 +76,13 @@ class TranslationService
                 0,
                 $maxDepth,
             );
+
+            $linkedEntries = $this->entryTranslator->takeLinkedEntriesCreated();
+            $primaryId = $targetEntry->id();
+            $linkedEntries = array_values(array_filter(
+                $linkedEntries,
+                fn (array $e) => ($e['entry_id'] ?? '') !== $primaryId
+            ));
 
             Log::info('TranslationService: Entry translated via DeepL', [
                 'entry_id' => $targetEntry->id(),
@@ -94,8 +103,11 @@ class TranslationService
                 'skipped' => false,
                 'error' => null,
                 'destination_locale' => $destinationLocale,
+                'linked_entries' => $linkedEntries,
             ];
         } catch (\Exception $e) {
+            $this->entryTranslator->resetLinkedEntriesBuffer();
+
             Log::error('TranslationService: DeepL translation failed', [
                 'entry_id' => $sourceEntry->id(),
                 'error' => $e->getMessage(),
@@ -208,6 +220,11 @@ class TranslationService
             $this->finalizeBatchProgress($batchId, $translated + $skipped, $updated, 0, $errors, $total);
         }
 
+        $linkedCreatedTotal = 0;
+        foreach ($results as $r) {
+            $linkedCreatedTotal += count($r['linked_entries'] ?? []);
+        }
+
         return [
             'translated' => $translated + $skipped,
             'updated' => $updated,
@@ -215,6 +232,7 @@ class TranslationService
             'errors' => $errors,
             'total' => $total,
             'results' => $results,
+            'linked_created_total' => $linkedCreatedTotal,
         ];
     }
 
@@ -232,6 +250,7 @@ class TranslationService
             'destination_locale' => $result['destination_locale'] ?? null,
             'is_new' => $result['is_new'] ?? null,
             'skipped' => (bool) ($result['skipped'] ?? false),
+            'linked_entries' => $result['linked_entries'] ?? [],
         ];
     }
 
@@ -285,6 +304,19 @@ class TranslationService
         }
 
         return $status;
+    }
+
+    /**
+     * @return array<int, array{handle: string, title: string}>
+     */
+    public function getNavigationsList(): array
+    {
+        return Nav::all()->map(function ($nav) {
+            return [
+                'handle' => $nav->handle(),
+                'title' => $nav->title(),
+            ];
+        })->values()->all();
     }
 
     protected function resolveSourceEntry(Entry $entry, $sourceSite): ?Entry
@@ -399,6 +431,7 @@ class TranslationService
             'error' => $error,
             'edit_url' => null,
             'destination_locale' => $destinationLocale ?? '',
+            'linked_entries' => [],
         ];
     }
 

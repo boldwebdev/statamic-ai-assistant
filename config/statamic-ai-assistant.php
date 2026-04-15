@@ -35,6 +35,23 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Bulk (mass) translation tool
+    |--------------------------------------------------------------------------
+    |
+    | Controls the "Bulk translations" CP page under Tools — the multi-step
+    | wizard for translating entire collections or navigations at once.
+    | Disabling this hides the Tools nav link and returns 404 for the page;
+    | the per-entry Translate action and in-field translate buttons keep working.
+    |
+    | Disable with your .env file:
+    | STATAMIC_AI_ASSISTANT_BULK_TRANSLATIONS=false
+    |
+    */
+
+    'bulk_translations' => env('STATAMIC_AI_ASSISTANT_BULK_TRANSLATIONS', true),
+
+    /*
+    |--------------------------------------------------------------------------
     | INFOMANIAK product id
     |--------------------------------------------------------------------------
     |

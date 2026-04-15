@@ -2,6 +2,7 @@
 
 namespace BoldWeb\StatamicAiAssistant\Services;
 
+use Illuminate\Support\Str;
 use Statamic\Facades\Collection;
 use Statamic\Facades\Entry;
 
@@ -29,6 +30,17 @@ class EntryReferenceResolver
     public function setEntryTranslator(EntryTranslator $translator): void
     {
         $this->entryTranslator = $translator;
+    }
+
+    /**
+     * Target id reserved or resolved for this origin→site pair (used so the outer
+     * translateEntry() reuses the entry already saved during nested reference resolution).
+     */
+    public function getCachedTargetId(string $originId, string $targetSite): ?string
+    {
+        $cacheKey = $originId.':'.$targetSite;
+
+        return $this->resolvedCache[$cacheKey] ?? null;
     }
 
     /**
@@ -92,10 +104,6 @@ class EntryReferenceResolver
             return $originId;
         }
 
-        if (isset($this->inProgress[$originId])) {
-            return $originId;
-        }
-
         $originEntry = Entry::find($originId);
         if (! $originEntry) {
             return $originId;
@@ -110,13 +118,31 @@ class EntryReferenceResolver
             return $originId;
         }
 
+        // Reserve the target id before translateEntry() runs so nested resolveEntryId()
+        // calls for the same origin (e.g. projects → magazine → projects) resolve to
+        // the English UUID immediately instead of hitting inProgress and falling back
+        // to the source id, or waiting on Stache to see a not-yet-saved localization.
+        $this->resolvedCache[$cacheKey] = $existingTarget
+            ? $existingTarget->id()
+            : (string) Str::uuid();
+
         $this->inProgress[$originId] = true;
 
         try {
+            $targetForTranslator = $existingTarget;
+            if (! $targetForTranslator) {
+                $targetForTranslator = Entry::make()
+                    ->id($this->resolvedCache[$cacheKey])
+                    ->collection($originEntry->collectionHandle())
+                    ->blueprint($originEntry->blueprint()->handle())
+                    ->locale($targetSite)
+                    ->origin($originEntry->id());
+            }
+
             $targetEntry = $this->entryTranslator->translateEntry(
                 $originEntry,
                 $targetSite,
-                $existingTarget,
+                $targetForTranslator,
                 $currentDepth + 1,
                 $maxDepth,
             );
@@ -125,6 +151,10 @@ class EntryReferenceResolver
             $this->resolvedCache[$cacheKey] = $resolvedId;
 
             return $resolvedId;
+        } catch (\Throwable $e) {
+            unset($this->resolvedCache[$cacheKey]);
+
+            throw $e;
         } finally {
             unset($this->inProgress[$originId]);
         }

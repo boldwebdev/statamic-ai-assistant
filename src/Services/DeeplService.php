@@ -3,6 +3,8 @@
 namespace BoldWeb\StatamicAiAssistant\Services;
 
 use DeepL\DeepLClient;
+use DeepL\DeepLException;
+use DeepL\LanguageCode;
 use DeepL\Translator;
 use DeepL\TranslatorOptions;
 use DeepL\Usage;
@@ -12,6 +14,13 @@ use Statamic\Facades\Site;
 
 class DeeplService
 {
+    /**
+     * DeepL may return very large character_limit / document_limit values (e.g. 1e12) for
+     * Pro keys with no hard cap or internal metering; showing that raw limit in the CP is
+     * misleading, so treat it like unlimited for UI purposes.
+     */
+    private const USAGE_LIMIT_EFFECTIVELY_UNLIMITED = 1_000_000_000_000;
+
     private ?DeepLClient $client = null;
 
     /** @var array<string, string> */
@@ -67,12 +76,25 @@ class DeeplService
             return $texts;
         }
 
-        $results = $this->client()->translateText(
-            $nonEmptyTexts,
-            $mappedSource,
-            $mappedTarget,
-            $options,
-        );
+        try {
+            $results = $this->client()->translateText(
+                $nonEmptyTexts,
+                $mappedSource,
+                $mappedTarget,
+                $options,
+            );
+        } catch (DeepLException $e) {
+            if ($mappedSource !== null && $this->shouldRetryTranslationWithAutoDetectedSource($e)) {
+                $results = $this->client()->translateText(
+                    $nonEmptyTexts,
+                    null,
+                    $mappedTarget,
+                    $options,
+                );
+            } else {
+                throw $e;
+            }
+        }
 
         $translated = $texts;
         foreach ($results as $i => $result) {
@@ -99,9 +121,25 @@ class DeeplService
 
     /**
      * Current billing-period DeepL API usage (characters, documents) for display in the CP.
-     * Uses a single GET /v2/usage call; parses `start_time` / `end_time` when present (Pro API).
+     * Uses GET /v2/usage. Pro API returns account totals plus api_key_character_* for the key used;
+     * we prefer key-level numbers for the main meter when present.
      *
-     * @return array{character: ?array, document: ?array, team_document: ?array, any_limit_reached: bool, billing: array{period_start?: string, period_end?: string}}
+     * @return array{
+     *   character: ?array,
+     *   character_account: ?array,
+     *   character_is_api_key_scoped: bool,
+     *   document: ?array,
+     *   team_document: ?array,
+     *   any_limit_reached: bool,
+     *   billing: array{period_start?: string, period_end?: string},
+     *   estimated_cost: array{
+     *     enabled: bool,
+     *     base_fee_eur?: float,
+     *     per_million_chars_eur?: float,
+     *     account_character_count?: int,
+     *     estimated_total_eur?: float
+     *   }
+     * }
      */
     public function getUsageForApi(): array
     {
@@ -114,7 +152,7 @@ class DeeplService
         $usage = new Usage($body);
         $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
 
-        // Per DeepL: start_time / end_time are only in Pro API responses; Free + Pro Classic only return counts.
+        // Per DeepL: start_time / end_time are only in some Pro responses.
         // https://developers.deepl.com/api-reference/usage-and-quota
         $billing = [];
         $endRaw = $decoded['end_time'] ?? null;
@@ -126,12 +164,65 @@ class DeeplService
             $billing['period_start'] = trim($startRaw);
         }
 
+        $primaryChar = null;
+        $fromApiKey = isset($decoded['api_key_character_count'], $decoded['api_key_character_limit'])
+            && is_numeric($decoded['api_key_character_count'])
+            && is_numeric($decoded['api_key_character_limit']);
+        if ($fromApiKey) {
+            $primaryChar = $this->serializeUsagePair(
+                (int) $decoded['api_key_character_count'],
+                (int) $decoded['api_key_character_limit']
+            );
+        }
+        if ($primaryChar === null && $usage->character !== null) {
+            $primaryChar = $this->serializeUsageDetail($usage->character);
+        }
+
+        $accountChar = null;
+        if (isset($decoded['character_count'], $decoded['character_limit'])
+            && is_numeric($decoded['character_count'])
+            && is_numeric($decoded['character_limit'])) {
+            $accountChar = $this->serializeUsagePair(
+                (int) $decoded['character_count'],
+                (int) $decoded['character_limit']
+            );
+        }
+
+        $characterIsApiKeyScoped = $fromApiKey && $accountChar !== null;
+
+        $anyReached = $usage->anyLimitReached();
+        if ($primaryChar !== null && ! $primaryChar['unlimited']
+            && isset($primaryChar['limit']) && $primaryChar['limit'] !== null
+            && $primaryChar['count'] >= $primaryChar['limit']) {
+            $anyReached = true;
+        }
+
+        $estimatedCost = ['enabled' => false];
+        if (config('deepl.estimated_cost_enabled', true)
+            && isset($decoded['character_count'])
+            && is_numeric($decoded['character_count'])) {
+            $accountCount = (int) $decoded['character_count'];
+            $base = (float) config('deepl.estimated_monthly_base_fee_eur', 4.99);
+            $perM = (float) config('deepl.estimated_per_million_chars_eur', 20);
+            $variable = ($accountCount / 1_000_000.0) * $perM;
+            $estimatedCost = [
+                'enabled' => true,
+                'base_fee_eur' => $base,
+                'per_million_chars_eur' => $perM,
+                'account_character_count' => $accountCount,
+                'estimated_total_eur' => round($base + $variable, 2),
+            ];
+        }
+
         return [
-            'character' => $this->serializeUsageDetail($usage->character),
+            'character' => $primaryChar,
+            'character_account' => $characterIsApiKeyScoped ? $accountChar : null,
+            'character_is_api_key_scoped' => $characterIsApiKeyScoped,
             'document' => $this->serializeUsageDetail($usage->document),
             'team_document' => $this->serializeUsageDetail($usage->teamDocument),
-            'any_limit_reached' => $usage->anyLimitReached(),
+            'any_limit_reached' => $anyReached,
             'billing' => $billing,
+            'estimated_cost' => $estimatedCost,
         ];
     }
 
@@ -165,10 +256,15 @@ class DeeplService
             return null;
         }
 
-        $count = $detail->count;
-        $limit = $detail->limit;
+        return $this->serializeUsagePair($detail->count, $detail->limit);
+    }
 
-        if ($limit <= 0) {
+    /**
+     * @return array{count: int, limit: ?int, unlimited: bool, percent: ?int}|null
+     */
+    protected function serializeUsagePair(int $count, int $limit): ?array
+    {
+        if ($limit <= 0 || $limit >= self::USAGE_LIMIT_EFFECTIVELY_UNLIMITED) {
             return [
                 'count' => $count,
                 'limit' => null,
@@ -272,6 +368,11 @@ class DeeplService
 
     /**
      * Resolve and map source language for DeepL, or null for automatic detection.
+     *
+     * `language_mapping` may use target-only codes (e.g. en-GB, pt-PT). DeepL rejects those for
+     * `source_lang` — only base codes are valid (en, pt, de, …). Strip regional variants for sources.
+     *
+     * @see \DeepL\LanguageCode (e.g. ENGLISH_BRITISH is target-only)
      */
     protected function mapSourceLanguageForDeepL(?string $sourceLang): ?string
     {
@@ -279,7 +380,27 @@ class DeeplService
             return null;
         }
 
-        return $this->mapLanguage($this->resolveStatamicLocale($sourceLang));
+        $mapped = $this->mapLanguage($this->resolveStatamicLocale($sourceLang));
+        if ($mapped === '') {
+            return null;
+        }
+
+        try {
+            return LanguageCode::removeRegionalVariant($mapped);
+        } catch (DeepLException) {
+            return null;
+        }
+    }
+
+    /**
+     * When DeepL returns HTTP 400 for an invalid source_lang, retry once with auto-detection.
+     */
+    protected function shouldRetryTranslationWithAutoDetectedSource(DeepLException $e): bool
+    {
+        $msg = strtolower($e->getMessage());
+
+        return str_contains($msg, 'source_lang')
+            || str_contains($msg, 'source language');
     }
 
     protected function primaryLanguageSubtag(string $normalized): ?string

@@ -16,6 +16,23 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Estimated monthly cost (Bulk translations UI)
+    |--------------------------------------------------------------------------
+    |
+    | Rough estimate from GET /v2/usage character_count: base fee + variable charge
+    | per million characters. Not a substitute for the DeepL invoice — display
+    | a disclaimer in the UI. Disable with DEEPL_ESTIMATE_COST_ENABLED=false.
+    |
+    */
+
+    'estimated_cost_enabled' => (bool) env('DEEPL_ESTIMATE_COST_ENABLED', true),
+
+    'estimated_monthly_base_fee_eur' => (float) env('DEEPL_ESTIMATE_BASE_FEE_EUR', 4.99),
+
+    'estimated_per_million_chars_eur' => (float) env('DEEPL_ESTIMATE_PER_MILLION_EUR', 20),
+
+    /*
+    |--------------------------------------------------------------------------
     | English / Portuguese target variants (DeepL API)
     |--------------------------------------------------------------------------
     |
@@ -33,12 +50,28 @@ return [
     | Language Mapping
     |--------------------------------------------------------------------------
     |
-    | Maps your Statamic site handles to DeepL language codes.
+    | Maps your Statamic site handles and locale strings to DeepL language codes.
     | DeepL codes: https://developers.deepl.com/docs/resources/supported-languages
     |
-    | Use en-GB / en-US (not bare "en") for English targets where applicable.
+    | Use en-GB / en-US (not bare "en") for English *targets* where applicable.
+    | Source languages are normalized automatically (en-GB → en, pt-PT → pt, etc.).
     |
     */
+
+    /*
+    |--------------------------------------------------------------------------
+    | Field handles to translate even when localizable = false
+    |--------------------------------------------------------------------------
+    |
+    | Statamic blueprints sometimes mark hero titles as non-localizable (shared),
+    | but localized entries still store their own copy — and DeepL must translate
+    | it. Add handles here so bulk / entry translation never skips them.
+    |
+    */
+
+    'force_translate_handles' => [
+        'hero_title',
+    ],
 
     'language_mapping' => [
         // ISO / Statamic locale primary subtags (regional codes like de-CH are normalized to these)

@@ -217,6 +217,11 @@ class TranslateEntry extends Action
             $parts[] = __('Overridden :count existing translation(s)', ['count' => $result['updated']]);
         }
 
+        $linkedTotal = (int) ($result['linked_created_total'] ?? 0);
+        if ($linkedTotal > 0) {
+            $parts[] = __('Also created :count linked page(s)', ['count' => $linkedTotal]);
+        }
+
         $message = ! empty($parts) ? implode(', ', $parts) : __('No entries processed');
         $message .= ' '.__('(out of :total total)', ['total' => $result['total']]);
 
