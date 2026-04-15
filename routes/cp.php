@@ -16,4 +16,6 @@ Route::prefix('ai-translations')->name('statamic-ai-assistant.')->group(function
     Route::get('/status', [TranslationController::class, 'status'])->name('translate.status');
     Route::get('/deepl-usage', [TranslationController::class, 'deeplUsage'])->name('translate.deepl-usage');
     Route::get('/collection-entries', [TranslationController::class, 'collectionEntries'])->name('translate.collection-entries');
+    Route::get('/navigation-entries', [TranslationController::class, 'navigationEntries'])->name('translate.navigation-entries');
+    Route::post('/navigation-sync', [TranslationController::class, 'navigationSync'])->name('translate.navigation-sync');
 });

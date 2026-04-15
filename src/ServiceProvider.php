@@ -15,6 +15,7 @@ use BoldWeb\StatamicAiAssistant\Services\EntryReferenceResolver;
 use BoldWeb\StatamicAiAssistant\Services\EntryTranslator;
 use BoldWeb\StatamicAiAssistant\Services\GroqService;
 use BoldWeb\StatamicAiAssistant\Services\InfomaniakService;
+use BoldWeb\StatamicAiAssistant\Services\NavigationTreeSyncService;
 use BoldWeb\StatamicAiAssistant\Services\TranslationService;
 use Illuminate\Support\Facades\Route;
 use Statamic\Facades\CP\Nav;
@@ -76,6 +77,10 @@ class ServiceProvider extends AddonServiceProvider
         $this->app->singleton(TranslationService::class, function ($app) {
             return new TranslationService($app->make(EntryTranslator::class));
         });
+
+        $this->app->singleton(NavigationTreeSyncService::class, function ($app) {
+            return new NavigationTreeSyncService($app->make(TranslationService::class));
+        });
     }
 
     public function bootAddon()
@@ -96,7 +101,7 @@ class ServiceProvider extends AddonServiceProvider
         $this->publishes([
             __DIR__.'/../config/statamic-ai-assistant.php' => config_path('statamic-ai-assistant.php'),
             __DIR__.'/../config/deepl.php' => config_path('deepl.php'),
-        ], 'statamic-ai-assistant');
+        ], 'statamic-ai-assistant-config');
 
         // Legacy prompt routes
         $this->registerCpRoutes(function () {

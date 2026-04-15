@@ -4,6 +4,7 @@ namespace BoldWeb\StatamicAiAssistant\Controllers;
 
 use BoldWeb\StatamicAiAssistant\Services\CpTranslationBatchRunner;
 use BoldWeb\StatamicAiAssistant\Services\DeeplService;
+use BoldWeb\StatamicAiAssistant\Services\NavigationTreeSyncService;
 use BoldWeb\StatamicAiAssistant\Services\TranslationService;
 use BoldWeb\StatamicAiAssistant\Support\EntryLabel;
 use Illuminate\Http\JsonResponse;
@@ -19,10 +20,16 @@ class TranslationController
 
     protected CpTranslationBatchRunner $batchRunner;
 
-    public function __construct(TranslationService $translationService, CpTranslationBatchRunner $batchRunner)
-    {
+    protected NavigationTreeSyncService $navigationTreeSyncService;
+
+    public function __construct(
+        TranslationService $translationService,
+        CpTranslationBatchRunner $batchRunner,
+        NavigationTreeSyncService $navigationTreeSyncService
+    ) {
         $this->translationService = $translationService;
         $this->batchRunner = $batchRunner;
+        $this->navigationTreeSyncService = $navigationTreeSyncService;
     }
 
     /**
@@ -248,8 +255,67 @@ class TranslationController
     public function status(): JsonResponse
     {
         $status = $this->translationService->getTranslationStatus();
+        $navigations = $this->translationService->getNavigationsList();
 
-        return response()->json(['collections' => $status]);
+        return response()->json([
+            'collections' => $status,
+            'navigations' => $navigations,
+        ]);
+    }
+
+    /**
+     * Preview syncing the default site's navigation tree to other sites (structure copy + missing pages per locale).
+     */
+    public function navigationEntries(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'navigation' => 'required|string',
+        ]);
+
+        try {
+            $payload = $this->navigationTreeSyncService->preview($data['navigation']);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['error' => $e->getMessage()], 422);
+        }
+
+        return response()->json($payload);
+    }
+
+    /**
+     * Copy navigation structure from the default site to selected locales, translating missing pages then saving each site's tree.
+     */
+    public function navigationSync(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'navigation' => 'required|string',
+            'destination_locales' => 'sometimes|array|min:1',
+            'destination_locales.*' => 'string',
+            'destination_locale' => 'sometimes|string',
+        ]);
+
+        $destinationLocales = $data['destination_locales'] ?? [];
+        if (empty($destinationLocales) && isset($data['destination_locale'])) {
+            $destinationLocales = [$data['destination_locale']];
+        }
+        $destinationLocales = array_values(array_unique(array_filter($destinationLocales)));
+
+        $overwrite = false;
+        $maxDepth = (int) config('statamic-ai-assistant.linked_entries_max_depth', 1);
+
+        try {
+            $payload = $this->navigationTreeSyncService->sync(
+                $data['navigation'],
+                $destinationLocales,
+                $overwrite,
+                $maxDepth,
+            );
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['error' => $e->getMessage()], 422);
+        } catch (\Throwable $e) {
+            return response()->json(['error' => $e->getMessage()], 500);
+        }
+
+        return response()->json($payload);
     }
 
     /**

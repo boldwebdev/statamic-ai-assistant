@@ -41,6 +41,21 @@ return [
     |
     */
 
+    /*
+    |--------------------------------------------------------------------------
+    | Field handles to translate even when localizable = false
+    |--------------------------------------------------------------------------
+    |
+    | Statamic blueprints sometimes mark hero titles as non-localizable (shared),
+    | but localized entries still store their own copy — and DeepL must translate
+    | it. Add handles here so bulk / entry translation never skips them.
+    |
+    */
+
+    'force_translate_handles' => [
+        'hero_title',
+    ],
+
     'language_mapping' => [
         // ISO / Statamic locale primary subtags (regional codes like de-CH are normalized to these)
         'de' => 'de',

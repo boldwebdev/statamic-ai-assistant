@@ -167,14 +167,44 @@
     <div v-if="step === 1" class="translation-page__panel">
       <div class="translation-page__panel-head">
         <span class="translation-page__panel-badge">1</span>
-        <h2 class="translation-page__panel-title">{{ __('Select content to translate') }}</h2>
+        <h2 class="translation-page__panel-title">{{ step1PanelTitle }}</h2>
+      </div>
+
+      <!-- Collection vs navigation -->
+      <div class="translation-page__field">
+        <span class="translation-page__label">{{ __('Content source') }}</span>
+        <div class="translation-page__segmented" role="group" :aria-label="__('Content source')">
+          <button
+            type="button"
+            class="translation-page__segment"
+            :class="{ 'translation-page__segment--active': contentSourceType === 'collection' }"
+            :disabled="translationUiLocked"
+            @click="setContentSourceType('collection')"
+          >
+            {{ __('Collection') }}
+          </button>
+          <button
+            type="button"
+            class="translation-page__segment"
+            :class="{ 'translation-page__segment--active': contentSourceType === 'navigation' }"
+            :disabled="translationUiLocked"
+            @click="setContentSourceType('navigation')"
+          >
+            {{ __('Navigation') }}
+          </button>
+        </div>
       </div>
 
       <!-- Collection picker -->
-      <div class="translation-page__field">
-        <label class="translation-page__label">{{ __('Collection') }}</label>
+      <div v-if="contentSourceType === 'collection'" class="translation-page__field">
+        <label class="translation-page__label" for="translation-collection-select">{{ __('Collection') }}</label>
         <div class="translation-page__select-wrap">
-          <select v-model="selectedCollection" class="translation-page__select" @change="loadCollectionEntries">
+          <select
+            id="translation-collection-select"
+            v-model="selectedCollection"
+            class="translation-page__select"
+            @change="loadCollectionEntries"
+          >
             <option value="">{{ __('Choose a collection...') }}</option>
             <option v-for="col in collections" :key="col.handle" :value="col.handle">
               {{ col.title }}
@@ -183,8 +213,69 @@
         </div>
       </div>
 
+      <!-- Navigation picker -->
+      <div v-if="contentSourceType === 'navigation'" class="translation-page__field">
+        <label class="translation-page__label" for="translation-navigation-select">{{ __('Navigation') }}</label>
+        <div class="translation-page__select-wrap">
+          <select
+            id="translation-navigation-select"
+            v-model="selectedNavigation"
+            class="translation-page__select"
+          >
+            <option value="">{{ __('Choose a navigation...') }}</option>
+            <option v-for="nav in navigations" :key="nav.handle" :value="nav.handle">
+              {{ nav.title }}
+            </option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Navigation: structure sync preview (no entry checklist) -->
+      <div v-if="contentSourceType === 'navigation' && navigationSyncPreview" class="translation-page__nav-sync">
+        <p class="translation-page__help">
+          {{ __('Navigation sync intro') }}
+        </p>
+        <div class="translation-page__nav-sync-meta">
+          <p>
+            <strong>{{ navPreviewTitle }}</strong>
+            — {{ __('Branches in source tree') }}:
+            {{ navigationSyncPreview.tree_branch_count != null ? navigationSyncPreview.tree_branch_count : '—' }}
+          </p>
+          <p class="translation-page__help translation-page__help--compact">
+            {{ __('Source site') }}: {{ navPreviewSourceName }}
+            ({{ navPreviewSourceLocale }})
+          </p>
+        </div>
+
+        <div class="translation-page__nav-sync-config">
+          <div class="translation-page__field">
+            <label class="translation-page__label">{{ __('Source language') }}</label>
+            <p class="translation-page__source-readonly">
+              {{ defaultSourceSiteName }} <span class="translation-page__source-readonly-locale">({{ sourceLocale }})</span>
+            </p>
+            <p class="translation-page__help">{{ __('Navigation source site help') }}</p>
+          </div>
+          <div class="translation-page__field">
+            <label class="translation-page__label">{{ __('Target languages') }}</label>
+            <p class="translation-page__help">{{ __('Target languages help navigation merged') }}</p>
+            <translation-target-language-list
+              :sites="targetSiteOptions"
+              :value="destinationLocales"
+              :details-by-locale="navigationLocaleRowDetails"
+              @input="destinationLocales = $event"
+            />
+            <p v-if="destinationLocales.length === 0" class="translation-page__error-inline translation-page__error-inline--soft">
+              {{ __('Select at least one target language') }}
+            </p>
+          </div>
+          <div class="translation-page__estimate">
+            {{ estimateSummary }}
+          </div>
+        </div>
+      </div>
+
       <!-- Entry listing with checkboxes -->
-      <div v-if="collectionEntries.length" class="translation-page__entries-list">
+      <div v-if="contentSourceType === 'collection' && collectionEntries.length" class="translation-page__entries-list">
         <div class="translation-page__entries-toolbar">
           <label class="translation-page__checkbox-label">
             <input type="checkbox" v-model="selectAll" @change="toggleSelectAll" />
@@ -258,7 +349,10 @@
         </div>
       </div>
 
-      <div v-else-if="selectedCollection && !loadingEntries" class="translation-page__empty">
+      <div
+        v-else-if="contentSourceType === 'collection' && selectedCollection && !loadingEntries"
+        class="translation-page__empty"
+      >
         <span class="translation-page__empty-icon" aria-hidden="true">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25">
             <path d="M9 12h6M12 9v6" />
@@ -268,24 +362,54 @@
         <p>{{ __('No entries found in this collection.') }}</p>
       </div>
 
-      <div v-if="loadingEntries" class="translation-page__loading">
-        <span class="translation-page__spinner"></span>
-        <span>{{ __('Loading entries...') }}</span>
+      <div
+        v-else-if="
+          contentSourceType === 'navigation' && selectedNavigation && !loadingEntries && !navigationSyncPreview
+        "
+        class="translation-page__empty"
+      >
+        <span class="translation-page__empty-icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25">
+            <path d="M9 12h6M12 9v6" />
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+          </svg>
+        </span>
+        <p>{{ navigationPreviewError || __('Could not load navigation preview.') }}</p>
       </div>
 
-      <div class="translation-page__actions">
+      <div v-if="loadingEntries" class="translation-page__loading">
+        <span class="translation-page__spinner"></span>
+        <span>{{ loadingEntriesLabel }}</span>
+      </div>
+
+      <div class="translation-page__actions translation-page__actions--step1">
         <button
+          v-if="contentSourceType === 'collection'"
           class="btn-primary"
-          :disabled="selectedEntries.length === 0 || translationUiLocked"
+          :disabled="
+            translationUiLocked ||
+            selectedEntries.length === 0 ||
+            !selectedCollection ||
+            loadingEntries
+          "
           @click="goToConfigure"
         >
-          {{ __('Continue') }} ({{ selectedEntries.length }} {{ __('selected') }})
+          {{ __('Continue') }}
+          ({{ selectedEntries.length }} {{ __('selected') }})
+        </button>
+        <button
+          v-if="contentSourceType === 'navigation'"
+          class="btn-primary"
+          :disabled="!canStartTranslation || bulkRequestInFlight || translationUiLocked"
+          @click="onClickStartTranslation"
+        >
+          {{ __('Start translation') }}
         </button>
       </div>
     </div>
 
-    <!-- Step 2: Configure translation -->
-    <div v-if="step === 2" class="translation-page__panel">
+    <!-- Step 2: Configure translation (collection only — navigation is merged into step 1) -->
+    <div v-if="step === 2 && contentSourceType === 'collection'" class="translation-page__panel">
       <div class="translation-page__panel-head">
         <span class="translation-page__panel-badge">2</span>
         <h2 class="translation-page__panel-title">{{ __('Configure translation') }}</h2>
@@ -297,13 +421,15 @@
           <p class="translation-page__source-readonly">
             {{ defaultSourceSiteName }} <span class="translation-page__source-readonly-locale">({{ sourceLocale }})</span>
           </p>
-          <p class="translation-page__help">{{ __('Translation source is the default site language.') }}</p>
+          <p v-if="contentSourceType === 'collection'" class="translation-page__help">{{ __('Translation source is the default site language.') }}</p>
+          <p v-else class="translation-page__help">{{ __('Navigation source site help') }}</p>
         </div>
       </div>
 
       <div class="translation-page__field">
         <label class="translation-page__label">{{ __('Target languages') }}</label>
-        <p class="translation-page__help">{{ __('Target languages help') }}</p>
+        <p v-if="contentSourceType === 'collection'" class="translation-page__help">{{ __('Target languages help') }}</p>
+        <p v-else class="translation-page__help">{{ __('Target languages help navigation') }}</p>
         <translation-target-language-list
           :sites="targetSiteOptions"
           :value="destinationLocales"
@@ -361,10 +487,13 @@
       </div>
     </div>
 
-    <!-- Step 3: Progress & results -->
-    <div v-if="step === 3" class="translation-page__panel translation-page__panel--progress">
+    <!-- Progress & results: step 3 for collection, step 2 for navigation -->
+    <div
+      v-if="progressPanelVisible"
+      class="translation-page__panel translation-page__panel--progress"
+    >
       <div class="translation-page__panel-head">
-        <span class="translation-page__panel-badge">3</span>
+        <span class="translation-page__panel-badge">{{ progressStepBadge }}</span>
         <h2 class="translation-page__panel-title">{{ __('Translation progress') }}</h2>
       </div>
 
@@ -381,7 +510,7 @@
 
       <div v-if="isTranslationDone" class="translation-page__actions">
         <button class="btn" @click="resetWizard">{{ __('Translate more') }}</button>
-        <button class="btn-primary" @click="goToCollection">{{ __('View entries') }}</button>
+        <button class="btn-primary" @click="goToSourceView">{{ viewSourceButtonLabel }}</button>
       </div>
     </div>
   </div>
@@ -402,7 +531,11 @@ export default {
     return {
       step: 1,
       collections: [],
+      navigations: [],
+      /** 'collection' | 'navigation' */
+      contentSourceType: 'collection',
       selectedCollection: '',
+      selectedNavigation: '',
       collectionEntries: [],
       availableSites: [],
       originSiteHandle: '',
@@ -427,6 +560,11 @@ export default {
 
       /** True while POST /bulk is in flight (guards double-submit). */
       bulkRequestInFlight: false,
+
+      /** Preview payload for navigation sync (structure copy to locales). */
+      navigationSyncPreview: null,
+      /** Last API error when navigation preview fails (shown inline). */
+      navigationPreviewError: null,
     };
   },
 
@@ -478,8 +616,81 @@ export default {
       return typeof this.__ === 'function' ? this.__('Steps') : 'Steps';
     },
 
+    step1PanelTitle() {
+      if (this.contentSourceType === 'navigation') {
+        return this.__('Prepare navigation sync');
+      }
+      return this.__('Select content to translate');
+    },
+
+    /** Per-target-locale rows for navigation sync (shown next to checkboxes). */
+    navigationLocaleRowDetails() {
+      const preview = this.navigationSyncPreview;
+      if (!preview || !preview.per_destination || !this.availableSites.length) {
+        return {};
+      }
+      const src = this.sourceLocale;
+      const out = {};
+      for (const block of preview.per_destination) {
+        const site = this.availableSites.find((s) => s.handle === block.site_handle);
+        if (!site || site.locale === src) {
+          continue;
+        }
+        if (!block.missing_entries || block.missing_entries.length === 0) {
+          out[site.locale] = { text: this.__('No pages missing'), tone: 'ok' };
+        } else {
+          out[site.locale] = {
+            text: `${this.__('Pages translated before sync', {
+              count: block.missing_entries.length,
+            })}: ${this.missingEntryTitlesJoin(block)}`,
+            tone: 'warn',
+          };
+        }
+      }
+      return out;
+    },
+
+    progressPanelVisible() {
+      if (this.contentSourceType === 'navigation') {
+        return this.step === 2;
+      }
+      return this.step === 3;
+    },
+
+    progressStepBadge() {
+      return this.contentSourceType === 'navigation' ? 2 : 3;
+    },
+
+    isProgressStep() {
+      if (this.contentSourceType === 'navigation') {
+        return this.step === 2;
+      }
+      return this.step === 3;
+    },
+
     sourceLocale() {
       return this.defaultSourceLocale;
+    },
+
+    navPreviewTitle() {
+      const n = this.navigationSyncPreview && this.navigationSyncPreview.navigation;
+      return (n && n.title) || this.selectedNavigation || '';
+    },
+
+    navPreviewSourceName() {
+      const s = this.navigationSyncPreview && this.navigationSyncPreview.source_site;
+      return (s && s.name) || '';
+    },
+
+    navPreviewSourceLocale() {
+      const s = this.navigationSyncPreview && this.navigationSyncPreview.source_site;
+      return (s && s.locale) || '';
+    },
+
+    loadingEntriesLabel() {
+      return this.contentSourceType === 'navigation'
+        ? this.__('Loading navigation preview…')
+        : this.__('Loading entries...');
     },
 
     targetSiteOptions() {
@@ -509,14 +720,33 @@ export default {
       if (m === 0) {
         return 0;
       }
+      if (this.contentSourceType === 'navigation') {
+        return m;
+      }
       return this.selectedEntries.length * m;
     },
 
+    viewSourceButtonLabel() {
+      if (this.contentSourceType === 'navigation') {
+        return this.__('View navigation');
+      }
+      return this.__('View entries');
+    },
+
     estimateSummary() {
+      if (this.contentSourceType === 'navigation') {
+        const c = (this.destinationLocales || []).length;
+        if (!this.selectedNavigation || !c) {
+          return this.__('Choose a navigation and target languages to sync.');
+        }
+        return this.__('Will sync the navigation structure to :count language(s), translating missing pages first.', {
+          count: c,
+        });
+      }
       const n = this.selectedEntries.length;
       const langs = this.destinationLanguageNames;
       if (!n || !(this.destinationLocales || []).length) {
-        return this.__('Choose sources and targets to see the estimate.');
+        return this.__('Choose a source, entries, and target languages to see the estimate.');
       }
       return this.__('Will translate :entries entries into :langs (:ops operations) using DeepL.', {
         entries: n,
@@ -535,6 +765,9 @@ export default {
     },
 
     wouldSkipExisting() {
+      if (this.contentSourceType === 'navigation') {
+        return false;
+      }
       return this.selectedEntries.some((id) => {
         const entry = this.collectionEntries.find((e) => e.id === id);
         if (!entry) return false;
@@ -547,6 +780,9 @@ export default {
     },
 
     conflictingDestinationLocales() {
+      if (this.contentSourceType !== 'collection') {
+        return [];
+      }
       if (this.overwrite) {
         return [];
       }
@@ -598,6 +834,9 @@ export default {
     },
 
     hasConflictWithoutOverwrite() {
+      if (this.contentSourceType !== 'collection') {
+        return false;
+      }
       return this.conflictingDestinationLocales.length > 0;
     },
 
@@ -606,14 +845,16 @@ export default {
     },
 
     canStartTranslation() {
-      if (
-        this.selectedEntries.length === 0 ||
-        !this.sourceLocale ||
-        this.destinationLocales.length === 0
-      ) {
+      if (!this.sourceLocale || this.destinationLocales.length === 0) {
         return false;
       }
       if (this.destinationLocales.some((l) => l === this.sourceLocale)) {
+        return false;
+      }
+      if (this.contentSourceType === 'navigation') {
+        return !!(this.selectedNavigation && this.navigationSyncPreview);
+      }
+      if (this.selectedEntries.length === 0) {
         return false;
       }
       if (this.hasConflictWithoutOverwrite) {
@@ -629,9 +870,9 @@ export default {
       );
     },
 
-    /** Step 3: translation running (queued / processing) — disable unrelated UI. */
+    /** Progress step: disable unrelated UI while work is running. */
     translationUiLocked() {
-      if (this.step !== 3) {
+      if (!this.isProgressStep) {
         return false;
       }
       const s = this.batchProgress && this.batchProgress.status;
@@ -646,11 +887,10 @@ export default {
     },
 
     stepLabels() {
-      return [
-        this.__('Select content'),
-        this.__('Configure'),
-        this.__('Progress'),
-      ];
+      if (this.contentSourceType === 'navigation') {
+        return [this.__('Prepare navigation sync'), this.__('Progress')];
+      }
+      return [this.__('Select content'), this.__('Configure'), this.__('Progress')];
     },
   },
 
@@ -660,10 +900,21 @@ export default {
         this.loadDeeplUsage();
       }
     },
+    selectedNavigation(val) {
+      if (this.contentSourceType !== 'navigation') {
+        return;
+      }
+      if (val) {
+        this.loadNavigationEntries();
+      } else {
+        this.navigationSyncPreview = null;
+        this.navigationPreviewError = null;
+      }
+    },
   },
 
   mounted() {
-    this.loadCollections();
+    this.loadStatus();
     this.loadDeeplUsage();
   },
 
@@ -681,6 +932,13 @@ export default {
       } catch (e) {
         return String(n);
       }
+    },
+
+    missingEntryTitlesJoin(block) {
+      if (!block || !block.missing_entries || !block.missing_entries.length) {
+        return '';
+      }
+      return block.missing_entries.map((e) => e.title).join(', ');
     },
 
     formatBillingEnd(iso) {
@@ -717,6 +975,9 @@ export default {
     },
 
     targetLocaleHasConflict(site) {
+      if (this.contentSourceType !== 'collection') {
+        return false;
+      }
       if (this.overwrite || !site) {
         return false;
       }
@@ -737,21 +998,10 @@ export default {
 
     goToConfigure() {
       this.step = 2;
-      this.ensureDestinationDefaults();
-    },
-
-    ensureDestinationDefaults() {
-      if (this.destinationLocales.length > 0) {
-        return;
-      }
-      const targets = (this.availableSites || [])
-        .map((s) => s.locale)
-        .filter((l) => l && l !== this.sourceLocale);
-      this.destinationLocales = targets;
     },
 
     onClickStartTranslation() {
-      if (this.overwrite) {
+      if (this.contentSourceType === 'collection' && this.overwrite) {
         this.showOverwriteConfirm = true;
         return;
       }
@@ -761,15 +1011,6 @@ export default {
     confirmOverwriteAndStart() {
       this.showOverwriteConfirm = false;
       this.runTranslation();
-    },
-
-    async loadCollections() {
-      try {
-        const response = await axios.get('/cp/ai-translations/status');
-        this.collections = response.data.collections || [];
-      } catch (error) {
-        this.$toast.error(this.__('Failed to load collections.'));
-      }
     },
 
     async loadCollectionEntries() {
@@ -797,13 +1038,15 @@ export default {
         this.defaultSourceLocale = response.data.default_source_locale || '';
         this.defaultSourceSiteName = response.data.default_source_site_name || '';
 
-        this.ensureDestinationDefaults();
+        this.destinationLocales = [];
       } catch (error) {
         const msg =
           error.response?.data?.error ||
           error.response?.data?.message ||
           this.__('Failed to load entries.');
         this.$toast.error(msg);
+        this.collectionEntries = [];
+        this.availableSites = [];
       } finally {
         this.loadingEntries = false;
       }
@@ -835,6 +1078,7 @@ export default {
           target_title: r.target_title,
           edit_url: r.edit_url,
           destination_locale: r.destination_locale,
+          linked_entries: r.linked_entries || [],
         };
       });
       return entries;
@@ -848,8 +1092,76 @@ export default {
       return `${title} → ${langName}`;
     },
 
+    async runNavigationSync() {
+      if (this.bulkRequestInFlight) {
+        return;
+      }
+      this.bulkRequestInFlight = true;
+      this.step = 2;
+      this.batchEntries = {};
+      this.batchProgress = {
+        current: 0,
+        total: 1,
+        status: 'processing',
+        current_entry: this.__('Syncing navigation…'),
+      };
+
+      try {
+        const { data } = await axios.post('/cp/ai-translations/navigation-sync', {
+          navigation: this.selectedNavigation,
+          destination_locales: this.destinationLocales,
+        });
+
+        const results = data.results || [];
+        const errs = results
+          .filter((r) => !r.success)
+          .map((r) => r.error)
+          .filter(Boolean);
+        const ok = results.filter((r) => r.success);
+
+        const batchEntries = {};
+        results.forEach((r) => {
+          const key = `nav:${r.locale}`;
+          batchEntries[key] = {
+            status: r.success ? 'completed' : 'failed',
+            error: r.error || null,
+            origin_title: this.__('Navigation structure'),
+            target_title: r.message || r.site_handle || r.locale,
+            destination_locale: r.locale,
+          };
+        });
+        this.batchEntries = batchEntries;
+
+        this.batchProgress = {
+          current: results.length,
+          total: Math.max(results.length, 1),
+          status: 'completed',
+          translated: ok.length,
+          updated: 0,
+          errors: errs,
+        };
+      } catch (error) {
+        const msg =
+          error.response?.data?.error ||
+          error.response?.data?.message ||
+          error.message ||
+          this.__('Translation failed.');
+        this.batchProgress = {
+          status: 'failed',
+          errors: [msg],
+          fatal_error: msg,
+        };
+      } finally {
+        this.bulkRequestInFlight = false;
+      }
+    },
+
     async runTranslation() {
       if (this.bulkRequestInFlight) {
+        return;
+      }
+      if (this.contentSourceType === 'navigation') {
+        await this.runNavigationSync();
         return;
       }
       this.bulkRequestInFlight = true;
@@ -868,6 +1180,7 @@ export default {
 
       let translated = 0;
       let updated = 0;
+      let linkedCreatedTotal = 0;
       const errors = [];
 
       for (let i = 0; i < pairs.length; i++) {
@@ -900,15 +1213,19 @@ export default {
               target_title: data.target_title,
               edit_url: data.edit_url,
               destination_locale: locale,
+              linked_entries: data.linked_entries || [],
             },
           };
 
           if (!data.success) {
             errors.push(data.error);
-          } else if (data.skipped || data.is_new) {
-            translated++;
           } else {
-            updated++;
+            linkedCreatedTotal += (data.linked_entries || []).length;
+            if (data.skipped || data.is_new) {
+              translated++;
+            } else {
+              updated++;
+            }
           }
         } catch (error) {
           const msg =
@@ -939,6 +1256,7 @@ export default {
         translated,
         updated,
         errors,
+        linked_created_total: linkedCreatedTotal,
       };
       this.bulkRequestInFlight = false;
     },
@@ -975,10 +1293,108 @@ export default {
       this.batchEntries = {};
       this.showOverwriteConfirm = false;
       this.bulkRequestInFlight = false;
-      this.loadCollectionEntries();
+      this.navigationSyncPreview = null;
+      this.navigationPreviewError = null;
+      this.destinationLocales = [];
+      this.loadContentEntries();
     },
 
-    goToCollection() {
+    setContentSourceType(type) {
+      if (this.contentSourceType === type) {
+        return;
+      }
+      this.step = 1;
+      this.contentSourceType = type;
+      this.selectedCollection = '';
+      this.selectedNavigation = '';
+      this.collectionEntries = [];
+      this.availableSites = [];
+      this.originSiteHandle = '';
+      this.defaultSourceLocale = '';
+      this.defaultSourceSiteName = '';
+      this.selectedEntries = [];
+      this.selectAll = false;
+      this.navigationSyncPreview = null;
+      this.navigationPreviewError = null;
+      this.destinationLocales = [];
+    },
+
+    async loadContentEntries() {
+      if (this.contentSourceType === 'navigation') {
+        await this.loadNavigationEntries();
+      } else {
+        await this.loadCollectionEntries();
+      }
+    },
+
+    async loadStatus() {
+      try {
+        const response = await axios.get('/cp/ai-translations/status');
+        this.collections = response.data.collections || [];
+        this.navigations = response.data.navigations || [];
+      } catch (error) {
+        this.$toast.error(this.__('Failed to load collections.'));
+      }
+    },
+
+    async loadNavigationEntries() {
+      if (!this.selectedNavigation) {
+        this.collectionEntries = [];
+        this.availableSites = [];
+        this.originSiteHandle = '';
+        this.defaultSourceLocale = '';
+        this.defaultSourceSiteName = '';
+        this.navigationSyncPreview = null;
+        this.navigationPreviewError = null;
+        return;
+      }
+
+      this.loadingEntries = true;
+      this.selectedEntries = [];
+      this.selectAll = false;
+      this.navigationSyncPreview = null;
+      this.navigationPreviewError = null;
+
+      try {
+        const response = await axios.get('/cp/ai-translations/navigation-entries', {
+          params: { navigation: this.selectedNavigation },
+        });
+
+        const data = response.data;
+        if (!data || typeof data !== 'object' || !data.navigation || !data.source_site) {
+          throw new Error(this.__('Invalid response from server.'));
+        }
+
+        this.navigationSyncPreview = data;
+        this.navigationPreviewError = null;
+        this.collectionEntries = [];
+        this.availableSites = data.sites || [];
+        this.originSiteHandle = data.origin_site_handle || '';
+        this.defaultSourceLocale = data.default_source_locale || '';
+        this.defaultSourceSiteName = data.default_source_site_name || '';
+
+        this.destinationLocales = [];
+      } catch (error) {
+        const msg =
+          error.response?.data?.error ||
+          error.response?.data?.message ||
+          error.message ||
+          this.__('Failed to load entries.');
+        this.navigationPreviewError = msg;
+        this.$toast.error(msg);
+        this.collectionEntries = [];
+        this.availableSites = [];
+        this.navigationSyncPreview = null;
+      } finally {
+        this.loadingEntries = false;
+      }
+    },
+
+    goToSourceView() {
+      if (this.contentSourceType === 'navigation' && this.selectedNavigation) {
+        window.location.href = `/cp/navigation/${this.selectedNavigation}`;
+        return;
+      }
       if (this.selectedCollection) {
         window.location.href = `/cp/collections/${this.selectedCollection}`;
       }

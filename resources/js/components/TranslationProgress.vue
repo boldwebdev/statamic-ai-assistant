@@ -56,6 +56,13 @@
           <span class="translation-progress__stat-number">{{ errorCount }}</span>
           <span class="translation-progress__stat-label">{{ __('Errors') }}</span>
         </div>
+        <div
+          v-if="linkedCreatedTotalDisplay > 0"
+          class="translation-progress__stat translation-progress__stat--linked"
+        >
+          <span class="translation-progress__stat-number">{{ linkedCreatedTotalDisplay }}</span>
+          <span class="translation-progress__stat-label">{{ __('Also created (linked)') }}</span>
+        </div>
       </div>
 
       <!-- Error details -->
@@ -73,6 +80,7 @@
         v-for="row in normalizedRows"
         :key="row.key"
         class="translation-progress__entry"
+        :class="{ 'translation-progress__entry--linked': row.linked_entry }"
       >
         <span class="translation-progress__entry-icon">
           <svg v-if="row.status === 'completed'" class="translation-progress__icon--check" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" width="16" height="16">
@@ -104,12 +112,16 @@
             <span v-if="row.target_title" class="translation-progress__entry-target">{{ row.target_title }}</span>
             <span v-if="row.lang_label" class="translation-progress__entry-lang">{{ row.lang_label }}</span>
           </span>
+          <div v-if="row.linked_entry && row.collection_title" class="translation-progress__entry-linked-meta">
+            {{ row.collection_title }}
+          </div>
         </div>
         <span
           class="translation-progress__entry-status"
           :class="'translation-progress__entry-status--' + row.status"
         >
-          <template v-if="row.status === 'completed'">{{ __('Translated') }}</template>
+          <template v-if="row.linked_entry">{{ __('Linked') }}</template>
+          <template v-else-if="row.status === 'completed'">{{ __('Translated') }}</template>
           <template v-else-if="row.status === 'failed'">{{ __('Failed') }}</template>
           <template v-else>{{ row.status }}</template>
         </span>
@@ -167,6 +179,18 @@ export default {
       return this.progress?.errors?.length || 0;
     },
 
+    linkedCreatedTotalDisplay() {
+      const p = this.progress || {};
+      if (p.linked_created_total != null && Number(p.linked_created_total) > 0) {
+        return Number(p.linked_created_total);
+      }
+      let n = 0;
+      Object.values(this.entries || {}).forEach((row) => {
+        n += (row.linked_entries || []).length;
+      });
+      return n;
+    },
+
     fatalMessages() {
       const p = this.progress || {};
       if (p.fatal_error) {
@@ -186,21 +210,38 @@ export default {
         localeNames[s.locale] = s.name;
       });
 
-        return Object.keys(obj).map((key) => {
+      const rows = [];
+      Object.keys(obj).forEach((key) => {
         const row = obj[key] || {};
         const loc = row.destination_locale || '';
         const raw = row.status || 'processing';
         const st = raw === 'skipped' ? 'completed' : raw;
-        return {
+        const langLabel = localeNames[loc] || loc;
+        rows.push({
           key,
           status: st,
           error: row.error,
           origin_title: row.origin_title,
           target_title: row.target_title,
           edit_url: row.edit_url,
-          lang_label: localeNames[loc] || loc,
-        };
+          lang_label: langLabel,
+          linked_entry: false,
+        });
+        (row.linked_entries || []).forEach((le) => {
+          rows.push({
+            key: `${key}::linked::${le.entry_id}`,
+            status: 'completed',
+            error: null,
+            origin_title: typeof this.__ === 'function' ? this.__('Also created') : 'Also created',
+            target_title: le.title,
+            edit_url: le.edit_url,
+            lang_label: langLabel,
+            linked_entry: true,
+            collection_title: le.collection_title,
+          });
+        });
       });
+      return rows;
     },
   },
 };

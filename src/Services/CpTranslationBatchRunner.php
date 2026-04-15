@@ -180,6 +180,11 @@ class CpTranslationBatchRunner
                     $failed = $rows->where('status', 'failed');
                     $errors = $failed->pluck('error')->filter()->values()->toArray();
 
+                    $linkedCreatedTotal = 0;
+                    foreach ($entriesData as $row) {
+                        $linkedCreatedTotal += count($row['linked_entries'] ?? []);
+                    }
+
                     Cache::put("translation:batch:{$batchId}:progress", [
                         'current' => $totalJobs,
                         'total' => $totalJobs,
@@ -189,6 +194,7 @@ class CpTranslationBatchRunner
                         'updated' => $updated,
                         'skipped' => 0,
                         'errors' => $errors,
+                        'linked_created_total' => $linkedCreatedTotal,
                     ], now()->addHours(2));
                 })
                 ->catch(function ($batch, \Throwable $e) use ($batchId) {

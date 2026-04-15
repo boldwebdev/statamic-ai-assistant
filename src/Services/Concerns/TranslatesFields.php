@@ -71,7 +71,7 @@ trait TranslatesFields
             $fieldType = $fieldDef['type'] ?? null;
             $isLocalizable = $fieldDef['localizable'] ?? true;
 
-            if (! $isLocalizable) {
+            if (! $isLocalizable && ! $this->shouldForceTranslateHandle($handle)) {
                 continue;
             }
 
@@ -79,6 +79,18 @@ trait TranslatesFields
         }
 
         return $result;
+    }
+
+    /**
+     * Blueprint fields marked localizable: false are skipped unless listed in
+     * config('deepl.force_translate_handles') (e.g. hero_title on shared hero fieldsets).
+     */
+    private function shouldForceTranslateHandle(string $handle): bool
+    {
+        /** @var array<int, string> $handles */
+        $handles = config('deepl.force_translate_handles', ['hero_title']);
+
+        return in_array($handle, $handles, true);
     }
 
     /**

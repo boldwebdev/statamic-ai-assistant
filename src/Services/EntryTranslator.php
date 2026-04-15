@@ -3,9 +3,11 @@
 namespace BoldWeb\StatamicAiAssistant\Services;
 
 use BoldWeb\StatamicAiAssistant\Services\Concerns\TranslatesFields;
+use BoldWeb\StatamicAiAssistant\Support\EntryLabel;
 use DeepL\TranslateTextOptions;
 use Illuminate\Support\Str;
 use Statamic\Entries\Entry as StatamicEntry;
+use Statamic\Facades\Collection;
 use Statamic\Facades\Entry;
 
 class EntryTranslator
@@ -21,6 +23,9 @@ class EntryTranslator
     private string $sourceLang;
 
     private string $targetLang;
+
+    /** @var array<string, array{entry_id: string, title: string, edit_url: string|null, collection_handle: string, collection_title: string}> */
+    private array $linkedEntriesBuffer = [];
 
     public function __construct(
         DeeplService $deeplService,
@@ -38,6 +43,10 @@ class EntryTranslator
         int $currentDepth = 0,
         int $maxDepth = 1,
     ): StatamicEntry {
+        if ($currentDepth === 0) {
+            $this->linkedEntriesBuffer = [];
+        }
+
         $this->sourceLang = $originEntry->locale();
         $this->targetLang = $targetSite;
 
@@ -77,6 +86,20 @@ class EntryTranslator
 
         $targetEntry = $existingTarget;
         if (! $targetEntry) {
+            $cachedTargetId = $this->referenceResolver->getCachedTargetId($originEntry->id(), $targetSite);
+            if ($cachedTargetId) {
+                $targetEntry = Entry::find($cachedTargetId);
+                if (! $targetEntry) {
+                    $targetEntry = Entry::make()
+                        ->id($cachedTargetId)
+                        ->collection($originEntry->collectionHandle())
+                        ->blueprint($blueprint->handle())
+                        ->locale($targetSite)
+                        ->origin($originEntry->id());
+                }
+            }
+        }
+        if (! $targetEntry) {
             $targetEntry = Entry::make()
                 ->collection($originEntry->collectionHandle())
                 ->blueprint($blueprint->handle())
@@ -91,9 +114,40 @@ class EntryTranslator
             $targetEntry->published(true);
         }
 
-        $targetEntry->save();
+        // Use saveQuietly to prevent EntrySaving/EntrySaved events from
+        // triggering side-effects in packages like stillat/relationships,
+        // which would otherwise sync bidirectional references and corrupt
+        // the origin (source-language) entries.
+        $targetEntry->saveQuietly();
+
+        if ($currentDepth > 0) {
+            $coll = Collection::findByHandle($targetEntry->collectionHandle());
+            $this->linkedEntriesBuffer[$targetEntry->id()] = [
+                'entry_id' => $targetEntry->id(),
+                'title' => EntryLabel::for($targetEntry),
+                'edit_url' => $targetEntry->editUrl(),
+                'collection_handle' => $targetEntry->collectionHandle(),
+                'collection_title' => $coll ? $coll->title() : $targetEntry->collectionHandle(),
+            ];
+        }
 
         return $targetEntry;
+    }
+
+    /**
+     * @return array<int, array{entry_id: string, title: string, edit_url: string|null, collection_handle: string, collection_title: string}>
+     */
+    public function takeLinkedEntriesCreated(): array
+    {
+        $out = array_values($this->linkedEntriesBuffer);
+        $this->linkedEntriesBuffer = [];
+
+        return $out;
+    }
+
+    public function resetLinkedEntriesBuffer(): void
+    {
+        $this->linkedEntriesBuffer = [];
     }
 
     // ── Entry-specific collect (handles REFERENCE_TYPES pass-through) ─
@@ -115,10 +169,18 @@ class EntryTranslator
             }
 
             $fieldDef = $fields[$handle] ?? null;
+
+            // Skip fields not defined in the blueprint (metadata like
+            // duplicated_from, updated_by, updated_at) — these should be
+            // inherited from the origin, not copied into the localization.
+            if ($fieldDef === null) {
+                continue;
+            }
+
             $fieldType = $fieldDef['type'] ?? null;
             $isLocalizable = $fieldDef['localizable'] ?? true;
 
-            if (! $isLocalizable && ! in_array($fieldType, self::REFERENCE_TYPES)) {
+            if (! $isLocalizable && ! $this->shouldForceTranslateHandle($handle)) {
                 continue;
             }
 
@@ -144,9 +206,14 @@ class EntryTranslator
 
             $fieldDef = $fields[$handle] ?? null;
             $fieldType = $fieldDef['type'] ?? null;
+            $isLocalizable = $fieldDef['localizable'] ?? true;
 
             if (in_array($fieldType, self::REFERENCE_TYPES)) {
-                $value = $this->referenceResolver->resolve($value, $targetSite, $currentDepth, $maxDepth);
+                // Only resolve references for localizable fields — non-localizable
+                // references are inherited from the origin and must not be remapped.
+                if ($isLocalizable) {
+                    $value = $this->referenceResolver->resolve($value, $targetSite, $currentDepth, $maxDepth);
+                }
 
                 continue;
             }
