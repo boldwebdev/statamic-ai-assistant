@@ -55,6 +55,30 @@ abstract class AbstractAiService
     }
 
     /**
+     * Whether this provider supports OpenAI-style chat tools (function calling).
+     */
+    public function supportsChatTools(): bool
+    {
+        return false;
+    }
+
+    /**
+     * Non-streaming chat completion with optional tools. Returns the raw API JSON (OpenAI shape).
+     *
+     * @param  array<int, array<string, mixed>>  $messages
+     * @param  array<int, array<string, mixed>>  $tools
+     * @param  string|array<string, mixed>  $toolChoice  'auto'|'required'|'none' or {type: 'function', function: {name: '...'}}
+     * @return array<string, mixed>
+     */
+    /**
+     * @param  callable(): void|null  $streamHeartbeat  Throttled CP keepalive while the HTTP client receives the completion body.
+     */
+    public function createChatCompletion(array $messages, ?int $maxTokens, array $tools = [], string|array $toolChoice = 'auto', ?callable $streamHeartbeat = null): array
+    {
+        throw new \RuntimeException(__('This AI provider does not support tool calling for entry generation.'));
+    }
+
+    /**
      * Generate content using the provided prompt.
      */
     public function generateContentFromPrompt(string $prompt): string

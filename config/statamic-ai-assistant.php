@@ -97,11 +97,17 @@ return [
     | Laravel's HTTP client defaults to a 30 second timeout. The entry generator
     | sends large system prompts (full blueprint schema) and may use up to
     | generator_max_tokens — Infomaniak often needs longer than 30s to respond.
-    | Keep this in line with the CP axios timeout for /cp/ai-generate/generate (120s).
+    | Multi-entry runs and tool loops can take several minutes per provider call;
+    | raise this if you see cURL timeout 28 / operation timed out in logs.
     |
     */
 
-    'infomaniak_http_timeout' => max(30, (int) env('STATAMIC_AI_ASSISTANT_INFOMANIAK_HTTP_TIMEOUT', 120)),
+    'infomaniak_http_timeout' => max(30, (int) env('STATAMIC_AI_ASSISTANT_INFOMANIAK_HTTP_TIMEOUT', 600)),
+
+    /*
+    | Groq HTTP client (Guzzle) timeout for direct chat/completions calls.
+    */
+    'groq_http_timeout' => max(30, (int) env('STATAMIC_AI_ASSISTANT_GROQ_HTTP_TIMEOUT', 600)),
 
     /*
     |--------------------------------------------------------------------------
@@ -234,7 +240,56 @@ return [
 
     'entry_generator' => env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR', true),
 
+    /*
+    | BOLD agent — queued batch generation (after planner)
+    |--------------------------------------------------------------------------
+    |
+    | Multi-entry content generation runs in Bus::chain jobs so the CP request
+    | ends after the plan. Requires QUEUE_CONNECTION other than "sync" (same as
+    | website migration). preferred_paths are updated between chained jobs.
+    |
+    */
+    'entry_generator_batch' => [
+        'queue' => env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_QUEUE', 'default'),
+        'job_timeout' => max(60, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_JOB_TIMEOUT', 300)),
+        'job_tries' => max(1, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_JOB_TRIES', 2)),
+    ],
+
     'generator_max_tokens' => env('STATAMIC_AI_ASSISTANT_GENERATOR_MAX_TOKENS', 4000),
+
+    /*
+    | Max completion tokens for the multi-entry planner only. Listing → many plan
+    | rows needs a large JSON; if this is too low the model truncates, parsing
+    | fails, and the flow falls back to a single entry (one card) while the
+    | generator then hammers fetch_page_content for every URL.
+    */
+    'entry_generator_planner_max_output_tokens' => max(4096, min(131072, (int) env('STATAMIC_AI_ASSISTANT_PLANNER_MAX_OUTPUT_TOKENS', 12000))),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Entry generator — URL fetch tool (LLM function calling)
+    |--------------------------------------------------------------------------
+    |
+    | When enabled and the AI provider supports tools, the model may call
+    | fetch_page_content to load full article/detail pages (e.g. from listing
+    | teasers). Requires prompt_url_fetch.enabled and a tool-capable model.
+    |
+    */
+    'entry_generator_fetch_url_tool' => (bool) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_FETCH_URL_TOOL', true),
+    'entry_generator_tool_max_rounds' => max(1, min(24, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_ROUNDS', 120))),
+    'entry_generator_tool_max_fetches' => max(1, min(40, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_FETCHES', 100))),
+
+    /*
+    |--------------------------------------------------------------------------
+    | BOLD agent — multi-entry plan cap
+    |--------------------------------------------------------------------------
+    |
+    | Maximum entries the planner may return in one generate request. Increase
+    | STATAMIC_AI_ASSISTANT_BOLD_AGENT_MAX_PLAN_ENTRIES if users need larger
+    | batches (capped at 500 to avoid runaway API use).
+    |
+    */
+    'bold_agent_max_plan_entries' => max(1, min(500, (int) env('STATAMIC_AI_ASSISTANT_BOLD_AGENT_MAX_PLAN_ENTRIES', 100))),
 
     'prompt_generator_preface' => env(
         'STATAMIC_AI_ASSISTANT_GENERATOR_PREFACE',
@@ -264,18 +319,80 @@ return [
     | When the user prompt contains http(s) URLs, the server fetches readable
     | text via https://r.jina.ai/{your-url} and appends it to the LLM context.
     | Failures (blocked sites, timeouts) become user-visible warnings only.
-    | Set JINA_API_KEY for higher rate limits (optional Bearer token).
+    |
+    | Set STATAMIC_AI_ASSISTANT_JINA_API_KEY or JINA_API_KEY (see .env.example).
+    | The key is sent as Authorization: Bearer {key} on every Jina Reader request.
     |
     */
 
     'prompt_url_fetch' => [
         'enabled' => env('STATAMIC_AI_ASSISTANT_PROMPT_URL_FETCH', true),
         'reader_base' => rtrim(env('STATAMIC_AI_ASSISTANT_JINA_READER_BASE', 'https://r.jina.ai'), '/'),
-        'timeout' => max(5, (int) env('STATAMIC_AI_ASSISTANT_JINA_TIMEOUT', 25)),
+        'timeout' => max(5, (int) env('STATAMIC_AI_ASSISTANT_JINA_TIMEOUT', 120)),
         'max_urls' => max(1, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_URLS', 5)),
         'max_chars_per_url' => max(1000, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_CHARS', 12000)),
         'max_total_chars' => max(5000, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_TOTAL_CHARS', 40000)),
-        'api_key' => env('JINA_API_KEY'),
+        'api_key' => env('STATAMIC_AI_ASSISTANT_JINA_API_KEY') ?: env('JINA_API_KEY'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Website migration
+    |--------------------------------------------------------------------------
+    |
+    | Settings for the "migrate a whole website" tool. Each page becomes a queued
+    | MigratePageJob that fetches via Jina, runs the EntryGeneratorService, and
+    | saves a draft entry.
+    |
+    */
+
+    'migration' => [
+        'enabled' => env('STATAMIC_AI_ASSISTANT_MIGRATION_ENABLED', true),
+        // Queue name used to dispatch MigratePageJob. Defaults to "default" so a
+        // stock Horizon / queue:work setup picks it up without extra config.
+        // Set to a dedicated queue (e.g. "migrations") only if your worker
+        // supervisor is explicitly configured to watch it.
+        'queue' => env('STATAMIC_AI_ASSISTANT_MIGRATION_QUEUE', 'default'),
+        'max_pages_per_session' => max(1, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_MAX_PAGES', 500)),
+        'crawl_max_depth' => max(0, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_CRAWL_DEPTH', 3)),
+        'crawl_per_host_rps' => max(1, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_HOST_RPS', 3)),
+        'respect_robots_txt' => (bool) env('STATAMIC_AI_ASSISTANT_MIGRATION_RESPECT_ROBOTS', true),
+        'discovery_timeout' => max(5, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_DISCOVERY_TIMEOUT', 20)),
+        'discovery_budget' => max(10, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_DISCOVERY_BUDGET', 25)),
+        'fetch_timeout' => max(5, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_FETCH_TIMEOUT', 90)),
+
+        // When a child page migrates before its parent finishes saving, the job
+        // polls the session for the parent's entry_id (structure placement).
+        'parent_entry_wait_attempts' => max(10, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_PARENT_WAIT_ATTEMPTS', 60)),
+        'parent_entry_wait_ms' => max(50, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_PARENT_WAIT_MS', 250)),
+
+        // Asset container that downloaded migration images go into. If null,
+        // the first available container is used. Set to the handle (e.g. "images")
+        // of the container your blueprints' assets fields point at, otherwise
+        // downloaded images are uploaded but not preferred when filling fields.
+        'asset_container' => env('STATAMIC_AI_ASSISTANT_MIGRATION_ASSET_CONTAINER', null),
+
+        // Folder prefix inside the container. The downloader appends "/{sessionId}".
+        'asset_folder' => env('STATAMIC_AI_ASSISTANT_MIGRATION_ASSET_FOLDER', 'bold-agent-migration'),
+
+        // Per-page caps to keep a runaway page from filling the disk.
+        'asset_max_per_page' => max(0, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_ASSET_MAX_PER_PAGE', 20)),
+        'asset_max_bytes' => max(0, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_ASSET_MAX_BYTES', 10 * 1024 * 1024)),
+        'asset_timeout' => max(1, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_ASSET_TIMEOUT', 15)),
+
+        // CSS selectors stripped from the page by Jina Reader before extraction
+        // (passed via the X-Remove-Selector header). Keeps site nav, header,
+        // footer, sidebars, cookie banners etc. out of the migrated entry.
+        // Override per-project if your source site uses different class names
+        // (e.g. ".global-nav, #site-footer"). Set to an empty string to disable.
+        'remove_selector' => env(
+            'STATAMIC_AI_ASSISTANT_MIGRATION_REMOVE_SELECTOR',
+            'nav, header, footer, aside, '
+            .'[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], '
+            .'.nav, .navbar, .navigation, .menu, .header, .site-header, .footer, .site-footer, '
+            .'.sidebar, .breadcrumbs, .breadcrumb, .cookie-banner, .cookie-consent, .cookies, '
+            .'.skip-link, .share, .social, .related, .related-posts, .you-may-also-like'
+        ),
     ],
 
 ];

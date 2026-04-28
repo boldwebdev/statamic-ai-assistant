@@ -2,6 +2,7 @@
 
 namespace BoldWeb\StatamicAiAssistant\Services;
 
+use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -16,7 +17,7 @@ class PromptUrlFetcher
     private static array $fetchCache = [];
 
     /**
-     * @return array{appendix: string, warnings: array<int, string>}
+     * @return array{appendix: string, warnings: array<int, string>, preferred: PreferredAssetPaths}
      */
     public function buildAugmentation(string $prompt): array
     {
@@ -24,13 +25,13 @@ class PromptUrlFetcher
         $appendix = '';
 
         if (! (bool) config('statamic-ai-assistant.prompt_url_fetch.enabled', true)) {
-            return ['appendix' => '', 'warnings' => []];
+            return ['appendix' => '', 'warnings' => [], 'preferred' => new PreferredAssetPaths];
         }
 
         $urls = $this->extractPublicHttpUrls($prompt);
 
         if ($urls === []) {
-            return ['appendix' => '', 'warnings' => []];
+            return ['appendix' => '', 'warnings' => [], 'preferred' => new PreferredAssetPaths];
         }
 
         $maxUrls = max(1, (int) config('statamic-ai-assistant.prompt_url_fetch.max_urls', 5));
@@ -63,7 +64,9 @@ class PromptUrlFetcher
                 continue;
             }
 
-            $chunk = Str::limit($result['body'], $maxPer);
+            $body = $result['body'];
+
+            $chunk = Str::limit($body, $maxPer);
             $remaining = $maxTotal - $totalUsed;
 
             if (strlen($chunk) > $remaining) {
@@ -79,7 +82,11 @@ class PromptUrlFetcher
                 .implode("\n\n---\n\n", $blocks);
         }
 
-        return ['appendix' => $appendix, 'warnings' => $warnings];
+        return [
+            'appendix' => $appendix,
+            'warnings' => $warnings,
+            'preferred' => new PreferredAssetPaths,
+        ];
     }
 
     /**
@@ -163,33 +170,190 @@ class PromptUrlFetcher
     }
 
     /**
+     * OpenAI-style tool definition exposed to the LLM for on-demand URL fetches.
+     * Shared by the planner and the entry generator so both go through the same
+     * fetch path (and the same Jina cache).
+     *
+     * @return array{type: string, function: array<string, mixed>}
+     */
+    public function chatToolDefinition(): array
+    {
+        return [
+            'type' => 'function',
+            'function' => [
+                'name' => 'fetch_page_content',
+                'description' => 'Fetches readable full-page text from a public http(s) URL via the server reader. '
+                    .'Use to inspect a URL the user referenced — for example, to count items on a listing page, '
+                    .'discover linked detail pages, or read article bodies. Always pass a concrete reason so the tool result is traceable.',
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'url' => [
+                            'type' => 'string',
+                            'description' => 'Full URL to fetch (https preferred).',
+                        ],
+                        'reason' => [
+                            'type' => 'string',
+                            'description' => 'Why this URL is needed, tied to the user task (e.g. which item, which field, what is missing from current context).',
+                        ],
+                    ],
+                    'required' => ['url', 'reason'],
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * Run a single tool call from the LLM: parse arguments, fetch the URL, and
+     * return the JSON-encoded result the model should see in its tool message.
+     *
+     * @param  callable(string): void|null  $onStreamToken  Optional CP drawer notifier
+     * @param  array<int, string>  $warningsOut  Per-request warning sink
+     */
+    public function executeChatTool(string $argumentsJson, ?callable $onStreamToken, array &$warningsOut): string
+    {
+        try {
+            $args = json_decode($argumentsJson, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            Log::warning('[entry-gen-tool] invalid tool arguments JSON', [
+                'error' => $e->getMessage(),
+                'arguments_excerpt' => Str::limit($argumentsJson, 300),
+            ]);
+
+            return json_encode([
+                'ok' => false,
+                'error' => 'invalid_arguments_json',
+                'reason_echo' => '',
+                'url' => '',
+            ], JSON_UNESCAPED_UNICODE);
+        }
+
+        if (! is_array($args)) {
+            return json_encode(['ok' => false, 'error' => 'invalid_arguments', 'reason_echo' => '', 'url' => ''], JSON_UNESCAPED_UNICODE);
+        }
+
+        $url = isset($args['url']) && is_string($args['url']) ? trim($args['url']) : '';
+        $reason = isset($args['reason']) && is_string($args['reason']) ? trim($args['reason']) : '';
+
+        if ($url === '' || $reason === '') {
+            return json_encode([
+                'ok' => false,
+                'error' => 'url_and_reason_required',
+                'reason_echo' => $reason,
+                'url' => $url,
+            ], JSON_UNESCAPED_UNICODE);
+        }
+
+        if ($onStreamToken) {
+            $onStreamToken("\n\n[".__('Fetching: :url', ['url' => $url])." — {$reason}]\n\n");
+        }
+
+        $result = $this->fetchSingle($url);
+
+        if (! $result['ok']) {
+            $err = $result['error'] ?? __('unavailable or blocked');
+
+            Log::warning('[entry-gen-tool] fetch failed', [
+                'url' => $url,
+                'reason' => $reason,
+                'error' => $err,
+            ]);
+
+            $warningsOut[] = __('Could not fetch :url: :reason', [
+                'url' => $url,
+                'reason' => $err,
+            ]);
+
+            return json_encode([
+                'ok' => false,
+                'url' => $url,
+                'reason_echo' => $reason,
+                'error' => $err,
+            ], JSON_UNESCAPED_UNICODE);
+        }
+
+        $maxChars = max(500, (int) config('statamic-ai-assistant.prompt_url_fetch.max_chars_per_url', 12000));
+        $body = Str::limit($result['body'], $maxChars);
+
+        Log::info('[entry-gen-tool] fetched', [
+            'url' => $url,
+            'reason' => $reason,
+            'chars' => strlen($body),
+        ]);
+
+        return json_encode([
+            'ok' => true,
+            'url' => $url,
+            'reason_echo' => $reason,
+            'content' => $body,
+        ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    }
+
+    /**
+     * Fetch a single URL via the configured reader.
+     *
+     * Used by the website migration flow, where each page URL is processed in its
+     * own queue job and the Jina response needs to surface verbatim on failure.
+     * Strips site chrome (nav/header/footer/sidebar/cookie banners) at fetch time
+     * via Jina's X-Remove-Selector so it doesn't leak into the migrated entry.
+     *
      * @return array{ok: bool, body: string, error: ?string}
      */
-    private function fetchViaJina(string $targetUrl, string $readerBase, int $timeout, ?string $apiKey): array
+    public function fetchSingle(string $url): array
     {
-        if (isset(self::$fetchCache[$targetUrl])) {
-            return self::$fetchCache[$targetUrl];
+        $timeout = max(5, (int) config('statamic-ai-assistant.prompt_url_fetch.timeout', 25));
+        $base = rtrim((string) config('statamic-ai-assistant.prompt_url_fetch.reader_base', 'https://r.jina.ai'), '/');
+        $apiKey = config('statamic-ai-assistant.prompt_url_fetch.api_key');
+
+        $removeSelector = (string) config(
+            'statamic-ai-assistant.migration.remove_selector',
+            'nav, header, footer, aside, '
+            .'[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], '
+            .'.nav, .navbar, .navigation, .menu, .header, .site-header, .footer, .site-footer, '
+            .'.sidebar, .breadcrumbs, .breadcrumb, .cookie-banner, .cookie-consent, .cookies, '
+            .'.skip-link, .share, .social, .related, .related-posts, .you-may-also-like'
+        );
+
+        return $this->fetchViaJina(
+            $url,
+            $base,
+            $timeout,
+            $apiKey ? (string) $apiKey : null,
+            $removeSelector !== '' ? ['X-Remove-Selector' => $removeSelector] : [],
+        );
+    }
+
+    /**
+     * @param  array<string, string>  $extraHeaders
+     * @return array{ok: bool, body: string, error: ?string}
+     */
+    private function fetchViaJina(string $targetUrl, string $readerBase, int $timeout, ?string $apiKey, array $extraHeaders = []): array
+    {
+        // Cache key includes header fingerprint so two callers asking for the
+        // same URL with different selectors don't share a result.
+        $cacheKey = $extraHeaders === [] ? $targetUrl : $targetUrl.'|'.md5(serialize($extraHeaders));
+        if (isset(self::$fetchCache[$cacheKey])) {
+            return self::$fetchCache[$cacheKey];
         }
 
         // Jina Reader expects: https://r.jina.ai/https://example.com/path
         $readerUrl = $readerBase.'/'.$targetUrl;
 
         try {
-            $request = Http::timeout($timeout)
-                ->withHeaders([
-                    'User-Agent' => 'StatamicAiAssistant/1.0 (+https://statamic.com)',
-                    'Accept' => 'text/plain,text/markdown,*/*;q=0.8',
-                ]);
+            $headers = array_merge([
+                'User-Agent' => 'StatamicAiAssistant/1.0 (+https://statamic.com)',
+                'Accept' => 'text/plain,text/markdown,*/*;q=0.8',
+            ], $extraHeaders);
 
-            if ($apiKey !== null && $apiKey !== '') {
-                $request = $request->withToken($apiKey);
+            if ($apiKey !== null && ($token = trim($apiKey)) !== '') {
+                $headers['Authorization'] = 'Bearer '.$token;
             }
 
-            $response = $request->get($readerUrl);
+            $response = Http::timeout($timeout)->withHeaders($headers)->get($readerUrl);
         } catch (\Throwable $e) {
             Log::notice('Jina Reader fetch failed', ['url' => $targetUrl, 'message' => $e->getMessage()]);
             $out = ['ok' => false, 'body' => '', 'error' => $e->getMessage()];
-            self::$fetchCache[$targetUrl] = $out;
+            self::$fetchCache[$cacheKey] = $out;
 
             return $out;
         }
@@ -201,7 +365,7 @@ class PromptUrlFetcher
                 'body' => '',
                 'error' => $hint !== '' ? $hint : (string) __('HTTP :code', ['code' => $response->status()]),
             ];
-            self::$fetchCache[$targetUrl] = $out;
+            self::$fetchCache[$cacheKey] = $out;
 
             return $out;
         }
@@ -210,13 +374,13 @@ class PromptUrlFetcher
 
         if ($body === '') {
             $out = ['ok' => false, 'body' => '', 'error' => (string) __('Empty response')];
-            self::$fetchCache[$targetUrl] = $out;
+            self::$fetchCache[$cacheKey] = $out;
 
             return $out;
         }
 
         $out = ['ok' => true, 'body' => $body, 'error' => null];
-        self::$fetchCache[$targetUrl] = $out;
+        self::$fetchCache[$cacheKey] = $out;
 
         return $out;
     }

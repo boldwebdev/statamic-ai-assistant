@@ -28,6 +28,9 @@
         }
     },
     "extra": {
+        "branch-alias": {
+            "dev-main": "2.1.x-dev"
+        },
         "statamic": {
             "name": "Statamic AI Assistant",
             "description": "AI-assisted writing and DeepL translations for Statamic 6.5+ (custom fieldtypes and Bard)."

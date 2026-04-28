@@ -11,6 +11,7 @@ use BoldWeb\StatamicAiAssistant\Fieldtypes\TranslationActionPreflight;
 use BoldWeb\StatamicAiAssistant\Fieldtypes\TranslationTargetLanguages;
 use BoldWeb\StatamicAiAssistant\Services\AbstractAiService;
 use BoldWeb\StatamicAiAssistant\Services\DeeplService;
+use BoldWeb\StatamicAiAssistant\Services\EntryGenerationBatchService;
 use BoldWeb\StatamicAiAssistant\Services\EntryGenerationPlanner;
 use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorAssetResolver;
 use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorLinkFallback;
@@ -22,10 +23,18 @@ use BoldWeb\StatamicAiAssistant\Services\FigmaOAuthService;
 use BoldWeb\StatamicAiAssistant\Services\FigmaTokenStore;
 use BoldWeb\StatamicAiAssistant\Services\GroqService;
 use BoldWeb\StatamicAiAssistant\Services\InfomaniakService;
+use BoldWeb\StatamicAiAssistant\Services\Migration\CollectionMatcher;
+use BoldWeb\StatamicAiAssistant\Services\Migration\MigrationAssetDownloader;
+use BoldWeb\StatamicAiAssistant\Services\Migration\SitemapDiscoveryService;
+use BoldWeb\StatamicAiAssistant\Services\Migration\UrlClusterer;
+use BoldWeb\StatamicAiAssistant\Services\Migration\MigrationStructureReconciler;
+use BoldWeb\StatamicAiAssistant\Services\Migration\WebsiteMigrationService;
 use BoldWeb\StatamicAiAssistant\Services\NavigationTreeSyncService;
 use BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher;
 use BoldWeb\StatamicAiAssistant\Services\SetHintsService;
 use BoldWeb\StatamicAiAssistant\Services\TranslationService;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Route;
 use Statamic\Facades\CP\Nav;
 use Statamic\Providers\AddonServiceProvider;
@@ -135,6 +144,8 @@ class ServiceProvider extends AddonServiceProvider
                 $app->make(EntryGeneratorService::class),
                 $app->make(PromptUrlFetcher::class),
                 $app->make(FigmaContentFetcher::class),
+                $app->make(EntryGenerationBatchService::class),
+                $app->make(\BoldWeb\StatamicAiAssistant\Support\PlanEntryDecorator::class),
             );
         });
 
@@ -143,6 +154,32 @@ class ServiceProvider extends AddonServiceProvider
                 $app->make(TranslationService::class),
                 $app->make(DeeplService::class),
             );
+        });
+
+        $this->app->singleton(SitemapDiscoveryService::class, function () {
+            return new SitemapDiscoveryService;
+        });
+
+        $this->app->singleton(UrlClusterer::class, function () {
+            return new UrlClusterer;
+        });
+
+        $this->app->singleton(WebsiteMigrationService::class, function () {
+            return new WebsiteMigrationService;
+        });
+
+        $this->app->singleton(MigrationStructureReconciler::class, function ($app) {
+            return new MigrationStructureReconciler(
+                $app->make(WebsiteMigrationService::class),
+            );
+        });
+
+        $this->app->singleton(MigrationAssetDownloader::class, function () {
+            return new MigrationAssetDownloader;
+        });
+
+        $this->app->singleton(CollectionMatcher::class, function ($app) {
+            return new CollectionMatcher($app->make(AbstractAiService::class));
         });
     }
 
@@ -200,9 +237,23 @@ class ServiceProvider extends AddonServiceProvider
             });
         }
 
+        if (config('statamic-ai-assistant.migration.enabled', true)) {
+            // Per-host rate limit used by MigratePageJob via Laravel's RateLimited middleware.
+            RateLimiter::for('ai-migration-host', function ($job) {
+                $host = 'unknown';
+                if (is_object($job) && property_exists($job, 'url')) {
+                    $host = (string) parse_url((string) $job->url, PHP_URL_HOST) ?: 'unknown';
+                }
+                $rps = max(1, (int) config('statamic-ai-assistant.migration.crawl_per_host_rps', 3));
+
+                return Limit::perSecond($rps)->by($host);
+            });
+        }
+
         Statamic::provideToScript([
             'translationsActiv' => config('statamic-ai-assistant.translations'),
             'entryGeneratorEnabled' => config('statamic-ai-assistant.entry_generator', true),
+            'websiteMigrationEnabled' => config('statamic-ai-assistant.migration.enabled', true),
         ]);
     }
 }

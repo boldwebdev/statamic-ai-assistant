@@ -38,6 +38,24 @@ export const state = reactive({
   generationError: null,    // fatal pre-plan error
   bulkSaving: false,
 
+  // Website migration — runs in the same chat, same store. Mutually exclusive
+  // with the normal entry-generation flow.
+  migration: {
+    mode: false,            // true when the assistant has switched to migration flow
+    detected: null,         // { verb, url } from detectMigrationIntent; set when intent fires
+    discovering: false,     // true during /discover
+    discoveryError: null,
+    discovery: null,        // { urls, clusters, collections, locales, warnings, robots_excluded, source }
+    mapping: {},            // keyed by cluster pattern → { collection, blueprint, locale }
+    excludedUrls: {},       // { [url]: true } — URLs the user chose to skip individually
+    starting: false,
+    startError: null,
+    sessionId: null,
+    session: null,          // server snapshot { status, total, counts, pages, ... }
+    _pollTimer: null,
+    promptRecap: '',        // what the user originally typed — for the chat echo
+  },
+
   /**
    * Human-readable activity lines (planning = entryId null; drafting = entry uuid).
    * Each item: { id: number, text: string, entryId: string|null }.
@@ -46,6 +64,12 @@ export const state = reactive({
 
   // Field schema cache, keyed `${collection}/${blueprint}`.
   fieldPreviewCache: {},
+
+  // Queued batch (after NDJSON batch event): poll generate-progress until planner is done
+  // and all cards settle. Cards are pushed incrementally as the planner discovers them.
+  generationBatchSessionId: null,
+  generationPlanningStatus: null,   // 'planning' | 'planned' | 'planning_failed'
+  _generationBatchPollTimer: null,
 
   // Internal — not consumed by templates.
   _abortController: null,
@@ -159,7 +183,198 @@ export function setActive(active) {
   }
 }
 
-// ─── Generation: plan → fan-out via NDJSON ───────────────────────────────
+// ─── Generation: plan via NDJSON, then optional Redis batch poll ─────────
+
+function clearGenerationBatchPoll() {
+  if (state._generationBatchPollTimer) {
+    clearTimeout(state._generationBatchPollTimer);
+    state._generationBatchPollTimer = null;
+  }
+}
+
+function buildCardFromSnapshotEntry(se, index) {
+  return {
+    id: se.id,
+    index,
+    label: se.label,
+    prompt: se.prompt,
+    collection: se.collection,
+    blueprint: se.blueprint,
+    collectionTitle: se.collection_title || se.collection,
+    blueprintTitle: se.blueprint_title || se.blueprint,
+    status: STATUS.QUEUED,
+    tokenLength: 0,
+    data: null,
+    displayData: null,
+    fieldPreview: null,
+    warnings: [],
+    error: null,
+    savedEntry: null,
+    savingMode: null,
+    _tokenScratch: '',
+    streamKeysLogged: {},
+    _lastKeyScanTokenLen: 0,
+    _pollStatus: 'pending',
+  };
+}
+
+function applyBatchProgressSnapshot(data) {
+  // Planner status mapping (additive — cards appear as they are dispatched).
+  const planningStatus = data.planning_status || 'planning';
+  const previousPlanning = state.generationPlanningStatus;
+  state.generationPlanningStatus = planningStatus;
+
+  if (planningStatus === 'planning' && previousPlanning !== 'planning') {
+    state.planning = true;
+  }
+
+  if (planningStatus === 'planning_failed') {
+    state.planning = false;
+    if (data.planner_error && !state.generationError) {
+      state.generationError = data.planner_error;
+    }
+  }
+
+  const rows = data.entries || [];
+
+  // 1. Add any entries the planner has just discovered. Cards appear in the
+  //    drawer the moment the planner calls create_entry_job, even if the
+  //    worker has not started generating yet.
+  for (const se of rows) {
+    if (!se || !se.id) continue;
+    if (state.entries.some((e) => e.id === se.id)) continue;
+    const card = buildCardFromSnapshotEntry(se, state.entries.length);
+    state.entries.push(card);
+    if (!state.plan) {
+      state.plan = { entries: [], warnings: data.warnings || [] };
+    }
+    state.plan.entries.push({
+      id: se.id,
+      collection: se.collection,
+      blueprint: se.blueprint,
+      label: se.label,
+      prompt: se.prompt,
+      collection_title: se.collection_title,
+      blueprint_title: se.blueprint_title,
+    });
+    const label = truncateActivityLabel(se.label || se.collection_title || se.collection);
+    pushActivityLine(_trans('Plan grew — :label', { label }), null);
+    fetchFieldPreview(se.collection, se.blueprint).then((schema) => {
+      if (!schema) return;
+      const target = state.entries.find((c) => c.id === se.id);
+      if (target && !target.fieldPreview) target.fieldPreview = schema;
+    });
+  }
+
+  if (state.plan && Array.isArray(data.warnings)) {
+    state.plan.warnings = data.warnings;
+  }
+
+  // 2. Apply per-card status transitions for cards we already track.
+  for (const se of rows) {
+    const card = state.entries.find((e) => e.id === se.id);
+    if (!card) continue;
+
+    const prev = card._pollStatus;
+    const next = se.status || 'pending';
+
+    if (next === 'generating' && prev !== 'generating') {
+      card.status = STATUS.DRAFTING;
+      card.tokenLength = typeof se.token_length === 'number' ? se.token_length : card.tokenLength;
+      const label = truncateActivityLabel(card.label || card.collectionTitle || card.collection);
+      pushActivityLine(_trans('Drafting — :label', { label }), card.id);
+    } else if (next === 'pending') {
+      card.status = STATUS.QUEUED;
+    }
+
+    if (se.stream_delta) {
+      trackStreamFieldKeys(card, se.stream_delta);
+    }
+    if (typeof se.token_length === 'number') {
+      card.tokenLength = se.token_length;
+    }
+
+    if (next === 'ready' && prev !== 'ready') {
+      card.status = STATUS.READY;
+      card.data = se.data;
+      card.displayData = se.displayData || se.data;
+      card.warnings = se.warnings || [];
+      if (!card.fieldPreview) {
+        fetchFieldPreview(card.collection, card.blueprint).then((s) => {
+          if (s) card.fieldPreview = s;
+        });
+      }
+      const label = truncateActivityLabel(card.label || card.collectionTitle || card.collection);
+      pushActivityLine(_trans('Finished — :label', { label }), card.id);
+    }
+
+    if (next === 'failed' && prev !== 'failed') {
+      card.status = STATUS.FAILED;
+      card.error = se.error || _trans('Generation failed.');
+      const label = truncateActivityLabel(card.label || card.collectionTitle || card.collection);
+      pushActivityLine(_trans('Could not finish — :label', { label }), card.id);
+    }
+
+    card._pollStatus = next;
+  }
+
+  // 3. Once the planner has finished, surface a "plan ready" line and stop the planning indicator.
+  if (planningStatus === 'planned' && previousPlanning !== 'planned') {
+    state.planning = false;
+    const n = state.entries.length;
+    pushActivityLine(
+      n === 0
+        ? _trans('Plan ready — no entries.')
+        : (n === 1
+          ? _trans('Plan ready — one entry.')
+          : _trans('Plan ready — :n entries.', { n })),
+      null,
+    );
+  }
+}
+
+async function pollGenerationBatchOnce() {
+  const sid = state.generationBatchSessionId;
+  if (!sid || !state.generating) return;
+
+  try {
+    const { data } = await axios.get(`/cp/ai-generate/generate-progress/${sid}`, {
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    });
+    applyBatchProgressSnapshot(data);
+
+    const planningDone = data.planning_status === 'planned' || data.planning_status === 'planning_failed';
+    const sessionTerminal = data.status === 'completed' || data.status === 'cancelled';
+    const allEntriesTerminal = state.entries.length > 0 && state.entries.every(
+      (e) => e.status === STATUS.READY || e.status === STATUS.FAILED,
+    );
+
+    if (sessionTerminal || (planningDone && state.entries.length === 0) || (planningDone && allEntriesTerminal)) {
+      clearGenerationBatchPoll();
+      state.generating = false;
+      state.planning = false;
+      state.generationBatchSessionId = null;
+      notifyBackgroundCompletionIfNeeded();
+      return;
+    }
+  } catch (e) {
+    if (e?.response?.status === 404) {
+      state.generationError = _trans('Generation session expired or was not found.');
+      clearGenerationBatchPoll();
+      state.generating = false;
+      state.planning = false;
+      state.generationBatchSessionId = null;
+      return;
+    }
+  }
+
+  state._generationBatchPollTimer = setTimeout(() => pollGenerationBatchOnce(), 2000);
+}
+
+function scheduleGenerationBatchPoll() {
+  clearGenerationBatchPoll();
+  pollGenerationBatchOnce();
+}
 
 export async function startGeneration({ prompt, attachedFile, useAutoTarget, collection, blueprint }) {
   if (state.generating) return;
@@ -246,15 +461,19 @@ export async function startGeneration({ prompt, attachedFile, useAutoTarget, col
       state.generationError = e?.message || _trans('Generation failed.');
     }
   } finally {
-    state.generating = false;
-    state.planning = false;
+    const useBatchPoll = !!(state.generationBatchSessionId && !state.generationError);
+    if (!useBatchPoll) {
+      state.generating = false;
+      state.planning = false;
+    }
     state._abortController = null;
     const wasUserStopped = state._userStopped;
     state._userStopped = false;
-    if (!wasUserStopped) {
+    if (useBatchPoll) {
+      scheduleGenerationBatchPoll();
+    } else if (!wasUserStopped) {
       notifyBackgroundCompletionIfNeeded();
     } else {
-      // User stopped while minimized — clear background flag without a toast.
       state._backgroundedAt = null;
     }
   }
@@ -264,114 +483,26 @@ function handleStreamEvent(msg) {
   switch (msg.type) {
     case 'planning':
       state.planning = true;
+      state.generationPlanningStatus = 'planning';
       pushActivityLine(_trans('Taking a look at what you asked for…'), null);
       break;
 
-    case 'plan': {
-      state.planning = false;
-      state.plan = { entries: msg.entries || [], warnings: msg.warnings || [] };
-      const n = (msg.entries || []).length;
-      pushActivityLine(
-        n === 1
-          ? _trans('Plan ready — one entry.')
-          : _trans('Plan ready — :n entries.', { n }),
-        null,
-      );
-      state.entries = (msg.entries || []).map((p, i) => ({
-        id: p.id,
-        index: i,
-        label: p.label,
-        prompt: p.prompt,
-        collection: p.collection,
-        blueprint: p.blueprint,
-        collectionTitle: p.collection_title || p.collection,
-        blueprintTitle: p.blueprint_title || p.blueprint,
-        status: STATUS.QUEUED,
-        tokenLength: 0,
-        data: null,
-        displayData: null,
-        fieldPreview: null,
-        warnings: [],
-        error: null,
-        savedEntry: null,
-        savingMode: null,
-        _tokenScratch: '',
-        streamKeysLogged: {},
-        _lastKeyScanTokenLen: 0,
-      }));
-
-      // Pre-load blueprint schemas in parallel (one fetch per unique target).
-      const seen = new Set();
-      state.entries.forEach((e) => {
-        const key = `${e.collection}/${e.blueprint}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        fetchFieldPreview(e.collection, e.blueprint).then((schema) => {
-          if (!schema) return;
-          state.entries.forEach((card) => {
-            if (card.collection === e.collection && card.blueprint === e.blueprint && !card.fieldPreview) {
-              card.fieldPreview = schema;
-            }
-          });
-        });
-      });
+    case 'keepalive':
+      // NDJSON line to reset proxy idle timers — no UI update.
       break;
-    }
 
-    case 'entry_start': {
-      const card = state.entries.find((e) => e.id === msg.id);
-      if (card) {
-        card.status = STATUS.DRAFTING;
-        card.tokenLength = 0;
-        card._tokenScratch = '';
-        card.streamKeysLogged = {};
-        card._lastKeyScanTokenLen = 0;
-        const label = truncateActivityLabel(card.label || card.collectionTitle || card.collection);
-        pushActivityLine(_trans('Drafting — :label', { label }), card.id);
+    case 'batch':
+      if (msg.session_id) {
+        state.generationBatchSessionId = msg.session_id;
+        // Reset card list — the agentic planner will push entries one at a time
+        // through the polling snapshot as it discovers them.
+        state.plan = { entries: [], warnings: [] };
+        state.entries = [];
       }
       break;
-    }
-
-    case 'entry_token': {
-      const card = state.entries.find((e) => e.id === msg.id);
-      if (card && msg.text) {
-        card.tokenLength += msg.text.length;
-        trackStreamFieldKeys(card, msg.text);
-      }
-      break;
-    }
-
-    case 'entry_result': {
-      const card = state.entries.find((e) => e.id === msg.id);
-      if (card) {
-        card.status = STATUS.READY;
-        card.data = msg.data;
-        card.displayData = msg.displayData || msg.data;
-        card.warnings = msg.warnings || [];
-        if (!card.fieldPreview) {
-          fetchFieldPreview(card.collection, card.blueprint).then((s) => {
-            if (s) card.fieldPreview = s;
-          });
-        }
-        const label = truncateActivityLabel(card.label || card.collectionTitle || card.collection);
-        pushActivityLine(_trans('Finished — :label', { label }), card.id);
-      }
-      break;
-    }
-
-    case 'entry_error': {
-      const card = state.entries.find((e) => e.id === msg.id);
-      if (card) {
-        card.status = STATUS.FAILED;
-        card.error = msg.message || _trans('Generation failed.');
-        const label = truncateActivityLabel(card.label || card.collectionTitle || card.collection);
-        pushActivityLine(_trans('Could not finish — :label', { label }), card.id);
-      }
-      break;
-    }
 
     case 'done':
-      // No-op; finally block flips generating off.
+      // Async batch always: actual lifecycle is owned by the polling loop.
       break;
 
     case 'error':
@@ -405,6 +536,15 @@ export function stopGeneration({ keepReady = false } = {}) {
   // error banner overriding the kept cards).
   state._userStopped = true;
   cancelGeneration();
+
+  const batchSid = state.generationBatchSessionId;
+  if (batchSid) {
+    clearGenerationBatchPoll();
+    axios.post(`/cp/ai-generate/generate-cancel/${batchSid}`, {}, {
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    }).catch(() => {});
+    state.generationBatchSessionId = null;
+  }
 
   if (keepReady) {
     state.entries = state.entries.filter((e) => e.status === STATUS.READY);
@@ -546,7 +686,7 @@ export async function retryCard(id) {
   try {
     const { data } = await axios.post('/cp/ai-generate/generate', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 120000,
+      timeout: 300000,
     });
     if (data.success) {
       card.status = STATUS.READY;
@@ -574,6 +714,9 @@ export function discardCard(id) {
 
 /** Clear generation results but keep the composer (prompt + file). */
 function resetGenerationOnly() {
+  clearGenerationBatchPoll();
+  state.generationBatchSessionId = null;
+  state.generationPlanningStatus = null;
   state.plan = null;
   state.entries = [];
   state.generationError = null;
@@ -587,6 +730,7 @@ function resetGenerationOnly() {
 export function reset() {
   resetGenerationOnly();
   state._backgroundedAt = null;
+  exitMigration();
 }
 
 // ─── Background-completion toast ─────────────────────────────────────────
@@ -615,6 +759,247 @@ function notifyBackgroundCompletionIfNeeded() {
   } else if (failed > 0) {
     _toast.error(_trans('BOLD agent: generation failed for all entries.'));
   }
+}
+
+// ─── Website migration ───────────────────────────────────────────────────
+
+/**
+ * Detect whether the user's prompt is a website-migration request.
+ * Matches a migration verb (en + de) + an http(s) URL anywhere in the text.
+ *
+ * @param {string} text
+ * @returns {{verb: string, url: string}|null}
+ */
+export function detectMigrationIntent(text) {
+  const s = (text || '').trim();
+  if (!s) return null;
+
+  const urlMatch = s.match(/https?:\/\/[^\s<>"'`\]})]+/i);
+  if (!urlMatch) return null;
+
+  // Verbs in English + German. Keep tight — we don't want to accidentally
+  // hijack a prompt that merely *mentions* a URL as context.
+  const verbRe = /\b(migrate|migration|import|crawl|migrieren|importieren|ubernehmen)\b/i;
+  const verbMatch = s.match(verbRe);
+  if (!verbMatch) return null;
+
+  return { verb: verbMatch[0].toLowerCase(), url: urlMatch[0] };
+}
+
+/**
+ * Enter migration mode and run discovery against the given URL. The chat UI
+ * renders a planning card from state.migration.discovery once this resolves.
+ */
+export async function startMigrationDiscovery({ url, prompt }) {
+  resetGenerationOnly();
+  state.migration.mode = true;
+  state.migration.detected = { url, verb: '' };
+  state.migration.discovering = true;
+  state.migration.discoveryError = null;
+  state.migration.discovery = null;
+  state.migration.mapping = {};
+  state.migration.excludedUrls = {};
+  state.migration.sessionId = null;
+  state.migration.session = null;
+  state.migration.promptRecap = prompt || url;
+
+  pushActivityLine(_trans('Looking at the website you gave me…'), null);
+
+  try {
+    const { data } = await axios.post('/cp/ai-migration/discover', {
+      site_url: url,
+    }, {
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      // Matches the server-side discovery budget (25s) + a margin for the LLM
+      // suggest call. If the server genuinely times out we'd rather surface a
+      // clear error than hang the UI forever.
+      timeout: 45000,
+    });
+
+    state.migration.discovery = data;
+
+    // Seed mapping from server suggestions (LLM + fuzzy match). Fall back to
+    // empty when the server has no opinion so the UI shows the selector.
+    const defaultLocale = data.locales?.[0]?.handle || '';
+    const suggestions = data.suggestions || {};
+    const collectionsByHandle = {};
+    (data.collections || []).forEach((c) => { collectionsByHandle[c.handle] = c; });
+
+    (data.clusters || []).forEach((c) => {
+      const s = suggestions[c.pattern] || {};
+      let blueprint = s.blueprint || '';
+      // If the suggested collection has only one blueprint, auto-pick it even
+      // when the LLM didn't nominate one explicitly.
+      if (s.collection && !blueprint) {
+        const col = collectionsByHandle[s.collection];
+        if (col && col.blueprints && col.blueprints.length === 1) {
+          blueprint = col.blueprints[0].handle;
+        }
+      }
+      state.migration.mapping[c.pattern] = {
+        collection: s.collection || '',
+        blueprint,
+        locale: defaultLocale,
+      };
+    });
+
+    const n = (data.urls || []).length;
+    pushActivityLine(
+      n === 0
+        ? _trans('No pages found.')
+        : _trans('Found :n pages grouped into :c clusters.', { n, c: (data.clusters || []).length }),
+      null,
+    );
+  } catch (e) {
+    if (e?.code === 'ECONNABORTED') {
+      state.migration.discoveryError = _trans('Discovery took too long and was aborted. Try a smaller site or adjust the crawl depth.');
+    } else if (e?.response?.status === 504) {
+      state.migration.discoveryError = _trans('The server timed out while discovering pages. Try a smaller site or check your network.');
+    } else {
+      state.migration.discoveryError = e.response?.data?.error || e.message || _trans('Discovery failed.');
+    }
+  } finally {
+    state.migration.discovering = false;
+  }
+}
+
+/**
+ * Kick off the actual migration based on the user's cluster→blueprint mapping.
+ */
+export async function startMigrationJobs() {
+  if (state.migration.starting || state.migration.sessionId) return;
+  const disc = state.migration.discovery;
+  if (!disc) return;
+
+  const pages = [];
+  const excluded = state.migration.excludedUrls || {};
+  (disc.clusters || []).forEach((c) => {
+    const m = state.migration.mapping[c.pattern];
+    if (!m || !m.collection || !m.blueprint) return;
+    (c.urls || []).forEach((u) => {
+      if (excluded[u]) return;
+      pages.push({
+        url: u,
+        collection: m.collection,
+        blueprint: m.blueprint,
+        locale: m.locale,
+      });
+    });
+  });
+
+  if (pages.length === 0) {
+    state.migration.startError = _trans('Assign at least one cluster to a collection + blueprint.');
+    return;
+  }
+
+  state.migration.starting = true;
+  state.migration.startError = null;
+
+  try {
+    const { data } = await axios.post('/cp/ai-migration/start', {
+      site_url: state.migration.detected?.url,
+      pages,
+      warnings: disc.warnings || [],
+    }, {
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    });
+    state.migration.sessionId = data.session_id;
+    pushActivityLine(_trans('Kicked off :n migration jobs.', { n: pages.length }), null);
+    await pollMigration();
+    _startMigrationPolling();
+  } catch (e) {
+    state.migration.startError = e.response?.data?.error || e.message || _trans('Could not start migration.');
+  } finally {
+    state.migration.starting = false;
+  }
+}
+
+export async function pollMigration() {
+  if (!state.migration.sessionId) return;
+  try {
+    const { data } = await axios.get('/cp/ai-migration/progress/' + state.migration.sessionId);
+    state.migration.session = data;
+    if (data.status !== 'running') {
+      _stopMigrationPolling();
+    }
+  } catch {
+    // transient — keep polling
+  }
+}
+
+function _startMigrationPolling() {
+  _stopMigrationPolling();
+  state.migration._pollTimer = setInterval(() => pollMigration(), 2000);
+}
+
+function _stopMigrationPolling() {
+  if (state.migration._pollTimer) {
+    clearInterval(state.migration._pollTimer);
+    state.migration._pollTimer = null;
+  }
+}
+
+export async function cancelMigration() {
+  if (!state.migration.sessionId) return;
+  try {
+    await axios.post('/cp/ai-migration/cancel/' + state.migration.sessionId);
+    await pollMigration();
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function retryFailedMigration() {
+  if (!state.migration.sessionId) return;
+  try {
+    await axios.post('/cp/ai-migration/retry/' + state.migration.sessionId);
+    _startMigrationPolling();
+  } catch (e) {
+    state.migration.startError = e.response?.data?.error || e.message || _trans('Retry failed.');
+  }
+}
+
+/** Leave migration mode entirely; clears all session state and polling. */
+export function exitMigration() {
+  _stopMigrationPolling();
+  state.migration.mode = false;
+  state.migration.detected = null;
+  state.migration.discovering = false;
+  state.migration.discoveryError = null;
+  state.migration.discovery = null;
+  state.migration.mapping = {};
+  state.migration.excludedUrls = {};
+  state.migration.starting = false;
+  state.migration.startError = null;
+  state.migration.sessionId = null;
+  state.migration.session = null;
+  state.migration.promptRecap = '';
+}
+
+/** Toggle whether a single URL is excluded from this migration run. */
+export function toggleMigrationUrl(url) {
+  if (!url) return;
+  if (state.migration.excludedUrls[url]) {
+    delete state.migration.excludedUrls[url];
+  } else {
+    state.migration.excludedUrls[url] = true;
+  }
+}
+
+/**
+ * Set inclusion/exclusion for every URL in a cluster at once.
+ *
+ * @param {Array<string>} urls  All URLs in the cluster.
+ * @param {boolean} include  true = include all, false = exclude all.
+ */
+export function setClusterInclusion(urls, include) {
+  (urls || []).forEach((u) => {
+    if (include) {
+      delete state.migration.excludedUrls[u];
+    } else {
+      state.migration.excludedUrls[u] = true;
+    }
+  });
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────

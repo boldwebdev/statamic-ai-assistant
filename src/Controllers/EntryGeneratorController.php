@@ -2,13 +2,14 @@
 
 namespace BoldWeb\StatamicAiAssistant\Controllers;
 
+use BoldWeb\StatamicAiAssistant\Jobs\PlanEntriesJob;
 use BoldWeb\StatamicAiAssistant\Services\AbstractAiService;
-use BoldWeb\StatamicAiAssistant\Services\EntryGenerationPlanner;
+use BoldWeb\StatamicAiAssistant\Services\EntryGenerationBatchService;
 use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorService;
+use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Statamic\Facades\Collection;
 use Statamic\Facades\Site;
@@ -19,16 +20,16 @@ class EntryGeneratorController
 
     private AbstractAiService $aiService;
 
-    private EntryGenerationPlanner $planner;
+    private EntryGenerationBatchService $entryBatch;
 
     public function __construct(
         EntryGeneratorService $generator,
         AbstractAiService $aiService,
-        EntryGenerationPlanner $planner,
+        EntryGenerationBatchService $entryBatch,
     ) {
         $this->generator = $generator;
         $this->aiService = $aiService;
-        $this->planner = $planner;
+        $this->entryBatch = $entryBatch;
     }
 
     /**
@@ -139,20 +140,18 @@ class EntryGeneratorController
     }
 
     /**
-     * Streaming endpoint that supports multi-entry generation.
+     * Streaming endpoint kicks off async planning + entry generation.
      *
-     * Phase 1 — planning: ask the LLM to decompose the user request into N independent entries.
-     * Phase 2 — fan-out: generate each entry sequentially, reusing the existing single-entry pipeline.
+     * The HTTP request itself does NO LLM work — it just creates the Redis-backed
+     * batch session and dispatches PlanEntriesJob. The browser then polls
+     * GET generate-progress/{sessionId} to surface incremental cards as the
+     * agentic planner discovers articles and dispatches one GeneratePlannedEntryJob each.
      *
-     * NDJSON event stream:
+     * NDJSON event stream emitted by this endpoint:
      *   {type:"planning"}
-     *   {type:"plan", entries:[{id, index, collection, blueprint, label, prompt, collection_title, blueprint_title}], warnings:[…]}
-     *   {type:"entry_start", id, index}
-     *   {type:"entry_token", id, text}                              // raw delta — used by UI for progress estimation
-     *   {type:"entry_result", id, index, success:true, data, displayData, warnings, collection, blueprint, label}
-     *   {type:"entry_error", id, index, message}
+     *   {type:"batch", session_id, async:true}    // start polling
      *   {type:"done", success:true}
-     *   {type:"error", message}                                     // fatal pre-plan error
+     *   {type:"error", message}                    // fatal pre-dispatch error
      */
     public function generateStream(Request $request): StreamedResponse
     {
@@ -181,8 +180,10 @@ class EntryGeneratorController
         }
 
         $locale = optional(Site::selected())->handle() ?: Site::default()->handle();
+        $collectionHandle = $autoResolve ? null : (string) $request->input('collection');
+        $blueprintHandle = $autoResolve ? null : (string) ($request->input('blueprint') ?? '');
 
-        return response()->stream(function () use ($request, $data, $attachmentContent, $autoResolve, $locale) {
+        return response()->stream(function () use ($data, $attachmentContent, $autoResolve, $locale, $collectionHandle, $blueprintHandle) {
             $emit = static function (array $payload): void {
                 echo json_encode($payload, JSON_UNESCAPED_UNICODE)."\n";
                 if (ob_get_level() > 0) {
@@ -192,86 +193,36 @@ class EntryGeneratorController
             };
 
             try {
-                if ($autoResolve) {
-                    // Multi-entry planning path: let the planner decide collection(s) AND split into N briefs.
-                    $emit(['type' => 'planning']);
+                if ($err = $this->entryBatchQueueSetupError()) {
+                    $emit(['type' => 'error', 'message' => $err]);
 
-                    $plan = $this->planner->plan($data['prompt'], $attachmentContent, $locale);
-                    $planEntries = $this->decoratePlanEntries($plan['entries']);
+                    return;
+                }
 
-                    $emit([
-                        'type' => 'plan',
-                        'entries' => $planEntries,
-                        'warnings' => $plan['warnings'],
-                    ]);
-                } else {
-                    // Manual mode (full-page step-1 picker): always single-entry, no planner.
-                    $collectionHandle = (string) $request->input('collection');
-                    $blueprintHandle = (string) ($request->input('blueprint') ?? '');
+                $emit(['type' => 'planning']);
 
-                    $planEntries = $this->decoratePlanEntries([[
-                        'collection' => $collectionHandle,
-                        'blueprint' => $blueprintHandle,
-                        'prompt' => $data['prompt'],
-                        'label' => Str::limit($data['prompt'], 60),
-                    ]]);
-
-                    $emit([
-                        'type' => 'plan',
-                        'entries' => $planEntries,
+                $sessionId = $this->entryBatch->initPlanningSession(
+                    $locale,
+                    $attachmentContent,
+                    (string) $data['prompt'],
+                    $autoResolve,
+                    [
+                        'appendix' => '',
                         'warnings' => [],
-                    ]);
-                }
+                        'preferred' => new PreferredAssetPaths,
+                        'appended_to_prompts' => false,
+                    ],
+                    $collectionHandle,
+                    $blueprintHandle,
+                );
 
-                foreach ($planEntries as $idx => $planEntry) {
-                    $entryId = $planEntry['id'];
+                PlanEntriesJob::dispatch($sessionId);
 
-                    $emit(['type' => 'entry_start', 'id' => $entryId, 'index' => $idx]);
-
-                    try {
-                        $result = $this->generator->generateContent(
-                            $planEntry['collection'],
-                            $planEntry['blueprint'],
-                            $planEntry['prompt'],
-                            $locale,
-                            $attachmentContent,
-                            static function (string $delta) use ($emit, $entryId): void {
-                                if ($delta === '') {
-                                    return;
-                                }
-                                $emit(['type' => 'entry_token', 'id' => $entryId, 'text' => $delta]);
-                            },
-                        );
-
-                        $emit([
-                            'type' => 'entry_result',
-                            'id' => $entryId,
-                            'index' => $idx,
-                            'success' => true,
-                            'data' => $result['data'],
-                            'displayData' => $result['displayData'],
-                            'warnings' => $result['warnings'],
-                            'collection' => $planEntry['collection'],
-                            'blueprint' => $planEntry['blueprint'],
-                            'label' => $planEntry['label'],
-                        ]);
-                    } catch (\Throwable $e) {
-                        Log::warning('Entry generation failed for one item', [
-                            'collection' => $planEntry['collection'],
-                            'blueprint' => $planEntry['blueprint'],
-                            'error' => $e->getMessage(),
-                        ]);
-
-                        $emit([
-                            'type' => 'entry_error',
-                            'id' => $entryId,
-                            'index' => $idx,
-                            'message' => $e instanceof \RuntimeException
-                                ? $e->getMessage()
-                                : __('Entry generation failed. Please try again.'),
-                        ]);
-                    }
-                }
+                $emit([
+                    'type' => 'batch',
+                    'session_id' => $sessionId,
+                    'async' => true,
+                ]);
 
                 $emit(['type' => 'done', 'success' => true]);
             } catch (\RuntimeException $e) {
@@ -281,42 +232,6 @@ class EntryGeneratorController
                 $emit(['type' => 'error', 'message' => __('Entry generation failed. Please try again.')]);
             }
         }, 200, $this->ndjsonStreamHeaders());
-    }
-
-    /**
-     * Add a stable id and human collection/blueprint titles to each plan entry.
-     *
-     * @param  array<int, array{collection: string, blueprint: string, prompt: string, label: string}>  $entries
-     * @return array<int, array{id: string, collection: string, blueprint: string, prompt: string, label: string, collection_title: string, blueprint_title: string}>
-     */
-    private function decoratePlanEntries(array $entries): array
-    {
-        $catalog = $this->generator->getCollectionsCatalog();
-        $titleMap = [];
-        foreach ($catalog as $row) {
-            $bps = [];
-            foreach (($row['blueprints'] ?? []) as $bp) {
-                $bps[$bp['handle'] ?? ''] = $bp['title'] ?? '';
-            }
-            $titleMap[$row['handle'] ?? ''] = ['title' => $row['title'] ?? '', 'blueprints' => $bps];
-        }
-
-        $decorated = [];
-        foreach ($entries as $entry) {
-            $coll = $entry['collection'] ?? '';
-            $bp = $entry['blueprint'] ?? '';
-            $decorated[] = [
-                'id' => (string) Str::uuid(),
-                'collection' => $coll,
-                'blueprint' => $bp,
-                'prompt' => $entry['prompt'] ?? '',
-                'label' => $entry['label'] ?? '',
-                'collection_title' => $titleMap[$coll]['title'] ?? $coll,
-                'blueprint_title' => $titleMap[$coll]['blueprints'][$bp] ?? $bp,
-            ];
-        }
-
-        return $decorated;
     }
 
     /**
@@ -392,6 +307,40 @@ class EntryGeneratorController
 
             return response()->json(['error' => __('Field regeneration failed. Please try again.')], 500);
         }
+    }
+
+    /**
+     * Poll queued batch generation (same entry card shape as stream, plus stream_delta per tick).
+     */
+    public function generateBatchProgress(string $sessionId): JsonResponse
+    {
+        $snap = $this->entryBatch->snapshotForProgress($sessionId);
+        if ($snap === null) {
+            return response()->json(['error' => __('Session not found.')], 404);
+        }
+
+        return response()->json($snap);
+    }
+
+    /**
+     * Cancel a running batch (jobs still in chain will mark entries cancelled when they start).
+     */
+    public function generateBatchCancel(string $sessionId): JsonResponse
+    {
+        $this->entryBatch->cancelSession($sessionId);
+
+        return response()->json(['ok' => true]);
+    }
+
+    private function entryBatchQueueSetupError(): ?string
+    {
+        if (config('queue.default') !== 'sync') {
+            return null;
+        }
+
+        return (string) __(
+            'BOLD agent batch generation requires an asynchronous queue. Set QUEUE_CONNECTION=redis in your .env, then start php artisan horizon or php artisan queue:work. The sync driver cannot be used.',
+        );
     }
 
     /**

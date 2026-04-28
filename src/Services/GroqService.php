@@ -10,6 +10,83 @@ use LucianoTonet\GroqPHP\GroqException;
 
 class GroqService extends AbstractAiService
 {
+    public function supportsChatTools(): bool
+    {
+        return true;
+    }
+
+    /**
+     * {@inheritdoc}
+     *
+     * @param  array<int, array<string, mixed>>  $messages
+     * @param  array<int, array<string, mixed>>  $tools
+     */
+    public function createChatCompletion(array $messages, ?int $maxTokens, array $tools = [], string|array $toolChoice = 'auto', ?callable $streamHeartbeat = null): array
+    {
+        $apiKey = config('statamic-ai-assistant.groq_api_key');
+
+        if (! $apiKey) {
+            throw new \RuntimeException(__('GROQ_API_KEY is not configured.'));
+        }
+
+        $payload = [
+            'model' => config('statamic-ai-assistant.groq_model'),
+            'messages' => $messages,
+            'temperature' => config('statamic-ai-assistant.temperature'),
+            'max_tokens' => $maxTokens ?? (int) config('statamic-ai-assistant.max_tokens'),
+            'stream' => false,
+        ];
+
+        if ($tools !== []) {
+            $payload['tools'] = $tools;
+            $payload['tool_choice'] = $toolChoice;
+        }
+
+        $httpTimeout = max(30, (int) config('statamic-ai-assistant.groq_http_timeout', 300));
+
+        try {
+            $client = new Client(['timeout' => $httpTimeout, 'read_timeout' => $httpTimeout]);
+            $requestOpts = [
+                'headers' => [
+                    'Authorization' => 'Bearer '.$apiKey,
+                    'Content-Type' => 'application/json',
+                ],
+                'json' => $payload,
+                'http_errors' => false,
+            ];
+            if ($streamHeartbeat !== null) {
+                $requestOpts['progress'] = static function () use ($streamHeartbeat): void {
+                    $streamHeartbeat();
+                };
+            }
+            $response = $client->post('https://api.groq.com/openai/v1/chat/completions', $requestOpts);
+        } catch (\Throwable $e) {
+            Log::error('Groq chat completion (tools) error', ['message' => $e->getMessage()]);
+
+            throw new \RuntimeException($e->getMessage(), 0, $e);
+        }
+
+        $body = (string) $response->getBody();
+        $data = json_decode($body, true);
+
+        if ($response->getStatusCode() >= 400) {
+            $hint = is_array($data) ? ($data['error']['message'] ?? $body) : $body;
+
+            throw new \RuntimeException(
+                __('Groq request failed (:status): :hint', [
+                    'status' => $response->getStatusCode(),
+                    'hint' => mb_substr((string) $hint, 0, 500),
+                ])
+            );
+        }
+
+        if (! is_array($data)) {
+            throw new \RuntimeException(__('Unexpected response from Groq.'));
+        }
+
+        return $data;
+    }
+
     /**
      * Call the Groq API with the provided messages.
      *
@@ -81,8 +158,10 @@ class GroqService extends AbstractAiService
             'stream' => true,
         ];
 
+        $httpTimeout = max(30, (int) config('statamic-ai-assistant.groq_http_timeout', 300));
+
         try {
-            $client = new Client(['timeout' => 120, 'read_timeout' => 120]);
+            $client = new Client(['timeout' => $httpTimeout, 'read_timeout' => $httpTimeout]);
             $response = $client->post('https://api.groq.com/openai/v1/chat/completions', [
                 'headers' => [
                     'Authorization' => 'Bearer '.$apiKey,

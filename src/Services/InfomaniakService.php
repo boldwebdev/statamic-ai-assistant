@@ -8,6 +8,96 @@ use Illuminate\Support\Facades\Log;
 
 class InfomaniakService extends AbstractAiService
 {
+    public function supportsChatTools(): bool
+    {
+        return true;
+    }
+
+    /**
+     * v2 chat completion endpoint. Required for tool calling — the legacy v1
+     * path silently drops `tools` / `tool_choice` parameters on the floor.
+     */
+    private function endpointUrl(): string
+    {
+        $productId = config('statamic-ai-assistant.infomaniak_product_id');
+
+        return "https://api.infomaniak.com/2/ai/{$productId}/openai/v1/chat/completions";
+    }
+
+    private function timeout(): int
+    {
+        return (int) config('statamic-ai-assistant.infomaniak_http_timeout', 120);
+    }
+
+    /**
+     * Build a RuntimeException message from a failed HTTP response.
+     */
+    private function failureException(\Illuminate\Http\Client\Response $response): \RuntimeException
+    {
+        $hint = $response->json('error.message')
+            ?? $response->json('message')
+            ?? mb_substr($response->body(), 0, 500);
+
+        return new \RuntimeException(
+            __('Infomaniak request failed (:status): :hint', [
+                'status' => $response->status(),
+                'hint' => $hint,
+            ])
+        );
+    }
+
+    /**
+     * {@inheritdoc}
+     *
+     * @param  array<int, array<string, mixed>>  $messages
+     * @param  array<int, array<string, mixed>>  $tools
+     */
+    public function createChatCompletion(array $messages, ?int $maxTokens, array $tools = [], string|array $toolChoice = 'auto', ?callable $streamHeartbeat = null): array
+    {
+        $payload = [
+            'messages' => $messages,
+            'model' => config('statamic-ai-assistant.infomaniak_model'),
+            'temperature' => config('statamic-ai-assistant.temperature'),
+            'max_tokens' => $maxTokens ?? (int) config('statamic-ai-assistant.max_tokens'),
+            'stream' => false,
+        ];
+
+        if ($tools !== []) {
+            $payload['tools'] = $tools;
+            $payload['tool_choice'] = $toolChoice;
+        }
+
+        $guzzleExtras = [];
+        if ($streamHeartbeat !== null) {
+            $guzzleExtras['progress'] = static function () use ($streamHeartbeat): void {
+                $streamHeartbeat();
+            };
+        }
+
+        try {
+            $response = Http::timeout($this->timeout())
+                ->withToken(config('statamic-ai-assistant.infomaniak_api_token'))
+                ->withOptions($guzzleExtras)
+                ->post($this->endpointUrl(), $payload);
+        } catch (\Throwable $e) {
+            Log::error('Infomaniak chat completion (tools) exception', ['message' => $e->getMessage()]);
+
+            throw new \RuntimeException($e->getMessage(), 0, $e);
+        }
+
+        if (! $response->successful()) {
+            throw $this->failureException($response);
+        }
+
+        $data = $response->json();
+
+        if (! is_array($data)) {
+            throw new \RuntimeException(__('Unexpected response from Infomaniak.'));
+        }
+
+        return $data;
+    }
+
     /**
      * Call the Infomaniak API with the provided messages.
      *
@@ -25,15 +115,9 @@ class InfomaniakService extends AbstractAiService
         ];
 
         try {
-            $productId = config('statamic-ai-assistant.infomaniak_product_id');
-            $apiToken  = config('statamic-ai-assistant.infomaniak_api_token');
-            $url = "https://api.infomaniak.com/1/ai/{$productId}/openai/chat/completions";
-
-            $timeout = (int) config('statamic-ai-assistant.infomaniak_http_timeout', 120);
-
-            $response = Http::timeout($timeout)
-                ->withToken($apiToken)
-                ->post($url, $payload);
+            $response = Http::timeout($this->timeout())
+                ->withToken(config('statamic-ai-assistant.infomaniak_api_token'))
+                ->post($this->endpointUrl(), $payload);
 
             if (! $response->successful()) {
                 Log::error('Infomaniak API HTTP error', [
@@ -41,16 +125,7 @@ class InfomaniakService extends AbstractAiService
                     'body' => mb_substr($response->body(), 0, 2000),
                 ]);
 
-                $hint = $response->json('error.message')
-                    ?? $response->json('message')
-                    ?? mb_substr($response->body(), 0, 500);
-
-                throw new \RuntimeException(
-                    __('Infomaniak request failed (:status): :hint', [
-                        'status' => $response->status(),
-                        'hint' => $hint,
-                    ])
-                );
+                throw $this->failureException($response);
             }
 
             $data = $response->json();
@@ -86,10 +161,6 @@ class InfomaniakService extends AbstractAiService
      */
     protected function callApiStreaming(array $messages, callable $onDelta): string
     {
-        $productId = config('statamic-ai-assistant.infomaniak_product_id');
-        $apiToken = config('statamic-ai-assistant.infomaniak_api_token');
-        $url = "https://api.infomaniak.com/1/ai/{$productId}/openai/chat/completions";
-
         $payload = [
             'messages' => $messages,
             'model' => config('statamic-ai-assistant.infomaniak_model'),
@@ -98,16 +169,16 @@ class InfomaniakService extends AbstractAiService
             'stream' => true,
         ];
 
-        $timeout = (int) config('statamic-ai-assistant.infomaniak_http_timeout', 120);
+        $timeout = $this->timeout();
 
         try {
             $response = Http::timeout($timeout)
-                ->withToken($apiToken)
+                ->withToken(config('statamic-ai-assistant.infomaniak_api_token'))
                 ->withOptions([
                     'stream' => true,
                     'read_timeout' => $timeout,
                 ])
-                ->post($url, $payload);
+                ->post($this->endpointUrl(), $payload);
         } catch (\Throwable $e) {
             Log::error('Infomaniak streaming API exception', ['message' => $e->getMessage()]);
 
@@ -115,16 +186,7 @@ class InfomaniakService extends AbstractAiService
         }
 
         if (! $response->successful()) {
-            $hint = $response->json('error.message')
-                ?? $response->json('message')
-                ?? mb_substr($response->body(), 0, 500);
-
-            throw new \RuntimeException(
-                __('Infomaniak request failed (:status): :hint', [
-                    'status' => $response->status(),
-                    'hint' => $hint,
-                ])
-            );
+            throw $this->failureException($response);
         }
 
         $stream = $response->toPsrResponse()->getBody();

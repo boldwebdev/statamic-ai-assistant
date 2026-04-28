@@ -61,11 +61,17 @@ final class OpenAiChatCompletionStream
                 continue;
             }
 
-            $delta = self::extractDeltaText($json);
+            $parts = self::extractDeltaParts($json);
 
-            if ($delta !== null && $delta !== '') {
-                $full .= $delta;
-                $onDelta($delta);
+            // Reasoning/thinking tokens must not be concatenated into the final assistant
+            // string: entry generation expects pure JSON in the accumulated output. The UI
+            // stream may still show reasoning + content for progress feedback.
+            $contentOnly = $parts['content'];
+            $forDisplay = $parts['reasoning'].$contentOnly;
+
+            if ($forDisplay !== '') {
+                $full .= $contentOnly;
+                $onDelta($forDisplay);
             }
         }
 
@@ -73,25 +79,25 @@ final class OpenAiChatCompletionStream
     }
 
     /**
-     * @param  array<string, mixed>  $json
+     * @return array{reasoning: string, content: string}
      */
-    private static function extractDeltaText(array $json): ?string
+    private static function extractDeltaParts(array $json): array
     {
         $choice = $json['choices'][0] ?? null;
 
         if (! is_array($choice)) {
-            return null;
+            return ['reasoning' => '', 'content' => ''];
         }
 
         $delta = $choice['delta'] ?? null;
 
         if (! is_array($delta)) {
-            return null;
+            return ['reasoning' => '', 'content' => ''];
         }
 
-        $parts = [];
+        $reasoning = '';
 
-        foreach (['reasoning_content', 'reasoning', 'content'] as $key) {
+        foreach (['reasoning_content', 'reasoning'] as $key) {
             if (! isset($delta[$key])) {
                 continue;
             }
@@ -99,14 +105,16 @@ final class OpenAiChatCompletionStream
             $v = $delta[$key];
 
             if (is_string($v) && $v !== '') {
-                $parts[] = $v;
+                $reasoning .= $v;
             }
         }
 
-        if ($parts === []) {
-            return null;
+        $content = '';
+
+        if (isset($delta['content']) && is_string($delta['content']) && $delta['content'] !== '') {
+            $content = $delta['content'];
         }
 
-        return implode('', $parts);
+        return ['reasoning' => $reasoning, 'content' => $content];
     }
 }

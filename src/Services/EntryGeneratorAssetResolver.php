@@ -2,6 +2,7 @@
 
 namespace BoldWeb\StatamicAiAssistant\Services;
 
+use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
 use Illuminate\Support\Collection;
 use Statamic\Assets\Asset as StatamicAsset;
 use Statamic\Contracts\Assets\Asset as AssetContract;
@@ -16,15 +17,16 @@ class EntryGeneratorAssetResolver
 
     /**
      * Fill every assets field in the blueprint tree (groups, replicator sets, grids)
-     * when the value is empty, using random paths from each field's container.
+     * when the value is empty. Assets are drawn from $preferred first (downloaded
+     * by the migration job), then from random paths in the field's container.
      *
      * @param  array<string, mixed>  $data
      * @param  array<string, mixed>  $displayData
      */
-    public function fillAssetFieldsWithRandom(array &$data, array &$displayData, Blueprint $blueprint, array &$warnings): void
+    public function fillAssetFieldsWithRandom(array &$data, array &$displayData, Blueprint $blueprint, array &$warnings, ?PreferredAssetPaths $preferred = null): void
     {
         foreach ($blueprint->fields()->all() as $field) {
-            $this->fillAssetsForField($field, $data, $displayData, $warnings);
+            $this->fillAssetsForField($field, $data, $displayData, $warnings, $preferred);
         }
     }
 
@@ -32,7 +34,7 @@ class EntryGeneratorAssetResolver
      * @param  array<string, mixed>  $data
      * @param  array<string, mixed>  $displayData
      */
-    private function fillAssetsForField(Field $field, array &$data, array &$displayData, array &$warnings): void
+    private function fillAssetsForField(Field $field, array &$data, array &$displayData, array &$warnings, ?PreferredAssetPaths $preferred): void
     {
         $handle = $field->handle();
         $type = $field->type();
@@ -42,7 +44,7 @@ class EntryGeneratorAssetResolver
         }
 
         if ($type === 'assets') {
-            $this->fillSingleAssetField($field, $data, $displayData, $warnings);
+            $this->fillSingleAssetField($field, $data, $displayData, $warnings, $preferred);
 
             return;
         }
@@ -56,7 +58,7 @@ class EntryGeneratorAssetResolver
             }
 
             foreach ($field->fieldtype()->fields()->all() as $child) {
-                $this->fillAssetsForField($child, $data[$handle], $displayData[$handle], $warnings);
+                $this->fillAssetsForField($child, $data[$handle], $displayData[$handle], $warnings, $preferred);
             }
 
             return;
@@ -85,7 +87,7 @@ class EntryGeneratorAssetResolver
                     $subfields = $fieldtype->fields();
 
                     foreach ($subfields->all() as $child) {
-                        $this->fillAssetsForField($child, $row, $displayData[$handle][$idx], $warnings);
+                        $this->fillAssetsForField($child, $row, $displayData[$handle][$idx], $warnings, $preferred);
                     }
 
                     continue;
@@ -104,7 +106,7 @@ class EntryGeneratorAssetResolver
                 }
 
                 foreach ($setFields->all() as $child) {
-                    $this->fillAssetsForField($child, $row, $displayData[$handle][$idx], $warnings);
+                    $this->fillAssetsForField($child, $row, $displayData[$handle][$idx], $warnings, $preferred);
                 }
             }
             unset($row);
@@ -117,7 +119,7 @@ class EntryGeneratorAssetResolver
      * @param  array<string, mixed>  $data
      * @param  array<string, mixed>  $displayData
      */
-    private function fillSingleAssetField(Field $field, array &$data, array &$displayData, array &$warnings): void
+    private function fillSingleAssetField(Field $field, array &$data, array &$displayData, array &$warnings, ?PreferredAssetPaths $preferred): void
     {
         $handle = $field->handle();
 
@@ -129,16 +131,31 @@ class EntryGeneratorAssetResolver
             return;
         }
 
-        $paths = $this->pickRandomPathsForField($field, $warnings);
+        $config = $field->config();
+        $maxFiles = max(1, (int) ($config['max_files'] ?? 1));
+        $minFiles = max(0, (int) ($config['min_files'] ?? 0));
+        $count = max($maxFiles, $minFiles);
 
-        if ($paths === []) {
+        $picked = [];
+
+        // Drain matching downloaded paths first so migrated entries actually
+        // reference the page's own images instead of random container assets.
+        $containerHandle = $config['container'] ?? null;
+        if ($preferred !== null && is_string($containerHandle) && $containerHandle !== '') {
+            $picked = $preferred->takeForContainer($containerHandle, $count);
+        }
+
+        if (count($picked) < $count) {
+            $remaining = $count - count($picked);
+            $randomPaths = $this->pickRandomPathsForField($field, $warnings);
+            $picked = array_merge($picked, array_slice($randomPaths, 0, $remaining));
+        }
+
+        if ($picked === []) {
             return;
         }
 
-        $config = $field->config();
-        $maxFiles = max(1, (int) ($config['max_files'] ?? 1));
-
-        $value = $maxFiles === 1 ? $paths[0] : array_slice($paths, 0, $maxFiles);
+        $value = $maxFiles === 1 ? $picked[0] : array_slice($picked, 0, $maxFiles);
 
         $data[$handle] = $value;
         $displayData[$handle] = $value;

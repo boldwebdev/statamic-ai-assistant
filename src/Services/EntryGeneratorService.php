@@ -3,11 +3,18 @@
 namespace BoldWeb\StatamicAiAssistant\Services;
 
 use BoldWeb\StatamicAiAssistant\Services\Concerns\TranslatesFields;
+use BoldWeb\StatamicAiAssistant\Support\JsonObjectExtractor;
+use Illuminate\Support\Arr;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Statamic\Entries\Entry as StatamicEntry;
 use Statamic\Facades\Collection;
 use Statamic\Facades\Entry;
 use Statamic\Facades\Site;
+use Statamic\Facades\Taxonomy;
+use Statamic\Facades\Term;
+use Statamic\Fieldtypes\Terms;
 use Statamic\Fields\Blueprint;
 use Statamic\Fields\Field;
 
@@ -25,7 +32,12 @@ class EntryGeneratorService
 
     private const GEN_DATE_TYPES = ['date'];
 
-    private const GEN_SKIP_TYPES = ['assets', 'section', 'color', 'terms'];
+    private const GEN_SKIP_TYPES = ['assets', 'section', 'color'];
+
+    /**
+     * @var array<string, array{by_lower_slug: array<string, string>, by_lower_title: array<string, string>}>
+     */
+    private array $taxonomyTermMatchCache = [];
 
     private const GEN_GROUP_TYPES = ['group'];
 
@@ -65,6 +77,8 @@ class EntryGeneratorService
      * Generate content for an entry from a prompt (does NOT save).
      *
      * @param  callable(string): void|null  $onStreamToken  Optional callback for each streamed assistant text delta (NDJSON / CP drawer)
+     * @param  array{appendix: string, warnings: array<int, string>, preferred: \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths, appended_to_prompts?: bool}|null  $prefetchedUrlAug  When set (multi-entry stream), reuses one Jina text fetch and appendix so each entry does not re-fetch URLs.
+     * @param  callable(): void|null  $streamHeartbeat  Optional NDJSON keepalive between tool rounds (same as planner stream).
      * @return array{data: array<string, mixed>, displayData: array<string, mixed>, warnings: string[]}
      */
     public function generateContent(
@@ -74,6 +88,9 @@ class EntryGeneratorService
         string $locale,
         ?string $attachmentContent = null,
         ?callable $onStreamToken = null,
+        ?\BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths $preferredAssets = null,
+        ?array $prefetchedUrlAug = null,
+        ?callable $streamHeartbeat = null,
     ): array {
         $collection = Collection::findByHandle($collectionHandle);
 
@@ -95,11 +112,43 @@ class EntryGeneratorService
             throw new \RuntimeException(__('Blueprint not found.'));
         }
 
-        $fieldSchema = $this->buildFieldSchema($blueprint);
+        $fieldSchema = $this->buildFieldSchema($blueprint, $locale);
         $systemMessage = $this->buildSystemMessage($fieldSchema, $locale);
-        $urlAug = $this->promptUrlFetcher->buildAugmentation($prompt);
-        $figmaAug = $this->figma ? $this->figma->buildAugmentation($prompt) : ['appendix' => '', 'warnings' => []];
-        $combinedAppendix = $urlAug['appendix'].$figmaAug['appendix'];
+
+        $useUrlTool = (bool) config('statamic-ai-assistant.entry_generator_fetch_url_tool', true)
+            && (bool) config('statamic-ai-assistant.prompt_url_fetch.enabled', true)
+            && $this->aiService->supportsChatTools();
+
+        if ($prefetchedUrlAug !== null) {
+            $urlAug = [
+                'appendix' => $prefetchedUrlAug['appendix'],
+                'warnings' => $prefetchedUrlAug['warnings'],
+                'preferred' => $prefetchedUrlAug['preferred'],
+            ];
+            $appendedToPrompts = (bool) ($prefetchedUrlAug['appended_to_prompts'] ?? false);
+            if ($appendedToPrompts) {
+                $figmaAug = ['appendix' => '', 'warnings' => []];
+                $combinedAppendix = '';
+            } else {
+                $figmaAug = $this->figma ? $this->figma->buildAugmentation($prompt) : ['appendix' => '', 'warnings' => []];
+                $combinedAppendix = $urlAug['appendix'].$figmaAug['appendix'];
+            }
+        } elseif ($useUrlTool) {
+            // Skip server-side URL pre-fetch when the LLM can call fetch_page_content itself.
+            // Otherwise the page body is inlined and the model has no reason to drill into detail pages.
+            $urlAug = [
+                'appendix' => '',
+                'warnings' => [],
+                'preferred' => new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths,
+            ];
+            $figmaAug = $this->figma ? $this->figma->buildAugmentation($prompt) : ['appendix' => '', 'warnings' => []];
+            $combinedAppendix = $figmaAug['appendix'];
+        } else {
+            $urlAug = $this->promptUrlFetcher->buildAugmentation($prompt);
+            $figmaAug = $this->figma ? $this->figma->buildAugmentation($prompt) : ['appendix' => '', 'warnings' => []];
+            $combinedAppendix = $urlAug['appendix'].$figmaAug['appendix'];
+        }
+
         $userMessage = $this->buildUserMessage($prompt, $attachmentContent, $combinedAppendix);
 
         $messages = [
@@ -108,7 +157,27 @@ class EntryGeneratorService
         ];
 
         $maxTokens = (int) config('statamic-ai-assistant.generator_max_tokens', 4000);
-        $rawResponse = $this->aiService->generateFromMessages($messages, $maxTokens, $onStreamToken);
+        $toolWarnings = [];
+
+        if ($useUrlTool) {
+            try {
+                $rawResponse = $this->generateContentWithUrlFetchToolLoop(
+                    $messages,
+                    $maxTokens,
+                    $onStreamToken,
+                    $toolWarnings,
+                    $streamHeartbeat,
+                );
+            } catch (\Throwable $e) {
+                Log::warning('[entry-gen-tool] tool loop failed; falling back to single-shot completion', [
+                    'message' => $e->getMessage(),
+                    'exception' => get_class($e),
+                ]);
+                $rawResponse = $this->aiService->generateFromMessages($messages, $maxTokens, $onStreamToken);
+            }
+        } else {
+            $rawResponse = $this->aiService->generateFromMessages($messages, $maxTokens, $onStreamToken);
+        }
 
         if ($rawResponse === null || $rawResponse === '') {
             throw new \RuntimeException(__('The AI returned no content. Check your provider settings and try again.'));
@@ -116,17 +185,234 @@ class EntryGeneratorService
 
         $parsedData = $this->parseResponse($rawResponse);
 
-        $result = $this->mapToFieldData($parsedData, $blueprint, $locale, $prompt);
+        // Merge any preferred assets surfaced by the URL augmentation step
+        // (single-prompt path) with the explicit ones passed in (migration
+        // path). Either or both can be empty.
+        $aggregatedPreferred = \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths::merge(
+            $preferredAssets ?? new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths,
+            $urlAug['preferred'] ?? new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths,
+        );
 
-        foreach ($urlAug['warnings'] as $w) {
-            $result['warnings'][] = $w;
+        $result = $this->mapToFieldData($parsedData, $blueprint, $locale, $prompt, $aggregatedPreferred);
+
+        if ($prefetchedUrlAug === null) {
+            foreach ($urlAug['warnings'] as $w) {
+                $result['warnings'][] = $w;
+            }
         }
 
         foreach ($figmaAug['warnings'] as $w) {
             $result['warnings'][] = $w;
         }
 
+        foreach ($toolWarnings as $w) {
+            $result['warnings'][] = $w;
+        }
+
         return $result;
+    }
+
+    /**
+     * Multi-turn completion: model may call fetch_page_content; tool results include echoed reason + body or error.
+     *
+     * @param  array<int, array<string, mixed>>  $messages
+     * @param  array<int, string>  $toolWarningsOut
+     * @param  callable(): void|null  $streamHeartbeat
+     */
+    private function generateContentWithUrlFetchToolLoop(
+        array $messages,
+        int $maxTokens,
+        ?callable $onStreamToken,
+        array &$toolWarningsOut,
+        ?callable $streamHeartbeat = null,
+    ): string {
+        $toolHint = "URL HANDLING RULES — these take priority over any later JSON output rule:\n"
+            ."1. If the user message references one or more http(s) URLs, you MUST call the **fetch_page_content** tool to retrieve them BEFORE producing any output. Never invent or guess content from a URL alone.\n"
+            ."2. After fetching, inspect the returned content. If it is a listing or index page (multiple teasers, news cards, 'read more' links, item summaries with detail URLs), identify the specific item the user asked for and call **fetch_page_content** AGAIN on that item's detail page URL. Write the entry from the detail page body, not from the listing teaser.\n"
+            ."3. If the user asked for 'the first', 'the latest', 'the next', 'the second', or a specific item from a listing, pick the URL that matches that intent and fetch it.\n"
+            ."4. You may call the tool multiple times. Pass **url** (full link, https preferred) and **reason** (short: which item or which blueprint field this supports).\n"
+            ."5. ONLY after you have the full source text you need, respond with the JSON object for the entry fields — no markdown fences, no commentary — exactly as required by the rules below.\n"
+            ."---\n";
+
+        $working = $messages;
+        // Prepend the URL rules. The downstream system message contains the field
+        // schema (often >40k chars) followed by 'respond with ONLY a JSON object',
+        // and putting the tool rules at the end leaves them buried where smaller
+        // models miss them.
+        $working[0]['content'] = $toolHint."\n".($working[0]['content'] ?? '');
+
+        $tools = [$this->promptUrlFetcher->chatToolDefinition()];
+        $maxRounds = (int) config('statamic-ai-assistant.entry_generator_tool_max_rounds', 120);
+        $maxFetches = (int) config('statamic-ai-assistant.entry_generator_tool_max_fetches', 100);
+        $fetches = 0;
+
+        // Detect URLs in the user message(s). If any are present, the model MUST
+        // call the fetch tool on the first round, otherwise it tends to fabricate
+        // content from the URL slug instead of fetching.
+        $promptHasUrl = false;
+        foreach ($messages as $m) {
+            $content = $m['content'] ?? '';
+            if (($m['role'] ?? '') === 'user' && is_string($content)
+                && preg_match('~\bhttps?://[^\s<>\]\}\)\"\'`]+~iu', $content)) {
+                $promptHasUrl = true;
+                break;
+            }
+        }
+
+        for ($round = 0; $round < $maxRounds; $round++) {
+            $streamHeartbeat?->__invoke();
+
+            $forceTool = $promptHasUrl && $fetches === 0;
+            // Use the explicit named-tool form on the first round when a URL is
+            // present. Some OpenAI-compatible providers (notably Infomaniak's
+            // Mistral deployments) silently ignore tool_choice: 'required' but
+            // honor a specific {type:function, function:{name:...}} directive.
+            $toolChoice = $forceTool
+                ? ['type' => 'function', 'function' => ['name' => 'fetch_page_content']]
+                : 'auto';
+
+            $data = $this->aiService->createChatCompletion($working, $maxTokens, $tools, $toolChoice, $streamHeartbeat);
+            $choice = $data['choices'][0] ?? null;
+
+            if (! is_array($choice)) {
+                throw new \RuntimeException(__('Unexpected AI response shape.'));
+            }
+
+            $msg = $choice['message'] ?? null;
+
+            if (! is_array($msg)) {
+                throw new \RuntimeException(__('Unexpected AI response shape.'));
+            }
+
+            $toolCalls = $msg['tool_calls'] ?? null;
+            $hasToolCalls = is_array($toolCalls) && $toolCalls !== [];
+
+            // When we forced the tool and the model still didn't call it, dump
+            // the raw response so we can see whether the provider returned an
+            // error/warning field, an unexpected message shape, or stripped the
+            // tool_choice silently.
+            if ($forceTool && ! $hasToolCalls) {
+                Log::warning('[entry-gen-tool] forced tool call was IGNORED by model/provider', [
+                    'round' => $round,
+                    'tool_choice_sent' => $toolChoice,
+                    'raw_response' => Str::limit(json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 2000),
+                ]);
+            }
+
+            if (is_array($toolCalls) && $toolCalls !== []) {
+                $assistantPayload = [
+                    'role' => 'assistant',
+                    'content' => array_key_exists('content', $msg) ? $msg['content'] : null,
+                    'tool_calls' => $toolCalls,
+                ];
+                $working[] = $assistantPayload;
+
+                foreach ($toolCalls as $tc) {
+                    if (! is_array($tc)) {
+                        continue;
+                    }
+
+                    $id = isset($tc['id']) && is_string($tc['id']) ? $tc['id'] : '';
+                    $type = $tc['type'] ?? '';
+
+                    if ($type !== 'function' || $id === '') {
+                        continue;
+                    }
+
+                    $fn = $tc['function'] ?? [];
+                    $name = isset($fn['name']) && is_string($fn['name']) ? $fn['name'] : '';
+                    $args = isset($fn['arguments']) && is_string($fn['arguments']) ? $fn['arguments'] : '{}';
+
+                    if ($name !== 'fetch_page_content') {
+                        Log::warning('[entry-gen-tool] unknown tool requested', ['name' => $name]);
+                        $working[] = [
+                            'role' => 'tool',
+                            'tool_call_id' => $id,
+                            'content' => json_encode(['ok' => false, 'error' => 'unknown tool: '.$name], JSON_UNESCAPED_UNICODE),
+                        ];
+
+                        continue;
+                    }
+
+                    if ($fetches >= $maxFetches) {
+                        Log::warning('[entry-gen-tool] fetch limit reached', [
+                            'fetches' => $fetches,
+                            'max_fetches' => $maxFetches,
+                        ]);
+                        $toolWarningsOut[] = __('URL fetch tool: maximum number of fetches for this entry was reached.');
+                        $working[] = [
+                            'role' => 'tool',
+                            'tool_call_id' => $id,
+                            'content' => json_encode([
+                                'ok' => false,
+                                'error' => 'fetch_limit_reached',
+                                'reason_echo' => '',
+                                'url' => '',
+                            ], JSON_UNESCAPED_UNICODE),
+                        ];
+
+                        continue;
+                    }
+
+                    $fetches++;
+                    $toolResult = $this->promptUrlFetcher->executeChatTool($args, $onStreamToken, $toolWarningsOut);
+
+                    $working[] = [
+                        'role' => 'tool',
+                        'tool_call_id' => $id,
+                        'content' => $toolResult,
+                    ];
+                    $streamHeartbeat?->__invoke();
+                }
+
+                continue;
+            }
+
+            $text = $this->extractTextFromChatMessage($msg);
+
+            if ($text !== '') {
+                Log::info('[entry-gen-tool] generation done', [
+                    'rounds' => $round + 1,
+                    'fetches' => $fetches,
+                    'text_chars' => strlen($text),
+                ]);
+
+                return $text;
+            }
+
+            throw new \RuntimeException(__('The AI returned no usable text after tool use.'));
+        }
+
+        Log::error('[entry-gen-tool] tool loop exceeded max rounds', [
+            'max_rounds' => $maxRounds,
+            'fetches' => $fetches,
+        ]);
+        throw new \RuntimeException(__('Entry generation stopped: too many tool rounds.'));
+    }
+
+    /**
+     * @param  array<string, mixed>  $message
+     */
+    private function extractTextFromChatMessage(array $message): string
+    {
+        $content = $message['content'] ?? null;
+
+        if (is_string($content)) {
+            return trim($content);
+        }
+
+        if (is_array($content)) {
+            $parts = [];
+            foreach ($content as $part) {
+                if (is_array($part) && ($part['type'] ?? '') === 'text' && isset($part['text'])) {
+                    $parts[] = (string) $part['text'];
+                }
+            }
+
+            return trim(implode("\n", $parts));
+        }
+
+        return '';
     }
 
     /**
@@ -286,14 +572,18 @@ class EntryGeneratorService
         $response = preg_replace('/\s*```\s*$/', '', $response);
         $response = trim($response);
 
-        $firstBrace = strpos($response, '{');
-        $lastBrace = strrpos($response, '}');
+        $jsonStr = JsonObjectExtractor::firstObject($response);
 
-        if ($firstBrace === false || $lastBrace === false || $lastBrace <= $firstBrace) {
-            throw new \RuntimeException(__('Could not parse AI response as JSON. Please try again.'));
+        if ($jsonStr === null) {
+            $firstBrace = strpos($response, '{');
+            $lastBrace = strrpos($response, '}');
+
+            if ($firstBrace === false || $lastBrace === false || $lastBrace <= $firstBrace) {
+                throw new \RuntimeException(__('Could not parse AI response as JSON. Please try again.'));
+            }
+
+            $jsonStr = substr($response, $firstBrace, $lastBrace - $firstBrace + 1);
         }
-
-        $jsonStr = substr($response, $firstBrace, $lastBrace - $firstBrace + 1);
 
         try {
             $decoded = json_decode($jsonStr, true, 512, JSON_THROW_ON_ERROR);
@@ -316,6 +606,7 @@ class EntryGeneratorService
     public function getFieldSchemaForPreview(Blueprint $blueprint): array
     {
         $schema = [];
+        $siteHandle = Site::selected()?->handle() ?? Site::default()->handle();
 
         foreach ($blueprint->fields()->all() as $field) {
             $type = $field->type();
@@ -334,7 +625,7 @@ class EntryGeneratorService
                 continue;
             }
 
-            $entry = $this->buildFieldSchemaEntry($field);
+            $entry = $this->buildFieldSchemaEntry($field, false, $siteHandle);
 
             if ($entry !== null) {
                 $schema[$field->handle()] = $entry;
@@ -349,12 +640,12 @@ class EntryGeneratorService
      *
      * @return array<string, array<string, mixed>>
      */
-    private function buildFieldSchema(Blueprint $blueprint): array
+    private function buildFieldSchema(Blueprint $blueprint, string $siteHandle): array
     {
         $schema = [];
 
         foreach ($blueprint->fields()->all() as $field) {
-            $entry = $this->buildFieldSchemaEntry($field);
+            $entry = $this->buildFieldSchemaEntry($field, false, $siteHandle);
 
             if ($entry !== null) {
                 $schema[$field->handle()] = $entry;
@@ -378,14 +669,488 @@ class EntryGeneratorService
     }
 
     /**
+     * @return array<int, string>
+     */
+    private function getTermsFieldTaxonomyHandles(Field $field): array
+    {
+        $configTax = $field->get('taxonomies');
+
+        if ($configTax === null || $configTax === []) {
+            return Taxonomy::handles()->values()->all();
+        }
+
+        $out = [];
+
+        foreach (Arr::wrap($configTax) as $item) {
+            if (is_string($item) || is_int($item)) {
+                $h = trim((string) $item);
+
+                if ($h !== '') {
+                    $out[] = $h;
+                }
+
+                continue;
+            }
+
+            if (is_array($item)) {
+                $h = $item['handle'] ?? $item['value'] ?? $item['taxonomy'] ?? null;
+
+                if (is_string($h) && trim($h) !== '') {
+                    $out[] = trim($h);
+                }
+            }
+        }
+
+        return array_values(array_unique($out));
+    }
+
+    /**
+     * @param  iterable<int, \Statamic\Taxonomies\Term>  $terms
+     */
+    private function warmTaxonomyTermCache(string $siteHandle, string $taxonomyHandle, iterable $terms): void
+    {
+        $key = $siteHandle.'|'.$taxonomyHandle;
+        $byLowerSlug = [];
+        $byLowerTitle = [];
+
+        foreach ($terms as $term) {
+            $slug = $term->slug();
+            $title = (string) ($term->get('title') ?? $slug);
+            $byLowerSlug[strtolower($slug)] = $slug;
+            $byLowerTitle[strtolower(trim($title))] = $slug;
+        }
+
+        $this->taxonomyTermMatchCache[$key] = [
+            'by_lower_slug' => $byLowerSlug,
+            'by_lower_title' => $byLowerTitle,
+        ];
+    }
+
+    private function ensureTaxonomyTermCache(string $siteHandle, string $taxonomyHandle): void
+    {
+        $key = $siteHandle.'|'.$taxonomyHandle;
+
+        if (isset($this->taxonomyTermMatchCache[$key])) {
+            return;
+        }
+
+        $terms = Term::query()
+            ->where('site', $siteHandle)
+            ->where('taxonomy', $taxonomyHandle)
+            ->get();
+
+        $this->warmTaxonomyTermCache($siteHandle, $taxonomyHandle, $terms);
+    }
+
+    private function resolveSlugInTaxonomy(string $raw, string $taxonomyHandle, string $siteHandle): ?string
+    {
+        $this->ensureTaxonomyTermCache($siteHandle, $taxonomyHandle);
+        $key = $siteHandle.'|'.$taxonomyHandle;
+        $cache = $this->taxonomyTermMatchCache[$key];
+        $lower = strtolower(trim($raw));
+
+        if (isset($cache['by_lower_slug'][$lower])) {
+            return $cache['by_lower_slug'][$lower];
+        }
+
+        if (isset($cache['by_lower_title'][$lower])) {
+            return $cache['by_lower_title'][$lower];
+        }
+
+        $lang = Site::get($siteHandle)?->lang() ?? Site::default()->lang();
+        $slugified = Str::slug($raw, '-', $lang);
+        $lowerSlug = strtolower($slugified);
+
+        if ($slugified !== '' && isset($cache['by_lower_slug'][$lowerSlug])) {
+            return $cache['by_lower_slug'][$lowerSlug];
+        }
+
+        return null;
+    }
+
+    /**
      * @return array<string, mixed>|null
      */
-    private function buildFieldSchemaEntry(\Statamic\Fields\Field $field, bool $insideReplicatorComponentsOrGridRow = false): ?array
+    private function buildTermsFieldSchemaPayload(Field $field, string $siteHandle, ?string $instructions): ?array
+    {
+        $ft = $field->fieldtype();
+
+        if (! $ft instanceof Terms) {
+            return null;
+        }
+
+        $taxHandles = $this->getTermsFieldTaxonomyHandles($field);
+
+        if ($taxHandles === []) {
+            return null;
+        }
+
+        $catalog = [];
+
+        foreach ($taxHandles as $th) {
+            $taxonomy = Taxonomy::findByHandle($th);
+
+            if (! $taxonomy) {
+                continue;
+            }
+
+            $terms = Term::query()
+                ->where('site', $siteHandle)
+                ->where('taxonomy', $th)
+                ->orderBy('slug')
+                ->get();
+
+            $this->warmTaxonomyTermCache($siteHandle, $th, $terms);
+
+            $termEntries = [];
+
+            foreach ($terms as $term) {
+                $termEntries[] = [
+                    'slug' => $term->slug(),
+                    'title' => (string) ($term->get('title') ?? $term->slug()),
+                ];
+            }
+
+            $catalog[] = [
+                'taxonomy' => $th,
+                'title' => $taxonomy->title(),
+                'terms' => $termEntries,
+            ];
+        }
+
+        if ($catalog === []) {
+            return null;
+        }
+
+        $single = $ft->usingSingleTaxonomy();
+        $maxItems = $field->get('max_items');
+        $descParts = [];
+
+        if ($instructions) {
+            $descParts[] = $instructions;
+        }
+
+        $descParts[] = $single
+            ? 'Choose from the listed term slugs for this taxonomy. Output must use the exact slug from the list (you may infer the best match from the user prompt).'
+            : 'Use taxonomy_handle::term_slug for each value, using only slugs from the corresponding taxonomy list in the catalog.';
+
+        if ($maxItems === 1) {
+            $descParts[] = $single
+                ? 'Return a single slug string, not an array.'
+                : 'Return a single taxonomy_handle::term_slug string, not an array.';
+        } elseif ($maxItems !== null) {
+            $descParts[] = "Return at most {$maxItems} ".($single ? 'slugs' : 'taxonomy_handle::term_slug values').'.';
+        } else {
+            $descParts[] = $single
+                ? 'Return an array of slugs when multiple terms apply.'
+                : 'Return an array of taxonomy_handle::term_slug strings when multiple terms apply.';
+        }
+
+        return [
+            'label' => $field->display(),
+            'generatable' => true,
+            'type' => 'taxonomy_terms',
+            'taxonomies' => $catalog,
+            'single_taxonomy' => $single,
+            'max_items' => $maxItems,
+            'description' => implode(' ', $descParts),
+        ];
+    }
+
+    /**
+     * @param  array<int, string>  $taxHandles
+     * @return list<array{tax: ?string, raw: string}>
+     */
+    private function flattenTermsLlmValue(mixed $value, bool $singleTaxonomy, array $taxHandles): array
+    {
+        if ($value === null || $value === '' || $value === []) {
+            return [];
+        }
+
+        if (is_array($value) && Arr::isAssoc($value)) {
+            if ($singleTaxonomy) {
+                $first = reset($value);
+
+                if (! is_scalar($first)) {
+                    return [];
+                }
+
+                $raw = trim((string) $first);
+
+                if ($raw === '') {
+                    return [];
+                }
+
+                return [['tax' => $taxHandles[0] ?? null, 'raw' => $raw]];
+            }
+
+            $out = [];
+
+            foreach ($value as $k => $v) {
+                $taxKey = is_string($k) || is_int($k) ? (string) $k : null;
+
+                if ($taxKey === null) {
+                    continue;
+                }
+
+                foreach (Arr::wrap($v) as $one) {
+                    if (! is_scalar($one)) {
+                        continue;
+                    }
+
+                    $raw = trim((string) $one);
+
+                    if ($raw === '') {
+                        continue;
+                    }
+
+                    $out[] = ['tax' => $taxKey, 'raw' => $raw];
+                }
+            }
+
+            return $out;
+        }
+
+        if (is_string($value) || is_numeric($value)) {
+            $s = trim((string) $value);
+
+            if ($s === '') {
+                return [];
+            }
+
+            if ($singleTaxonomy) {
+                return [['tax' => $taxHandles[0] ?? null, 'raw' => $s]];
+            }
+
+            if (str_contains($s, '::')) {
+                [$t, $r] = explode('::', $s, 2);
+
+                return [['tax' => trim($t), 'raw' => trim($r)]];
+            }
+
+            return [['tax' => null, 'raw' => $s]];
+        }
+
+        if (! is_array($value)) {
+            return [];
+        }
+
+        $out = [];
+
+        foreach ($value as $item) {
+            if (! is_scalar($item)) {
+                continue;
+            }
+
+            $out = array_merge($out, $this->flattenTermsLlmValue((string) $item, $singleTaxonomy, $taxHandles));
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  array<int, string>  $taxHandles
+     */
+    private function resolveRawToTaxonomySlug(?string $taxonomyHint, string $raw, array $taxHandles, string $siteHandle, Field $field, array &$warnings): ?string
+    {
+        $raw = trim($raw);
+
+        if ($raw === '') {
+            return null;
+        }
+
+        if (str_contains($raw, '::')) {
+            [$taxonomyHint, $raw] = explode('::', $raw, 2);
+            $taxonomyHint = trim((string) $taxonomyHint);
+            $raw = trim($raw);
+        }
+
+        if ($taxonomyHint !== null && $taxonomyHint !== '' && ! in_array($taxonomyHint, $taxHandles, true)) {
+            $warnings[] = __(':field: unknown taxonomy ":t".', [
+                'field' => $field->display(),
+                't' => $taxonomyHint,
+            ]);
+
+            return null;
+        }
+
+        if ($taxonomyHint !== null && $taxonomyHint !== '') {
+            $slug = $this->resolveSlugInTaxonomy($raw, $taxonomyHint, $siteHandle);
+
+            if ($slug === null) {
+                $warnings[] = __(':field: no matching term for ":raw" in taxonomy :tax.', [
+                    'field' => $field->display(),
+                    'raw' => $raw,
+                    'tax' => $taxonomyHint,
+                ]);
+
+                return null;
+            }
+
+            return "{$taxonomyHint}::{$slug}";
+        }
+
+        if (count($taxHandles) === 1) {
+            $th = $taxHandles[0];
+            $slug = $this->resolveSlugInTaxonomy($raw, $th, $siteHandle);
+
+            if ($slug === null) {
+                $warnings[] = __(':field: no matching term for ":raw".', [
+                    'field' => $field->display(),
+                    'raw' => $raw,
+                ]);
+
+                return null;
+            }
+
+            return "{$th}::{$slug}";
+        }
+
+        foreach ($taxHandles as $th) {
+            $slug = $this->resolveSlugInTaxonomy($raw, $th, $siteHandle);
+
+            if ($slug !== null) {
+                return "{$th}::{$slug}";
+            }
+        }
+
+        $warnings[] = __(':field: no matching term for ":raw" in any configured taxonomy.', [
+            'field' => $field->display(),
+            'raw' => $raw,
+        ]);
+
+        return null;
+    }
+
+    private function mapTermsFieldValue(mixed $value, Field $field, array &$warnings, string $siteHandle): mixed
+    {
+        $ft = $field->fieldtype();
+
+        if (! $ft instanceof Terms) {
+            return null;
+        }
+
+        $taxHandles = $this->getTermsFieldTaxonomyHandles($field);
+
+        if ($taxHandles === []) {
+            return null;
+        }
+
+        $singleTax = $ft->usingSingleTaxonomy();
+        $flat = $this->flattenTermsLlmValue($value, $singleTax, $taxHandles);
+
+        if ($flat === []) {
+            return null;
+        }
+
+        $resolved = [];
+
+        foreach ($flat as $item) {
+            $id = $this->resolveRawToTaxonomySlug($item['tax'], $item['raw'], $taxHandles, $siteHandle, $field, $warnings);
+
+            if ($id !== null) {
+                $resolved[] = $id;
+            }
+        }
+
+        $resolved = array_values(array_unique($resolved));
+
+        if ($resolved === []) {
+            return null;
+        }
+
+        $maxItems = $field->get('max_items');
+        $maxItems = is_numeric($maxItems) ? (int) $maxItems : null;
+
+        if ($maxItems !== null && count($resolved) > $maxItems) {
+            $resolved = array_slice($resolved, 0, $maxItems);
+            $warnings[] = __(':field: too many taxonomy terms; only the first :n kept.', [
+                'field' => $field->display(),
+                'n' => $maxItems,
+            ]);
+        }
+
+        $maxOne = $maxItems === 1;
+
+        if ($singleTax) {
+            $slugs = [];
+
+            foreach ($resolved as $id) {
+                $parts = explode('::', $id, 2);
+                $slugs[] = $parts[1] ?? $parts[0];
+            }
+
+            if ($maxOne) {
+                return $slugs[0] ?? null;
+            }
+
+            return $slugs;
+        }
+
+        if ($maxOne) {
+            return $resolved[0] ?? null;
+        }
+
+        return $resolved;
+    }
+
+    private function firstTermValueForTermsField(Field $field, string $siteHandle): mixed
+    {
+        $ft = $field->fieldtype();
+
+        if (! $ft instanceof Terms) {
+            return null;
+        }
+
+        $taxHandles = $this->getTermsFieldTaxonomyHandles($field);
+        $taxHandles = array_values($taxHandles);
+        sort($taxHandles);
+
+        foreach ($taxHandles as $th) {
+            $term = Term::query()
+                ->where('site', $siteHandle)
+                ->where('taxonomy', $th)
+                ->orderBy('slug')
+                ->first();
+
+            if (! $term) {
+                continue;
+            }
+
+            $slug = $term->slug();
+            $maxItemsCfg = $field->get('max_items');
+            $maxOne = is_numeric($maxItemsCfg) && (int) $maxItemsCfg === 1;
+
+            if ($ft->usingSingleTaxonomy()) {
+                if ($maxOne) {
+                    return $slug;
+                }
+
+                return [$slug];
+            }
+
+            $id = "{$th}::{$slug}";
+
+            if ($maxOne) {
+                return $id;
+            }
+
+            return [$id];
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function buildFieldSchemaEntry(\Statamic\Fields\Field $field, bool $insideReplicatorComponentsOrGridRow = false, ?string $siteHandle = null): ?array
     {
         $type = $field->type();
         $display = $field->display();
         $instructions = $field->instructions();
         $config = $field->config();
+        $siteHandle = $siteHandle ?? Site::current()?->handle() ?? Site::default()->handle();
 
         if ($insideReplicatorComponentsOrGridRow && $type === 'assets') {
             return $this->finalizeSchemaEntry($field, [
@@ -395,6 +1160,12 @@ class EntryGeneratorService
                 'description' => ($instructions ? $instructions.' ' : '')
                     .'Short vivid description of the image (subject, setting, mood). You may use an empty string for layout-only blocks; imagery may be auto-selected.',
             ]);
+        }
+
+        if ($type === 'terms') {
+            $payload = $this->buildTermsFieldSchemaPayload($field, $siteHandle, $instructions);
+
+            return $payload === null ? null : $this->finalizeSchemaEntry($field, $payload);
         }
 
         if (in_array($type, self::GEN_SKIP_TYPES)) {
@@ -415,7 +1186,7 @@ class EntryGeneratorService
             $entry['fields'] = [];
 
             foreach ($field->fieldtype()->fields()->all() as $sub) {
-                $subEntry = $this->buildFieldSchemaEntry($sub, $insideReplicatorComponentsOrGridRow);
+                $subEntry = $this->buildFieldSchemaEntry($sub, $insideReplicatorComponentsOrGridRow, $siteHandle);
 
                 if ($subEntry !== null) {
                     $entry['fields'][$sub->handle()] = $subEntry;
@@ -480,7 +1251,8 @@ class EntryGeneratorService
 
         if (in_array($type, self::GEN_DATE_TYPES)) {
             $entry['type'] = 'date';
-            $entry['description'] = ($instructions ? $instructions.' ' : '').'Use YYYY-MM-DD format.';
+            $entry['description'] = ($instructions ? $instructions.' ' : '')
+                .$this->statamicDateFieldSchemaDescriptionSuffix();
 
             return $this->finalizeSchemaEntry($field, $entry);
         }
@@ -493,7 +1265,7 @@ class EntryGeneratorService
                 .'Use several different block types across the page when the schema offers them — do not default the whole page to one or two repetitive types (for example only plain text or teaser blocks) if other sets exist. '
                 .'Include visual or image-led sets where they fit the narrative, not only text-heavy blocks.';
 
-            $sets = $this->buildRecursiveSchema($field);
+            $sets = $this->buildRecursiveSchema($field, $siteHandle);
 
             if (! empty($sets)) {
                 $entry['sets'] = $sets;
@@ -517,7 +1289,7 @@ class EntryGeneratorService
     /**
      * @return array<string, array<string, mixed>>
      */
-    private function buildRecursiveSchema(\Statamic\Fields\Field $field): array
+    private function buildRecursiveSchema(\Statamic\Fields\Field $field, string $siteHandle): array
     {
         $sets = [];
         $fieldtype = $field->fieldtype();
@@ -528,7 +1300,7 @@ class EntryGeneratorService
                 $setSchema = [];
 
                 foreach ($setFields->all() as $subField) {
-                    $subEntry = $this->buildFieldSchemaEntry($subField, true);
+                    $subEntry = $this->buildFieldSchemaEntry($subField, true, $siteHandle);
 
                     if ($subEntry !== null) {
                         $setSchema[$subField->handle()] = $subEntry;
@@ -542,7 +1314,7 @@ class EntryGeneratorService
             $gridSchema = [];
 
             foreach ($gridFields->all() as $subField) {
-                $subEntry = $this->buildFieldSchemaEntry($subField, true);
+                $subEntry = $this->buildFieldSchemaEntry($subField, true, $siteHandle);
 
                 if ($subEntry !== null) {
                     $gridSchema[$subField->handle()] = $subEntry;
@@ -628,6 +1400,8 @@ class EntryGeneratorService
                 $tags['video'] = 'video';
             } elseif (in_array($t, self::GEN_CHOICE_TYPES, true) || in_array($t, self::GEN_BOOLEAN_TYPES, true)) {
                 $tags['control'] = 'choices / toggles';
+            } elseif ($t === 'terms') {
+                $tags['taxonomy'] = 'taxonomy / categories';
             } elseif (in_array($t, self::GEN_RECURSIVE_TYPES, true)) {
                 $tags['nested'] = 'nested layout';
             } elseif ($t === 'group') {
@@ -673,6 +1447,33 @@ class EntryGeneratorService
         return false;
     }
 
+    private function fieldSchemaContainsTaxonomyTerms(array $schema): bool
+    {
+        foreach ($schema as $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+
+            if (($entry['type'] ?? null) === 'taxonomy_terms') {
+                return true;
+            }
+
+            if (isset($entry['fields']) && is_array($entry['fields']) && $this->fieldSchemaContainsTaxonomyTerms($entry['fields'])) {
+                return true;
+            }
+
+            if (isset($entry['sets']) && is_array($entry['sets'])) {
+                foreach ($entry['sets'] as $setSchema) {
+                    if (is_array($setSchema) && $this->fieldSchemaContainsTaxonomyTerms($setSchema)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
     private function buildSystemMessage(array $fieldSchema, string $locale): string
     {
         $preface = config('statamic-ai-assistant.prompt_generator_preface',
@@ -683,8 +1484,13 @@ class EntryGeneratorService
 
         $structuredRules = '';
 
+        if ($this->fieldSchemaContainsTaxonomyTerms($fieldSchema)) {
+            $structuredRules .= "\n"
+                ."- For fields with type \"taxonomy_terms\": pick values only from the slugs listed under each taxonomy in \"taxonomies\". Output the exact slug (single-taxonomy fields) or \"taxonomy_handle::term_slug\" when \"single_taxonomy\" is false. You may infer the best choice from the user prompt.\n";
+        }
+
         if ($this->fieldSchemaContainsStructuredType($fieldSchema)) {
-            $structuredRules = "\n"
+            $structuredRules .= "\n"
                 ."- For fields with type \"structured\" (replicator / components / grid): each array item is one block; include a \"type\" property with the set handle, then that set's field keys.\n"
                 ."- Block selection: when set_layout_catalog is provided, treat it as the authoritative guide. For each block, read its \"ai_description\" (what the block is and how it renders) and its \"when_to_use\" list (the concrete scenarios it exists for). Pick a block ONLY when the section you are building matches one of its when_to_use triggers, or clearly fits its ai_description. If none match, pick the closest block by content_mix rather than force-fitting the most generic one.\n"
                 ."- Treat when_to_use as strong editorial rules, not suggestions: if a block says it is for \"hero openers\", do not reuse it mid-page for unrelated content. If multiple blocks could fit, prefer the one whose when_to_use most specifically describes the section.\n"
@@ -704,15 +1510,36 @@ class EntryGeneratorService
             ."- For fields with type \"html\": provide valid HTML using only: p, h2, h3, h4, ul, ol, li, a, strong, em, blockquote, br tags.\n"
             ."- For fields with type \"select\": choose one of the provided options.\n"
             ."- For fields with type \"boolean\": provide true or false.\n"
-            ."- For fields with type \"date\": use YYYY-MM-DD format.\n"
+            .$this->statamicDateFieldRulesForPrompt()
             ."- For fields with type \"structured\": provide an array of objects, each with a \"type\" key matching a set handle, plus the set's field values.\n"
             ."- For fields with type \"group\": provide a JSON object whose keys match the nested field handles (see \"fields\" in the schema).\n"
             ."- For fields with type \"link\": provide a URL, path, or entry::UUID reference as described in the field description.\n"
             ."- For fields with type \"video_url\": provide a YouTube or video page URL, or an empty string.\n"
+            ."- For fields with type \"taxonomy_terms\": use only slugs from the schema \"taxonomies\" lists (exact slug when \"single_taxonomy\" is true; otherwise taxonomy_handle::term_slug).\n"
             .$structuredRules
             ."- Every field in the schema that includes \"required\": true must have a non-empty, valid value for its type. Never omit those keys, never use empty strings for them, and never use HTML with no visible text. If the user is vague, says to do nothing, or gives minimal instructions, you must still invent sensible placeholder content so the entry would pass blueprint validation.\n"
             ."- For fields without \"required\": true, if you cannot determine content, use an empty string when appropriate.\n"
             ."- Generate meaningful, high-quality content that is relevant to the user's request.";
+    }
+
+    /**
+     * Global Rules bullet: Statamic Date fieldtype values are plain Y-m-d strings in JSON.
+     */
+    private function statamicDateFieldRulesForPrompt(): string
+    {
+        return "- For fields with type \"date\" (Statamic **date** fieldtype): output a **JSON string** in calendar form **YYYY-MM-DD** only "
+            .'(four-digit year, two-digit month, two-digit day, ASCII hyphens; example: `"2026-04-28"`). '
+            .'Statamic stores PHP `Y-m-d` strings, not datetimes: do **not** use `T`, time zones, `Z`, or `2026-04-28T00:00:00`. '
+            .'Do **not** use Unix timestamps, bare numbers, `DD.MM.YYYY`, `MM/DD/YYYY`, written-out months, or relative phrases like "today". '
+            ."If the user prompt or fetched page shows another format, convert it to `YYYY-MM-DD`.\n";
+    }
+
+    /**
+     * Appended to each date field's schema `description` so the model sees the contract next to the handle.
+     */
+    private function statamicDateFieldSchemaDescriptionSuffix(): string
+    {
+        return 'Value: JSON string `YYYY-MM-DD` only (Statamic date / PHP Y-m-d). No time portion, no regional numeric dates, no "today" — normalize from source text if needed.';
     }
 
     /**
@@ -760,15 +1587,18 @@ class EntryGeneratorService
         $response = preg_replace('/\s*```\s*$/', '', $response);
         $response = trim($response);
 
-        // Extract JSON between first { and last }
-        $firstBrace = strpos($response, '{');
-        $lastBrace = strrpos($response, '}');
+        $jsonStr = JsonObjectExtractor::firstObject($response);
 
-        if ($firstBrace === false || $lastBrace === false || $lastBrace <= $firstBrace) {
-            throw new \RuntimeException(__('Could not parse AI response as JSON. Please try again.'));
+        if ($jsonStr === null) {
+            $firstBrace = strpos($response, '{');
+            $lastBrace = strrpos($response, '}');
+
+            if ($firstBrace === false || $lastBrace === false || $lastBrace <= $firstBrace) {
+                throw new \RuntimeException(__('Could not parse AI response as JSON. Please try again.'));
+            }
+
+            $jsonStr = substr($response, $firstBrace, $lastBrace - $firstBrace + 1);
         }
-
-        $jsonStr = substr($response, $firstBrace, $lastBrace - $firstBrace + 1);
 
         try {
             $decoded = json_decode($jsonStr, true, 512, JSON_THROW_ON_ERROR);
@@ -791,7 +1621,7 @@ class EntryGeneratorService
      *
      * @return array{data: array<string, mixed>, displayData: array<string, mixed>, warnings: string[]}
      */
-    private function mapToFieldData(array $parsedData, Blueprint $blueprint, string $locale, string $prompt = ''): array
+    private function mapToFieldData(array $parsedData, Blueprint $blueprint, string $locale, string $prompt = '', ?\BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths $preferredAssets = null): array
     {
         $data = [];
         $displayData = [];
@@ -816,7 +1646,7 @@ class EntryGeneratorService
                 $displayData[$handle] = $value;
             }
 
-            $mapped = $this->mapFieldValue($value, $field, $warnings);
+            $mapped = $this->mapFieldValue($value, $field, $warnings, $locale);
 
             if ($mapped !== null) {
                 $data[$handle] = $mapped;
@@ -828,14 +1658,14 @@ class EntryGeneratorService
             }
         }
 
-        $this->assetResolver->fillAssetFieldsWithRandom($data, $displayData, $blueprint, $warnings);
+        $this->assetResolver->fillAssetFieldsWithRandom($data, $displayData, $blueprint, $warnings, $preferredAssets);
         $this->linkFallback->fillEmptyLinkFields($data, $displayData, $blueprint, $locale, $warnings);
-        $this->applyMandatoryFieldFallbacks($data, $displayData, $blueprint, $warnings, $prompt);
+        $this->applyMandatoryFieldFallbacks($data, $displayData, $blueprint, $warnings, $prompt, $locale);
 
         return ['data' => $data, 'displayData' => $displayData, 'warnings' => $warnings];
     }
 
-    private function mapFieldValue(mixed $value, \Statamic\Fields\Field $field, array &$warnings): mixed
+    private function mapFieldValue(mixed $value, \Statamic\Fields\Field $field, array &$warnings, string $siteHandle): mixed
     {
         $type = $field->type();
 
@@ -853,7 +1683,7 @@ class EntryGeneratorService
                     continue;
                 }
 
-                $mapped = $this->mapFieldValue($value[$sh], $sub, $warnings);
+                $mapped = $this->mapFieldValue($value[$sh], $sub, $warnings, $siteHandle);
 
                 if ($mapped !== null) {
                     $out[$sh] = $mapped;
@@ -937,12 +1767,16 @@ class EntryGeneratorService
             return $strValue;
         }
 
+        if ($type === 'terms') {
+            return $this->mapTermsFieldValue($value, $field, $warnings, $siteHandle);
+        }
+
         if (in_array($type, self::GEN_RECURSIVE_TYPES)) {
             if (! is_array($value)) {
                 return null;
             }
 
-            return $this->mapReplicatorData($value, $field, $warnings);
+            return $this->mapReplicatorData($value, $field, $warnings, $siteHandle);
         }
 
         return null;
@@ -951,7 +1785,7 @@ class EntryGeneratorService
     /**
      * @return array<mixed>
      */
-    private function mapReplicatorData(array $sets, \Statamic\Fields\Field $field, array &$warnings): array
+    private function mapReplicatorData(array $sets, \Statamic\Fields\Field $field, array &$warnings, string $siteHandle): array
     {
         $result = [];
         $fieldtype = $field->fieldtype();
@@ -970,7 +1804,7 @@ class EntryGeneratorService
                     $subHandle = $subField->handle();
 
                     if (array_key_exists($subHandle, $set)) {
-                        $mapped = $this->mapFieldValue($set[$subHandle], $subField, $warnings);
+                        $mapped = $this->mapFieldValue($set[$subHandle], $subField, $warnings, $siteHandle);
 
                         if ($mapped !== null) {
                             $row[$subHandle] = $mapped;
@@ -1008,7 +1842,7 @@ class EntryGeneratorService
                     $subHandle = $subField->handle();
 
                     if (array_key_exists($subHandle, $set)) {
-                        $mapped = $this->mapFieldValue($set[$subHandle], $subField, $warnings);
+                        $mapped = $this->mapFieldValue($set[$subHandle], $subField, $warnings, $siteHandle);
 
                         if ($mapped !== null) {
                             $mappedSet[$subHandle] = $mapped;
@@ -1089,10 +1923,10 @@ class EntryGeneratorService
      * @param  array<string, mixed>  $displayData
      * @param  array<string, string>  $warnings
      */
-    private function applyMandatoryFieldFallbacks(array &$data, array &$displayData, Blueprint $blueprint, array &$warnings, string $prompt): void
+    private function applyMandatoryFieldFallbacks(array &$data, array &$displayData, Blueprint $blueprint, array &$warnings, string $prompt, string $siteHandle): void
     {
         foreach ($blueprint->fields()->all() as $field) {
-            $this->applyMandatoryFieldFallbackForField($field, $data, $displayData, $warnings, $prompt);
+            $this->applyMandatoryFieldFallbackForField($field, $data, $displayData, $warnings, $prompt, $siteHandle);
         }
     }
 
@@ -1101,7 +1935,7 @@ class EntryGeneratorService
      * @param  array<string, mixed>  $displayData
      * @param  array<string, string>  $warnings
      */
-    private function applyMandatoryFieldFallbackForField(Field $field, array &$data, array &$displayData, array &$warnings, string $prompt): void
+    private function applyMandatoryFieldFallbackForField(Field $field, array &$data, array &$displayData, array &$warnings, string $prompt, string $siteHandle): void
     {
         $type = $field->type();
         $handle = $field->handle();
@@ -1119,7 +1953,7 @@ class EntryGeneratorService
                 $displayData[$handle] = [];
             }
             foreach ($field->fieldtype()->fields()->all() as $sub) {
-                $this->applyMandatoryFieldFallbackForField($sub, $data[$handle], $displayData[$handle], $warnings, $prompt);
+                $this->applyMandatoryFieldFallbackForField($sub, $data[$handle], $displayData[$handle], $warnings, $prompt, $siteHandle);
             }
 
             return;
@@ -1145,11 +1979,23 @@ class EntryGeneratorService
 
         if (in_array($type, self::GEN_HTML_TYPES, true)) {
             $html = '<p>'.e($this->syntheticTextForRequiredField($field, $prompt)).'</p>';
-            $mapped = $this->mapFieldValue($html, $field, $warnings);
+            $mapped = $this->mapFieldValue($html, $field, $warnings, $siteHandle);
 
             if ($mapped !== null) {
                 $data[$handle] = $mapped;
                 $displayData[$handle] = $html;
+                $this->requiredWasAutofilledWarning($field, $warnings);
+            }
+
+            return;
+        }
+
+        if ($type === 'terms') {
+            $fallback = $this->firstTermValueForTermsField($field, $siteHandle);
+
+            if ($fallback !== null) {
+                $data[$handle] = $fallback;
+                $displayData[$handle] = $fallback;
                 $this->requiredWasAutofilledWarning($field, $warnings);
             }
 
@@ -1240,6 +2086,18 @@ class EntryGeneratorService
             return ! is_array($value) || $value === [];
         }
 
+        if ($type === 'terms') {
+            if ($value === null || $value === [] || $value === '') {
+                return true;
+            }
+
+            if (is_string($value) && trim($value) === '') {
+                return true;
+            }
+
+            return false;
+        }
+
         return false;
     }
 
@@ -1312,6 +2170,8 @@ class EntryGeneratorService
         string $locale,
         array $data,
     ): StatamicEntry {
+        $collection = Collection::findByHandle($collectionHandle);
+
         $entry = Entry::make()
             ->collection($collectionHandle)
             ->blueprint($blueprintHandle)
@@ -1324,9 +2184,48 @@ class EntryGeneratorService
 
         $entry->slug($slug);
         $entry->data($data);
+
+        // Dated collections use a separate entry date (ordering, CP sidebar, filenames).
+        // Blueprint `date` in $data alone does not always set that attribute — the CP can
+        // still show "today" unless we assign it explicitly.
+        if ($collection && $collection->dated()) {
+            $entryDate = $this->carbonFromBlueprintDateData($data['date'] ?? null);
+            if ($entryDate !== null) {
+                $entry->date($entryDate);
+            }
+        }
+
         $entry->published(false);
         $entry->save();
 
         return $entry;
+    }
+
+    /**
+     * Parse a Statamic date field value (Y-m-d string) for use as the dated entry's order date.
+     */
+    private function carbonFromBlueprintDateData(mixed $value): ?Carbon
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+
+        $raw = trim($value);
+
+        if ($raw === '') {
+            return null;
+        }
+
+        try {
+            $c = Carbon::createFromFormat('Y-m-d', $raw);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        if (! $c || $c->format('Y-m-d') !== $raw) {
+            return null;
+        }
+
+        return $c->startOfDay();
     }
 }

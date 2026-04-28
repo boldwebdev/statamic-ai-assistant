@@ -154,6 +154,61 @@
           <p v-html="chatHtml(store.generationError)"></p>
         </div>
       </div>
+
+      <!-- Migration: user echo -->
+      <div v-if="store.migration.mode && store.migration.promptRecap" class="eg-chat__msg eg-chat__msg--user">
+        <div class="eg-chat__user-wrap">
+          <span class="eg-chat__sender">{{ __('You') }}</span>
+          <div class="eg-chat__bubble eg-chat__bubble--user">
+            <p v-html="chatHtml(store.migration.promptRecap)"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Migration: discovery progress (same stream panel pattern as entry planning) -->
+      <div v-if="store.migration.mode && !store.migration.sessionId && store.migration.discovering" class="eg-chat__msg eg-chat__msg--agent">
+        <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
+        <div class="eg-chat__stream-panel" aria-live="polite" aria-busy="true">
+          <div
+            class="eg-chat__stream-panel__bar"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            :aria-valuenow="migrationDiscoverProgressPercent"
+            :aria-label="__('Discovering pages')"
+          >
+            <div class="eg-chat__stream-panel__fill" :style="{ width: migrationDiscoverProgressPercent + '%' }" />
+          </div>
+          <p class="eg-chat__stream-panel__title">{{ __('Discovering pages on the site…') }}</p>
+          <p class="eg-chat__stream-panel__hint">{{ __('Reading sitemaps and URLs, then grouping paths for your review.') }}</p>
+          <div
+            v-if="planningActivityLog.length"
+            ref="activityScrollMigrationDiscover"
+            class="eg-chat__activity"
+          >
+            <transition-group name="eg-activity" tag="ul" class="eg-chat__activity-list">
+              <li
+                v-for="row in planningActivityLog"
+                :key="row.id"
+                class="eg-chat__activity-line"
+                v-html="chatHtml(row.text)"
+              ></li>
+            </transition-group>
+          </div>
+        </div>
+      </div>
+
+      <!-- Migration: planning card (after discovery) -->
+      <div v-if="store.migration.mode && !store.migration.sessionId && !store.migration.discovering" class="eg-chat__msg eg-chat__msg--agent">
+        <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
+        <MigrationPlanCard />
+      </div>
+
+      <!-- Migration: progress card -->
+      <div v-if="store.migration.mode && store.migration.sessionId" class="eg-chat__msg eg-chat__msg--agent">
+        <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
+        <MigrationProgressCard />
+      </div>
     </div>
 
     <!-- ── Bottom composer bar ── -->
@@ -181,9 +236,44 @@
         </button>
       </div>
 
+      <!-- Intent hint — shows before the user hits enter -->
+      <div v-if="renderedStep === 2 && migrationIntentPreview" class="eg-chat__intent-pill">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14" aria-hidden="true">
+          <circle cx="10" cy="10" r="8" />
+          <path d="M2 10h16M10 2a12 12 0 013 8 12 12 0 01-3 8 12 12 0 01-3-8 12 12 0 013-8z" />
+        </svg>
+        <span>{{ __('Website migration mode — I will migrate :url', { url: migrationIntentPreview.url }) }}</span>
+      </div>
+
       <!-- Action buttons -->
       <div class="eg-chat__actions">
-        <template v-if="renderedStep === 2 && !canGenerate">
+        <!-- Migration: planning -->
+        <template v-if="migrationPhase === 'planning'">
+          <span v-if="store.migration.discovering" class="eg-chat__actions-status">
+            <span class="eg-chat__actions-pulse" />
+            {{ __('Looking at the website…') }}
+          </span>
+          <template v-else>
+            <Button variant="default" :text="__('Cancel')" @click="handleMigrationExit" />
+            <Button
+              variant="primary"
+              :disabled="store.migration.starting || migrationAssignedCount === 0"
+              :text="store.migration.starting
+                ? __('Starting…')
+                : __('Confirm & start migration (:n pages)', { n: migrationAssignedCount })"
+              @click="handleMigrationStart"
+            />
+          </template>
+        </template>
+
+        <!-- Migration: running / done -->
+        <template v-else-if="migrationPhase === 'running' || migrationPhase === 'done'">
+          <Button v-if="migrationPhase === 'running'" variant="default" :text="__('Cancel')" @click="handleMigrationCancel" />
+          <Button v-if="migrationCanRetry" variant="default" :text="__('Retry failed (:n)', { n: (store.migration.session && store.migration.session.counts.failed) || 0 })" @click="handleMigrationRetry" />
+          <Button variant="primary" :text="__('New request')" @click="resetForNewRequest" />
+        </template>
+
+        <template v-else-if="renderedStep === 2 && !canGenerate">
           <span class="eg-chat__actions-hint">{{ __('Type at least 10 characters…') }}</span>
         </template>
         <template v-else-if="renderedStep === 3 && store.generating">
@@ -315,7 +405,38 @@
       </div>
     </div>
 
-    <div v-if="step === 3" class="entry-generator__panel">
+    <!-- Full-page: migration mode overlay. Takes precedence over normal step 3. -->
+    <div v-if="store.migration.mode" class="entry-generator__panel">
+      <h2 class="entry-generator__panel-title">{{ __('Website migration') }}</h2>
+      <p v-if="store.migration.promptRecap" class="entry-generator__panel-desc">{{ store.migration.promptRecap }}</p>
+
+      <MigrationPlanCard
+        v-if="!store.migration.sessionId"
+        :discovery-bar-percent="store.migration.discovering ? migrationDiscoverProgressPercent : null"
+      />
+      <MigrationProgressCard v-else />
+
+      <div class="entry-generator__panel-footer">
+        <template v-if="migrationPhase === 'planning' && !store.migration.discovering">
+          <Button variant="default" :text="__('Cancel')" @click="handleMigrationExit" />
+          <Button
+            variant="primary"
+            :disabled="store.migration.starting || migrationAssignedCount === 0"
+            :text="store.migration.starting
+              ? __('Starting…')
+              : __('Confirm & start migration (:n pages)', { n: migrationAssignedCount })"
+            @click="handleMigrationStart"
+          />
+        </template>
+        <template v-else-if="migrationPhase === 'running' || migrationPhase === 'done'">
+          <Button v-if="migrationPhase === 'running'" variant="default" :text="__('Cancel')" @click="handleMigrationCancel" />
+          <Button v-if="migrationCanRetry" variant="default" :text="__('Retry failed (:n)', { n: (store.migration.session && store.migration.session.counts.failed) || 0 })" @click="handleMigrationRetry" />
+          <Button variant="primary" :text="__('New request')" @click="resetForNewRequest" />
+        </template>
+      </div>
+    </div>
+
+    <div v-if="step === 3 && !store.migration.mode" class="entry-generator__panel">
       <template v-if="store.planning && store.entries.length === 0">
         <div class="entry-generator__generating">
           <AiModalLoadingOverlay :show="true" :label="__('Working out a plan…')" />
@@ -403,6 +524,8 @@ import axios from 'axios';
 import { Button } from '@statamic/cms/ui';
 import AiModalLoadingOverlay from './AiModalLoadingOverlay.vue';
 import EntryGeneratorEntryCard from './EntryGeneratorEntryCard.vue';
+import MigrationPlanCard from './MigrationPlanCard.vue';
+import MigrationProgressCard from './MigrationProgressCard.vue';
 import {
   state,
   STATUS,
@@ -417,12 +540,18 @@ import {
   pushActivityLine,
   setI18n,
   setToaster,
+  detectMigrationIntent,
+  startMigrationDiscovery,
+  startMigrationJobs,
+  cancelMigration,
+  retryFailedMigration,
+  exitMigration,
 } from '../store/entryGeneratorStore.js';
 import { formatChatTextWithBoldUrls } from '../formatChatUrls.js';
 
 export default {
   name: 'EntryGeneratorPage',
-  components: { Button, AiModalLoadingOverlay, EntryGeneratorEntryCard },
+  components: { Button, AiModalLoadingOverlay, EntryGeneratorEntryCard, MigrationPlanCard, MigrationProgressCard },
 
   props: {
     drawer: { type: Boolean, default: false },
@@ -447,6 +576,10 @@ export default {
       planTickerHandle: null,
       planTicker: 0,
 
+      // Migration URL discovery — separate ticker so it never clashes with entry planning.
+      migrationDiscoverTickerHandle: null,
+      migrationDiscoverTicker: 0,
+
       // True while the user is being asked to confirm a stop (keep / discard).
       stopConfirmOpen: false,
 
@@ -462,6 +595,17 @@ export default {
         'Writing your text and sections…',
         'Polishing titles and details…',
         'Almost ready to show you…',
+      ],
+
+      migrationDiscoveryHintTimer: null,
+      migrationDiscoveryHintIdx: 0,
+      migrationDiscoveryHintKeys: [
+        'Checking sitemap and robots rules…',
+        'Fetching sitemap XML…',
+        'Collecting page URLs…',
+        'Following in-site links…',
+        'Grouping URLs into path patterns…',
+        'Matching Statamic collections…',
       ],
 
       // Expose the reactive store to the template.
@@ -487,6 +631,43 @@ export default {
       return (this.store.pendingPrompt || '').trim().length >= 10;
     },
 
+    /** Live intent hint — shown below the composer before the user hits Enter. */
+    migrationIntentPreview() {
+      if (this.store.migration.mode) return null;
+      return detectMigrationIntent(this.store.pendingPrompt);
+    },
+
+    /** Total pages assigned in the current plan, minus URLs the user deselected. */
+    migrationAssignedCount() {
+      const disc = this.store.migration.discovery;
+      if (!disc) return 0;
+      const excluded = this.store.migration.excludedUrls || {};
+      let total = 0;
+      (disc.clusters || []).forEach((c) => {
+        const m = this.store.migration.mapping[c.pattern];
+        if (!m || !m.collection || !m.blueprint) return;
+        (c.urls || []).forEach((u) => {
+          if (!excluded[u]) total += 1;
+        });
+      });
+      return total;
+    },
+
+    /** High-level migration UI state used by the sticky action bar. */
+    migrationPhase() {
+      const m = this.store.migration;
+      if (!m.mode) return 'idle';
+      if (!m.sessionId) return 'planning';   // cluster mapping card
+      if (m.session && m.session.status === 'running') return 'running';
+      return 'done';                          // completed, cancelled, or failed
+    },
+
+    /** Show retry button when the session is idle and some pages failed. */
+    migrationCanRetry() {
+      const s = this.store.migration.session;
+      return !!(s && s.status !== 'running' && s.counts && s.counts.failed > 0);
+    },
+
     /** Read-only proxy onto the store's attached file. */
     attachedFile() {
       return this.store.pendingAttachedFile;
@@ -509,11 +690,19 @@ export default {
       if (s.plan || s.entries.length > 0 || s.generating || s.planning || s.generationError) {
         return 3;
       }
+      if (s.migration.mode) {
+        return 3;
+      }
       return 2;
     },
 
     planProgressPercent() {
       const t = this.planTicker;
+      return Math.min(85, 15 + t * 6);
+    },
+
+    migrationDiscoverProgressPercent() {
+      const t = this.migrationDiscoverTicker;
       return Math.min(85, 15 + t * 6);
     },
 
@@ -579,6 +768,18 @@ export default {
         this.stopPlanningHints();
       }
     },
+    'store.migration.discovering': {
+      immediate: true,
+      handler(now) {
+        if (now) {
+          this.startMigrationDiscoverTicker();
+          this.startMigrationDiscoveryHints();
+        } else {
+          this.stopMigrationDiscoverTicker();
+          this.stopMigrationDiscoveryHints();
+        }
+      },
+    },
     'store.activityLog': {
       handler() {
         this.$nextTick(() => {
@@ -617,6 +818,8 @@ export default {
   beforeUnmount() {
     this.stopPlanTicker();
     this.stopPlanningHints();
+    this.stopMigrationDiscoverTicker();
+    this.stopMigrationDiscoveryHints();
     // NOTE: We deliberately do NOT abort the in-flight stream here. The store
     // owns it and it must survive component teardown so generation continues
     // when the user navigates away.
@@ -677,6 +880,8 @@ export default {
     scrollActivityPanels() {
       const el = this.$refs.activityScrollPlanning;
       if (el) el.scrollTop = el.scrollHeight;
+      const elM = this.$refs.activityScrollMigrationDiscover;
+      if (elM) elM.scrollTop = elM.scrollHeight;
     },
 
     startPlanningHints() {
@@ -695,6 +900,37 @@ export default {
       if (this.planningHintTimer) {
         clearInterval(this.planningHintTimer);
         this.planningHintTimer = null;
+      }
+    },
+
+    startMigrationDiscoverTicker() {
+      this.stopMigrationDiscoverTicker();
+      this.migrationDiscoverTicker = 0;
+      this.migrationDiscoverTickerHandle = setInterval(() => { this.migrationDiscoverTicker += 1; }, 600);
+    },
+
+    stopMigrationDiscoverTicker() {
+      if (this.migrationDiscoverTickerHandle) {
+        clearInterval(this.migrationDiscoverTickerHandle);
+        this.migrationDiscoverTickerHandle = null;
+      }
+    },
+
+    startMigrationDiscoveryHints() {
+      this.stopMigrationDiscoveryHints();
+      this.migrationDiscoveryHintIdx = 0;
+      this.migrationDiscoveryHintTimer = setInterval(() => {
+        if (!this.store.migration.discovering) return;
+        const key = this.migrationDiscoveryHintKeys[this.migrationDiscoveryHintIdx % this.migrationDiscoveryHintKeys.length];
+        this.migrationDiscoveryHintIdx += 1;
+        pushActivityLine(this.__(key), null);
+      }, 1400);
+    },
+
+    stopMigrationDiscoveryHints() {
+      if (this.migrationDiscoveryHintTimer) {
+        clearInterval(this.migrationDiscoveryHintTimer);
+        this.migrationDiscoveryHintTimer = null;
       }
     },
 
@@ -739,7 +975,18 @@ export default {
     },
 
     handleGenerate() {
-      if (!this.canGenerate || this.store.generating) return;
+      if (!this.canGenerate || this.store.generating || this.store.migration.discovering) return;
+
+      const prompt = (this.store.pendingPrompt || '').trim();
+
+      // Migration intent takes priority: "migrate https://foo.com …" kicks off the
+      // website migration flow instead of normal entry generation.
+      const intent = detectMigrationIntent(prompt);
+      if (intent) {
+        startMigrationDiscovery({ url: intent.url, prompt });
+        this.chatStickToBottom = true;
+        return;
+      }
 
       const useAutoTarget = this.drawer && !this.selectedCollection;
 
@@ -747,12 +994,30 @@ export default {
       // so the textarea stays prefilled across close/reopen, but the request uses
       // the values at submit time.
       startGeneration({
-        prompt: this.store.pendingPrompt,
+        prompt,
         attachedFile: this.store.pendingAttachedFile,
         useAutoTarget,
         collection: this.selectedCollection,
         blueprint: this.selectedBlueprint,
       });
+      this.chatStickToBottom = true;
+    },
+
+    handleMigrationStart() {
+      startMigrationJobs();
+      this.chatStickToBottom = true;
+    },
+
+    handleMigrationCancel() {
+      cancelMigration();
+    },
+
+    handleMigrationRetry() {
+      retryFailedMigration();
+    },
+
+    handleMigrationExit() {
+      exitMigration();
       this.chatStickToBottom = true;
     },
 
@@ -826,3 +1091,21 @@ export default {
   },
 };
 </script>
+
+<style>
+.eg-chat__intent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  margin: 0 12px 6px;
+  background: rgba(99, 102, 241, 0.08);
+  color: #4f46e5;
+  font-size: 0.78rem;
+  border-radius: 999px;
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  align-self: flex-start;
+  width: fit-content;
+}
+.eg-chat__intent-pill svg { color: #6366f1; flex-shrink: 0; }
+</style>

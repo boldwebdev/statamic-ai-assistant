@@ -4,6 +4,7 @@ use BoldWeb\StatamicAiAssistant\Controllers\EntryGeneratorController;
 use BoldWeb\StatamicAiAssistant\Controllers\FigmaOAuthController;
 use BoldWeb\StatamicAiAssistant\Controllers\SetHintsController;
 use BoldWeb\StatamicAiAssistant\Controllers\TranslationController;
+use BoldWeb\StatamicAiAssistant\Controllers\WebsiteMigrationController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('ai-generate')->name('statamic-ai-assistant.generate.')->group(function () {
@@ -15,6 +16,8 @@ Route::prefix('ai-generate')->name('statamic-ai-assistant.generate.')->group(fun
     Route::get('/blueprint-fields', [EntryGeneratorController::class, 'blueprintFields'])->name('blueprint-fields');
     Route::post('/generate', [EntryGeneratorController::class, 'generate'])->name('generate');
     Route::post('/generate-stream', [EntryGeneratorController::class, 'generateStream'])->name('generate-stream');
+    Route::get('/generate-progress/{sessionId}', [EntryGeneratorController::class, 'generateBatchProgress'])->name('generate-progress');
+    Route::post('/generate-cancel/{sessionId}', [EntryGeneratorController::class, 'generateBatchCancel'])->name('generate-cancel');
     Route::post('/create-entry', [EntryGeneratorController::class, 'createEntry'])->name('create-entry');
     Route::post('/regenerate-field', [EntryGeneratorController::class, 'regenerateField'])->name('regenerate-field');
 });
@@ -53,4 +56,12 @@ Route::prefix('ai-translations')->name('statamic-ai-assistant.')->group(function
     Route::get('/collection-entries', [TranslationController::class, 'collectionEntries'])->name('translate.collection-entries');
     Route::get('/navigation-entries', [TranslationController::class, 'navigationEntries'])->name('translate.navigation-entries');
     Route::post('/navigation-sync', [TranslationController::class, 'navigationSync'])->name('translate.navigation-sync');
+});
+
+Route::prefix('ai-migration')->name('statamic-ai-assistant.migration.')->group(function () {
+    Route::post('/discover', [WebsiteMigrationController::class, 'discover'])->name('discover');
+    Route::post('/start', [WebsiteMigrationController::class, 'start'])->name('start');
+    Route::get('/progress/{sessionId}', [WebsiteMigrationController::class, 'progress'])->name('progress');
+    Route::post('/cancel/{sessionId}', [WebsiteMigrationController::class, 'cancel'])->name('cancel');
+    Route::post('/retry/{sessionId}', [WebsiteMigrationController::class, 'retry'])->name('retry');
 });
