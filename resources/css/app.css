@@ -4100,6 +4100,16 @@ html.dark .translation-progress__entry-error {
     color: var(--theme-color-gray-200, #e4e4e7);
 }
 
+.eg-entry-card__badge--update {
+    background: var(--theme-color-amber-100, #fef3c7);
+    color: var(--theme-color-amber-800, #92400e);
+}
+
+.dark .eg-entry-card__badge--update {
+    background: var(--theme-color-amber-900, #78350f);
+    color: var(--theme-color-amber-100, #fef3c7);
+}
+
 .eg-entry-card__badge-sep {
     color: var(--theme-color-gray-400, #a1a1aa);
 }

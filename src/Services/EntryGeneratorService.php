@@ -430,12 +430,19 @@ class EntryGeneratorService
     /**
      * Collections visible for entry generation (non-hidden blueprints only).
      *
-     * @return array<int, array{handle: string, title: string, blueprints: array<int, array{handle: string, title: string}>}>
+     * When $entriesPerCollection > 0, each row also carries `count` (total entries
+     * in the active site) and `entries` (recent shortlist: id/title/slug). This
+     * extra payload is only used by the agentic planner so the LLM can reason
+     * about updating existing entries without an extra tool round-trip.
+     *
+     * @return array<int, array{handle: string, title: string, blueprints: array<int, array{handle: string, title: string}>, count?: int, entries?: array<int, array{id: string, title: string, slug: string}>}>
      */
-    public function getCollectionsCatalog(): array
+    public function getCollectionsCatalog(int $entriesPerCollection = 0): array
     {
+        $siteHandle = Site::selected()?->handle() ?? Site::default()->handle();
+
         return Collection::all()
-            ->map(function ($collection) {
+            ->map(function ($collection) use ($entriesPerCollection, $siteHandle) {
                 $blueprints = $collection->entryBlueprints()
                     ->reject->hidden()
                     ->values()
@@ -446,13 +453,74 @@ class EntryGeneratorService
                         ];
                     });
 
-                return [
+                $row = [
                     'handle' => $collection->handle(),
                     'title' => $collection->title(),
                     'blueprints' => $blueprints->values()->all(),
                 ];
+
+                if ($entriesPerCollection > 0) {
+                    $row['count'] = (int) Entry::query()
+                        ->where('collection', $collection->handle())
+                        ->where('site', $siteHandle)
+                        ->count();
+
+                    $row['entries'] = Entry::query()
+                        ->where('collection', $collection->handle())
+                        ->where('site', $siteHandle)
+                        ->orderBy('updated_at', 'desc')
+                        ->limit($entriesPerCollection)
+                        ->get()
+                        ->map(fn ($e) => [
+                            'id' => (string) $e->id(),
+                            'title' => (string) ($e->value('title') ?? ''),
+                            'slug' => (string) ($e->slug() ?? ''),
+                        ])
+                        ->values()
+                        ->all();
+                }
+
+                return $row;
             })
             ->filter(fn ($row) => $row['blueprints'] !== [])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Search entries by title/slug for the agentic planner's `find_entries` tool.
+     * Kept in this service so it can reuse the same query path as the catalog shortlist.
+     *
+     * @return array<int, array{id: string, title: string, slug: string, collection: string}>
+     */
+    public function findEntriesShortlist(?string $collectionHandle, string $query, int $limit): array
+    {
+        $limit = max(1, min(50, $limit));
+        $siteHandle = Site::selected()?->handle() ?? Site::default()->handle();
+
+        $q = Entry::query()->where('site', $siteHandle);
+
+        if (is_string($collectionHandle) && $collectionHandle !== '') {
+            $q->where('collection', $collectionHandle);
+        }
+
+        $needle = trim($query);
+        if ($needle !== '') {
+            $q->where(function ($qq) use ($needle) {
+                $qq->where('title', 'like', '%'.$needle.'%')
+                    ->orWhere('slug', 'like', '%'.$needle.'%');
+            });
+        }
+
+        return $q->orderBy('updated_at', 'desc')
+            ->limit($limit)
+            ->get()
+            ->map(fn ($e) => [
+                'id' => (string) $e->id(),
+                'title' => (string) ($e->value('title') ?? ''),
+                'slug' => (string) ($e->slug() ?? ''),
+                'collection' => (string) ($e->collectionHandle() ?? ''),
+            ])
             ->values()
             ->all();
     }
@@ -1621,7 +1689,7 @@ class EntryGeneratorService
      *
      * @return array{data: array<string, mixed>, displayData: array<string, mixed>, warnings: string[]}
      */
-    private function mapToFieldData(array $parsedData, Blueprint $blueprint, string $locale, string $prompt = '', ?\BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths $preferredAssets = null): array
+    private function mapToFieldData(array $parsedData, Blueprint $blueprint, string $locale, string $prompt = '', ?\BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths $preferredAssets = null, bool $partial = false): array
     {
         $data = [];
         $displayData = [];
@@ -1658,9 +1726,14 @@ class EntryGeneratorService
             }
         }
 
-        $this->assetResolver->fillAssetFieldsWithRandom($data, $displayData, $blueprint, $warnings, $preferredAssets);
-        $this->linkFallback->fillEmptyLinkFields($data, $displayData, $blueprint, $locale, $warnings);
-        $this->applyMandatoryFieldFallbacks($data, $displayData, $blueprint, $warnings, $prompt, $locale);
+        // Update mode: only carry forward what the LLM actually returned. Skip
+        // the asset/link/required autofillers that exist for fresh-entry creation
+        // — the existing entry already satisfies blueprint validation.
+        if (! $partial) {
+            $this->assetResolver->fillAssetFieldsWithRandom($data, $displayData, $blueprint, $warnings, $preferredAssets);
+            $this->linkFallback->fillEmptyLinkFields($data, $displayData, $blueprint, $locale, $warnings);
+            $this->applyMandatoryFieldFallbacks($data, $displayData, $blueprint, $warnings, $prompt, $locale);
+        }
 
         return ['data' => $data, 'displayData' => $displayData, 'warnings' => $warnings];
     }
@@ -1702,12 +1775,20 @@ class EntryGeneratorService
         }
 
         if (in_array($type, self::GEN_TEXT_TYPES)) {
+            if (! is_string($value) && ! is_scalar($value)) {
+                $this->warnNonScalarDrop($field, $warnings);
+                return null;
+            }
             $text = is_string($value) ? $value : (string) $value;
 
             return strip_tags($this->aiService->cleanResult($text));
         }
 
         if (in_array($type, self::GEN_HTML_TYPES)) {
+            if (! is_string($value) && ! is_scalar($value)) {
+                $this->warnNonScalarDrop($field, $warnings);
+                return null;
+            }
             $html = is_string($value) ? $value : (string) $value;
 
             $nodes = $this->htmlToFullBardDocument($html);
@@ -1733,6 +1814,10 @@ class EntryGeneratorService
                 }
             }
 
+            if (! is_scalar($value)) {
+                $this->warnNonScalarDrop($field, $warnings);
+                return null;
+            }
             $strValue = (string) $value;
 
             if (! empty($validValues) && ! in_array($strValue, $validValues)) {
@@ -1752,6 +1837,10 @@ class EntryGeneratorService
         }
 
         if (in_array($type, self::GEN_DATE_TYPES)) {
+            if (! is_scalar($value)) {
+                $this->warnNonScalarDrop($field, $warnings);
+                return null;
+            }
             $strValue = (string) $value;
             $date = \DateTime::createFromFormat('Y-m-d', $strValue);
 
@@ -1859,7 +1948,11 @@ class EntryGeneratorService
 
     private function mapLinkFieldValue(mixed $value, \Statamic\Fields\Field $field, array &$warnings): ?string
     {
-        $str = is_string($value) ? trim($value) : (string) $value;
+        if (! is_scalar($value) && $value !== null) {
+            $this->warnNonScalarDrop($field, $warnings);
+            return null;
+        }
+        $str = is_string($value) ? trim($value) : (string) ($value ?? '');
 
         if ($str === '') {
             return null;
@@ -1899,7 +1992,10 @@ class EntryGeneratorService
 
     private function mapVideoFieldValue(mixed $value, array &$warnings): ?string
     {
-        $str = is_string($value) ? trim($value) : (string) $value;
+        if (! is_scalar($value) && $value !== null) {
+            return null;
+        }
+        $str = is_string($value) ? trim($value) : (string) ($value ?? '');
 
         if ($str === '') {
             return null;
@@ -2162,6 +2258,596 @@ class EntryGeneratorService
         $warnings[] = __(':field was missing or empty but is required; a safe default was applied.', [
             'field' => $field->display(),
         ]);
+    }
+
+    /**
+     * Surfaced when the AI returns a non-scalar (e.g. an array) for a field that expects
+     * a scalar value. The field is dropped to avoid casting errors; the user is told why.
+     */
+    private function warnNonScalarDrop(Field $field, array &$warnings): void
+    {
+        $warnings[] = __(':field: AI returned an unexpected value shape and was skipped. Try again or rephrase the prompt.', [
+            'field' => $field->display(),
+        ]);
+    }
+
+    // ---------------------------------------------------------------------
+    //  Update path (BOLD agent update_entry_job tool).
+    //  Kept structurally separate from the create path so it can be removed,
+    //  swapped, or replaced without touching generateContent / createEntry.
+    // ---------------------------------------------------------------------
+
+    /**
+     * Generate a partial-update payload for an existing entry. Returns only the
+     * fields the LLM chose to change. The system prompt embeds the current
+     * values so the model can decide what to keep, what to rewrite, and what to leave alone.
+     *
+     * @param  callable(string): void|null  $onStreamToken
+     * @param  array{appendix: string, warnings: array<int, string>, preferred: \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths, appended_to_prompts?: bool}|null  $prefetchedUrlAug
+     * @param  callable(): void|null  $streamHeartbeat
+     * @return array{data: array<string, mixed>, displayData: array<string, mixed>, warnings: string[], collection: string, blueprint: string}
+     */
+    public function generateUpdateForEntry(
+        string $entryId,
+        string $prompt,
+        string $locale,
+        ?string $attachmentContent = null,
+        ?callable $onStreamToken = null,
+        ?array $prefetchedUrlAug = null,
+        ?callable $streamHeartbeat = null,
+    ): array {
+        $entry = Entry::find($entryId);
+
+        if (! $entry) {
+            throw new \RuntimeException(__('Entry not found.'));
+        }
+
+        $collectionHandle = (string) $entry->collectionHandle();
+        $blueprint = $entry->blueprint();
+
+        if (! $blueprint) {
+            throw new \RuntimeException(__('Blueprint not found for entry.'));
+        }
+
+        $blueprintHandle = (string) $blueprint->handle();
+        $fieldSchema = $this->buildFieldSchema($blueprint, $locale);
+        // Update mode: surface asset fields the create path hides (`GEN_SKIP_TYPES`)
+        // so the LLM can ask for a replacement. We walk into group fields too — many
+        // blueprints place their hero/main image inside a group like `image_or_video`.
+        // Returns a list of {field, path} pairs the resolver step uses below.
+        $assetFields = $this->augmentSchemaWithAssetFields($fieldSchema, $blueprint);
+
+        $currentSnapshot = $this->buildCurrentEntrySnapshot($entry, $blueprint);
+        $systemMessage = $this->buildUpdateSystemMessage($fieldSchema, $locale, $currentSnapshot);
+
+        $useUrlTool = (bool) config('statamic-ai-assistant.entry_generator_fetch_url_tool', true)
+            && (bool) config('statamic-ai-assistant.prompt_url_fetch.enabled', true)
+            && $this->aiService->supportsChatTools();
+
+        if ($prefetchedUrlAug !== null) {
+            $urlAug = [
+                'appendix' => $prefetchedUrlAug['appendix'],
+                'warnings' => $prefetchedUrlAug['warnings'],
+            ];
+            $combinedAppendix = (bool) ($prefetchedUrlAug['appended_to_prompts'] ?? false)
+                ? ''
+                : (string) $prefetchedUrlAug['appendix'];
+        } elseif ($useUrlTool) {
+            $urlAug = ['appendix' => '', 'warnings' => []];
+            $combinedAppendix = '';
+        } else {
+            $urlAug = $this->promptUrlFetcher->buildAugmentation($prompt);
+            $combinedAppendix = (string) $urlAug['appendix'];
+        }
+
+        $userMessage = $this->buildUserMessage($prompt, $attachmentContent, $combinedAppendix);
+
+        $messages = [
+            ['role' => 'system', 'content' => $systemMessage],
+            ['role' => 'user', 'content' => $userMessage],
+        ];
+
+        $maxTokens = (int) config('statamic-ai-assistant.generator_max_tokens', 4000);
+        $toolWarnings = [];
+
+        if ($useUrlTool) {
+            try {
+                $rawResponse = $this->generateContentWithUrlFetchToolLoop(
+                    $messages,
+                    $maxTokens,
+                    $onStreamToken,
+                    $toolWarnings,
+                    $streamHeartbeat,
+                );
+            } catch (\Throwable $e) {
+                Log::warning('[entry-update] tool loop failed; falling back to single-shot completion', [
+                    'message' => $e->getMessage(),
+                ]);
+                $rawResponse = $this->aiService->generateFromMessages($messages, $maxTokens, $onStreamToken);
+            }
+        } else {
+            $rawResponse = $this->aiService->generateFromMessages($messages, $maxTokens, $onStreamToken);
+        }
+
+        if ($rawResponse === null || $rawResponse === '') {
+            throw new \RuntimeException(__('The AI returned no content. Check your provider settings and try again.'));
+        }
+
+        $parsedData = $this->parseResponse($rawResponse);
+        $result = $this->mapToFieldData($parsedData, $blueprint, $locale, $prompt, null, true);
+
+        // Resolve asset fields (top-level + nested in groups) the LLM asked to
+        // replace. Fields the LLM did NOT mention stay absent from $data, so
+        // the merge in updateEntryFromData preserves the existing image.
+        $this->resolveUpdateAssetReplacements($result, $entry, $assetFields, $parsedData);
+
+        foreach ($urlAug['warnings'] as $w) {
+            $result['warnings'][] = $w;
+        }
+        foreach ($toolWarnings as $w) {
+            $result['warnings'][] = $w;
+        }
+
+        $result['collection'] = $collectionHandle;
+        $result['blueprint'] = $blueprintHandle;
+
+        return $result;
+    }
+
+    /**
+     * Inject top-level `assets` fields (skipped by the create-mode schema) as
+     * `asset_description` entries so the update LLM has a handle to write to.
+     * Returns the list of injected handles for the resolver step.
+     *
+     * @param  array<string, array<string, mixed>>  $fieldSchema
+     * @return array<int, string>
+     */
+    /**
+     * Walk the blueprint recursively (top level + groups) and inject
+     * asset_description schema entries with `available_assets` for every assets
+     * field at any nesting depth. Returns one {field, path} pair per asset
+     * field so the resolver step knows where to write the picked path.
+     *
+     * Replicator/components/grid are intentionally NOT walked here: their dynamic
+     * sets are already exposed via the (inside-sets) asset_description rule in
+     * buildSystemMessage, and resolving inside dynamic blocks needs different
+     * indexing. That can be a follow-up if needed.
+     *
+     * @return array<int, array{field: \Statamic\Fields\Field, path: array<int, string>}>
+     */
+    private function augmentSchemaWithAssetFields(array &$fieldSchema, Blueprint $blueprint): array
+    {
+        $assetFields = [];
+        $listingCap = max(0, (int) config('statamic-ai-assistant.bold_agent_asset_listing_cap', 100));
+
+        $this->walkAndInjectAssets(
+            $blueprint->fields()->all(),
+            $fieldSchema,
+            [],
+            $listingCap,
+            $assetFields,
+        );
+
+        return $assetFields;
+    }
+
+    /**
+     * @param  array<int, \Statamic\Fields\Field>  $fields
+     * @param  array<int, string>  $path
+     * @param  array<int, array{field: \Statamic\Fields\Field, path: array<int, string>}>  $assetFields
+     */
+    private function walkAndInjectAssets(array $fields, array &$schemaSlice, array $path, int $listingCap, array &$assetFields): void
+    {
+        foreach ($fields as $field) {
+            $handle = $field->handle();
+            $type = $field->type();
+            $thisPath = array_merge($path, [$handle]);
+
+            if ($type === 'assets') {
+                $availablePaths = $listingCap > 0
+                    ? $this->assetResolver->listFieldAssetPaths($field, $listingCap)
+                    : [];
+                $instructions = $field->instructions();
+
+                $entry = [
+                    'label' => $field->display(),
+                    'generatable' => true,
+                    'type' => 'asset_description',
+                    'description' => ($instructions ? $instructions.' ' : '')
+                        .'OMIT this key entirely to keep the current asset. '
+                        .'To replace the image, return EITHER (a) one exact path from `available_assets` below '
+                        .'(preferred — lets you respect user constraints like "not from the X folder"), '
+                        .'OR (b) a short description if nothing in the list fits, in which case the system picks a fitting asset randomly. '
+                        .'Paths are relative to the field\'s asset container; do not prefix with a slash.',
+                    'available_assets' => $availablePaths,
+                ];
+
+                if ($listingCap > 0 && count($availablePaths) === $listingCap) {
+                    $entry['available_assets_note'] = "Only the first {$listingCap} paths are listed; the container may hold more. If none of the listed paths fits, return a description and the system picks from the full set.";
+                }
+
+                $schemaSlice[$handle] = $entry;
+                $assetFields[] = ['field' => $field, 'path' => $thisPath];
+
+                Log::info('[entry-update] asset field listing', [
+                    'field_path' => implode('.', $thisPath),
+                    'container' => $field->config()['container'] ?? null,
+                    'folder' => $field->config()['folder'] ?? null,
+                    'available_assets_count' => count($availablePaths),
+                    'sample' => array_slice($availablePaths, 0, 5),
+                ]);
+
+                continue;
+            }
+
+            if (in_array($type, self::GEN_GROUP_TYPES, true)) {
+                // The group's schema entry already exists from buildFieldSchema
+                // — we just need to ensure its `fields` slice is mutable. If
+                // every sub-field was previously skipped (e.g. all were assets),
+                // the group entry might be missing — synthesize a minimal one.
+                if (! isset($schemaSlice[$handle]) || ! is_array($schemaSlice[$handle])) {
+                    $schemaSlice[$handle] = [
+                        'label' => $field->display(),
+                        'generatable' => true,
+                        'type' => 'group',
+                        'fields' => [],
+                    ];
+                }
+                if (! isset($schemaSlice[$handle]['fields']) || ! is_array($schemaSlice[$handle]['fields'])) {
+                    $schemaSlice[$handle]['fields'] = [];
+                }
+
+                $this->walkAndInjectAssets(
+                    $field->fieldtype()->fields()->all(),
+                    $schemaSlice[$handle]['fields'],
+                    $thisPath,
+                    $listingCap,
+                    $assetFields,
+                );
+            }
+        }
+    }
+
+    /**
+     * For each asset_description handle the LLM filled with a non-empty string,
+     * pick a replacement asset via the existing asset resolver. Handles the LLM
+     * omitted are left untouched so the merge preserves the current value.
+     *
+     * @param  array{data: array<string, mixed>, displayData: array<string, mixed>, warnings: string[]}  $result
+     * @param  array<int, string>  $assetHandles
+     * @param  array<string, mixed>  $parsedData
+     */
+    /**
+     * @param  array{data: array<string, mixed>, displayData: array<string, mixed>, warnings: string[]}  $result
+     * @param  array<int, array{field: \Statamic\Fields\Field, path: array<int, string>}>  $assetFields
+     * @param  array<string, mixed>  $parsedData
+     */
+    private function resolveUpdateAssetReplacements(array &$result, StatamicEntry $entry, array $assetFields, array $parsedData): void
+    {
+        if ($assetFields === []) {
+            return;
+        }
+
+        $entryData = is_array($entry->data()->all()) ? $entry->data()->all() : [];
+
+        $directPicks = [];   // [pathStr => ['path' => array, 'value' => resolvedValue]]
+        $randomPicks = [];   // [['field' => ..., 'path' => array]]
+        $rawByPath = [];     // [pathStr => llm value] for logging
+
+        foreach ($assetFields as $info) {
+            $field = $info['field'];
+            $path = $info['path'];
+            $pathStr = implode('.', $path);
+
+            $value = $this->getNestedValue($parsedData, $path);
+            if ($value === null) {
+                continue; // LLM omitted this field — preserve existing
+            }
+            if (! is_string($value) || trim($value) === '') {
+                continue;
+            }
+            $rawByPath[$pathStr] = $value;
+
+            $candidate = ltrim(trim($value), '/');
+            if ($candidate !== '' && $this->assetResolver->fieldHasAssetPath($field, $candidate)) {
+                $config = $field->config();
+                $maxFiles = max(1, (int) ($config['max_files'] ?? 1));
+                $resolved = $maxFiles === 1 ? $candidate : [$candidate];
+                $directPicks[$pathStr] = ['path' => $path, 'value' => $resolved];
+            } else {
+                $randomPicks[] = ['field' => $field, 'path' => $path];
+            }
+        }
+
+        Log::info('[entry-update] asset replacement resolution', [
+            'direct_picks' => array_map(fn ($p) => ['path' => implode('.', $p['path']), 'value' => $p['value']], array_values($directPicks)),
+            'random_picks' => array_map(fn ($p) => implode('.', $p['path']), $randomPicks),
+            'llm_raw_for_assets' => $rawByPath,
+        ]);
+
+        foreach ($directPicks as $info) {
+            $this->seedNestedFromExisting($result['data'], $info['path'], $entryData);
+            $this->seedNestedFromExisting($result['displayData'], $info['path'], $entryData);
+            $this->setNestedValue($result['data'], $info['path'], $info['value']);
+            $this->setNestedValue($result['displayData'], $info['path'], $info['value']);
+        }
+
+        foreach ($randomPicks as $pick) {
+            $picked = $this->assetResolver->pickReplacementForField($pick['field'], $result['warnings'], null);
+            if ($picked === null || $picked === '' || $picked === []) {
+                $result['warnings'][] = __(':field: no replacement image was found in the asset container; current image kept.', [
+                    'field' => implode('.', $pick['path']),
+                ]);
+                continue;
+            }
+            $this->seedNestedFromExisting($result['data'], $pick['path'], $entryData);
+            $this->seedNestedFromExisting($result['displayData'], $pick['path'], $entryData);
+            $this->setNestedValue($result['data'], $pick['path'], $picked);
+            $this->setNestedValue($result['displayData'], $pick['path'], $picked);
+        }
+    }
+
+    /**
+     * Read a value from $data following a path of keys; returns null if any key is missing.
+     *
+     * @param  array<string, mixed>  $data
+     * @param  array<int, string>  $path
+     */
+    private function getNestedValue(array $data, array $path): mixed
+    {
+        $cursor = $data;
+        foreach ($path as $key) {
+            if (! is_array($cursor) || ! array_key_exists($key, $cursor)) {
+                return null;
+            }
+            $cursor = $cursor[$key];
+        }
+
+        return $cursor;
+    }
+
+    /**
+     * Ensure each parent key along the path exists in $data, copying any
+     * existing slice from $entryData so siblings (e.g. video_enabled in an
+     * image_or_video group) survive the eventual save.
+     *
+     * @param  array<string, mixed>  $data
+     * @param  array<int, string>  $path
+     * @param  array<string, mixed>  $entryData
+     */
+    private function seedNestedFromExisting(array &$data, array $path, array $entryData): void
+    {
+        if (count($path) <= 1) {
+            return;
+        }
+
+        $cursor = &$data;
+        for ($i = 0; $i < count($path) - 1; $i++) {
+            $key = $path[$i];
+            if (! isset($cursor[$key]) || ! is_array($cursor[$key])) {
+                $existing = $this->getNestedValue($entryData, array_slice($path, 0, $i + 1));
+                $cursor[$key] = is_array($existing) ? $existing : [];
+            }
+            $cursor = &$cursor[$key];
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @param  array<int, string>  $path
+     */
+    private function setNestedValue(array &$data, array $path, mixed $value): void
+    {
+        $cursor = &$data;
+        for ($i = 0; $i < count($path) - 1; $i++) {
+            $key = $path[$i];
+            if (! isset($cursor[$key]) || ! is_array($cursor[$key])) {
+                $cursor[$key] = [];
+            }
+            $cursor = &$cursor[$key];
+        }
+        $cursor[end($path)] = $value;
+    }
+
+    /**
+     * Persist a partial update: load the entry, merge only the fields produced
+     * by `generateUpdateForEntry`, and save. Slug, date, and published flag are
+     * preserved unless the LLM explicitly returned a new title (slug stays
+     * unchanged on purpose — re-slugging breaks URLs).
+     */
+    public function updateEntryFromData(string $entryId, array $data): StatamicEntry
+    {
+        $entry = Entry::find($entryId);
+
+        if (! $entry) {
+            throw new \RuntimeException(__('Entry not found.'));
+        }
+
+        if ($data === []) {
+            return $entry;
+        }
+
+        $existing = is_array($entry->data()->all()) ? $entry->data()->all() : [];
+        $entry->data($this->deepMergeReplacingLists($existing, $data));
+        $entry->save();
+
+        return $entry;
+    }
+
+    /**
+     * Deep-merge $b into $a where:
+     *  - Associative array nodes recurse (so a group like `image_or_video`
+     *    preserves siblings the LLM did not return).
+     *  - List nodes (numerically-indexed) get REPLACED wholesale (so a
+     *    replicator array like `page_builder` doesn't accumulate stale blocks
+     *    from the existing entry when the LLM returns a shorter list).
+     *  - Scalars and type mismatches are replaced.
+     *
+     * @param  array<string|int, mixed>  $a
+     * @param  array<string|int, mixed>  $b
+     * @return array<string|int, mixed>
+     */
+    private function deepMergeReplacingLists(array $a, array $b): array
+    {
+        foreach ($b as $key => $val) {
+            if (is_array($val) && isset($a[$key]) && is_array($a[$key]) && ! array_is_list($val) && ! array_is_list($a[$key])) {
+                $a[$key] = $this->deepMergeReplacingLists($a[$key], $val);
+            } else {
+                $a[$key] = $val;
+            }
+        }
+
+        return $a;
+    }
+
+    /**
+     * Snapshot of the entry's current values, rendered as a key-by-key text
+     * block. Complex-field values are emitted as raw JSON so the LLM has the
+     * data it needs to return a FULL replacement; text fields are quoted
+     * strings; assets show their stored path(s). Total size is capped so
+     * token usage stays predictable on entries with deep replicator trees.
+     */
+    private function buildCurrentEntrySnapshot(StatamicEntry $entry, Blueprint $blueprint): string
+    {
+        $raw = is_array($entry->data()->all()) ? $entry->data()->all() : [];
+
+        $totalCap = 16000;
+        $perFieldCap = 6000;
+        $textCap = 1200;
+        $usedTotal = 0;
+        $lines = [];
+
+        $append = function (string $line) use (&$lines, &$usedTotal, $totalCap): void {
+            $usedTotal += strlen($line);
+            $lines[] = $line;
+        };
+
+        $encode = function ($value, int $cap) use (&$usedTotal, $totalCap): ?string {
+            if ($usedTotal >= $totalCap) {
+                return null;
+            }
+            $json = json_encode($value, JSON_UNESCAPED_UNICODE);
+            if ($json === false) {
+                return null;
+            }
+            if (strlen($json) > $cap) {
+                $json = substr($json, 0, $cap).'  /* truncated — full content exists; return the COMPLETE new value to change this field */';
+            }
+
+            return $json;
+        };
+
+        foreach ($blueprint->fields()->all() as $field) {
+            $handle = $field->handle();
+            if (! array_key_exists($handle, $raw)) {
+                continue;
+            }
+            $value = $raw[$handle];
+            $type = $field->type();
+
+            if ($type === 'section' || $type === 'color') {
+                continue;
+            }
+
+            if ($type === 'assets') {
+                if ($value === null || $value === [] || $value === '') {
+                    $append("{$handle}: (no asset set)");
+                } else {
+                    $append("{$handle}: ".json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+                }
+                continue;
+            }
+
+            if (in_array($type, self::GEN_TEXT_TYPES, true) && is_string($value)) {
+                $append("{$handle}: ".json_encode(Str::limit($value, $textCap), JSON_UNESCAPED_UNICODE));
+                continue;
+            }
+
+            if (in_array($type, self::GEN_CHOICE_TYPES, true) || in_array($type, self::GEN_BOOLEAN_TYPES, true) || in_array($type, self::GEN_DATE_TYPES, true)) {
+                $append("{$handle}: ".json_encode($value, JSON_UNESCAPED_UNICODE));
+                continue;
+            }
+
+            if (in_array($type, self::GEN_HTML_TYPES, true)) {
+                $encoded = $encode($value, $perFieldCap);
+                $append($encoded === null
+                    ? "{$handle}: (current Bard content omitted — return full new HTML to replace it)"
+                    : "{$handle}: {$encoded}");
+                $usedTotal += $encoded === null ? 0 : strlen($encoded);
+                continue;
+            }
+
+            if (in_array($type, self::GEN_RECURSIVE_TYPES, true)) {
+                $count = is_array($value) ? count($value) : 0;
+                $encoded = $encode($value, $perFieldCap);
+                $append($encoded === null
+                    ? "{$handle}: (structured field — {$count} block(s); return the COMPLETE new array to change, or omit to keep)"
+                    : "{$handle}: {$encoded}");
+                $usedTotal += $encoded === null ? 0 : strlen($encoded);
+                continue;
+            }
+
+            if (in_array($type, self::GEN_GROUP_TYPES, true)) {
+                $encoded = $encode($value, $perFieldCap);
+                $append($encoded === null
+                    ? "{$handle}: (group field — return the COMPLETE new object to change, or omit to keep)"
+                    : "{$handle}: {$encoded}");
+                $usedTotal += $encoded === null ? 0 : strlen($encoded);
+                continue;
+            }
+
+            if (is_scalar($value)) {
+                $append("{$handle}: ".json_encode($value, JSON_UNESCAPED_UNICODE));
+                continue;
+            }
+
+            $encoded = $encode($value, $perFieldCap);
+            $append($encoded === null
+                ? "{$handle}: (non-scalar value — return the COMPLETE new value to change, or omit to keep)"
+                : "{$handle}: {$encoded}");
+            $usedTotal += $encoded === null ? 0 : strlen($encoded);
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Update-mode system prompt: same field schema rules as creation, but the
+     * model is told to omit unchanged fields and is shown a snapshot of current values.
+     *
+     * @param  array<string, array<string, mixed>>  $fieldSchema
+     * @param  array<string, mixed>  $currentSnapshot
+     */
+    private function buildUpdateSystemMessage(array $fieldSchema, string $locale, string $currentSnapshot): string
+    {
+        $base = $this->buildSystemMessage($fieldSchema, $locale);
+
+        // Highest-priority block: this comes BEFORE the field-schema rules so
+        // the LLM anchors on update semantics (omit-to-keep, full-replace,
+        // path-picking) rather than the create-mode wording in $base.
+        $priority = "\n\n========== UPDATE MODE — read this BEFORE the schema rules above ==========\n"
+            ."You are editing an EXISTING entry. Different rules apply than creation:\n\n"
+            ."1) OMIT KEYS YOU DO NOT CHANGE.\n"
+            ."   - Return ONLY the keys you want to change. Keys you omit are kept as-is.\n"
+            ."   - Do NOT echo unchanged fields back; do NOT invent placeholder values; do NOT re-fill required fields the user did not ask about.\n"
+            ."   - Never use null or empty string to clear a field — omitting it is the only way to leave it unchanged.\n\n"
+            ."2) ASSET FIELDS (type \"asset_description\" in the schema, with an `available_assets` array):\n"
+            ."   - This rule OVERRIDES any earlier wording about asset_description being \"a concise phrase describing the desired image\".\n"
+            ."   - To KEEP the current image: omit the key entirely.\n"
+            ."   - To REPLACE the image: return ONE exact path string copied from that field's `available_assets` array — nothing else.\n"
+            ."   - When the user excludes a folder/path (e.g. \"don't use anything from the set previews folder\"), simply SKIP every path in `available_assets` whose prefix matches that exclusion and pick from the remaining paths.\n"
+            ."   - When the user asks for variety (\"use another image\", \"different from before\"), avoid the path that is currently set (shown in the snapshot below) and pick a DIFFERENT one from `available_assets`.\n"
+            ."   - Only when no path in `available_assets` fits the user's intent: return a short free-form description instead, and the system picks a random fitting asset (this is the LAST resort and will NOT respect path-based exclusions).\n\n"
+            ."3) COMPLEX FIELDS (Bard html, structured/replicator/components/grid, group):\n"
+            ."   - The snapshot below shows their current FULL content as raw JSON.\n"
+            ."   - If you change one, you MUST return the COMPLETE new value with your edits applied — what you return REPLACES the entire field. Returning a partial value will lose data.\n\n"
+            ."4) The required-field rule from creation does NOT apply here — the entry already validates.\n"
+            ."============================================================================\n";
+
+        $tail = "\n\nCurrent values for this entry (for context — do not echo back unchanged):\n"
+            .$currentSnapshot;
+
+        return $priority.$base.$tail;
     }
 
     private function createEntry(

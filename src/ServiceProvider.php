@@ -229,7 +229,8 @@ class ServiceProvider extends AddonServiceProvider
             });
         }
 
-        if (config('statamic-ai-assistant.entry_generator', true)) {
+        if (config('statamic-ai-assistant.entry_generator', true)
+            && config('statamic-ai-assistant.bold_agent_settings_nav', true)) {
             Nav::extend(function ($nav) {
                 $nav->settings(__('BOLD agent settings'))
                     ->route('statamic-ai-assistant.block-hints.page')

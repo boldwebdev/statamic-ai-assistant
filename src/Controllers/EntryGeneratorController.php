@@ -247,36 +247,56 @@ class EntryGeneratorController
     }
 
     /**
-     * Create the entry from previously generated data.
+     * Persist generated data: creates a new entry, or — when `entry_id` is
+     * supplied — patches that existing entry via the dedicated update path.
      */
     public function createEntry(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'collection' => 'required|string',
+            'collection' => 'required_without:entry_id|string',
             'blueprint' => 'nullable|string',
-            'data' => 'required|array',
+            'data' => 'present|array',
+            'entry_id' => 'nullable|string',
         ]);
 
         $locale = optional(Site::selected())->handle() ?: Site::default()->handle();
+        $entryId = isset($data['entry_id']) && is_string($data['entry_id']) && $data['entry_id'] !== ''
+            ? $data['entry_id']
+            : null;
+
+        if ($data['data'] === []) {
+            return response()->json([
+                'error' => $entryId !== null
+                    ? __('The AI did not produce any field changes. Try a more specific prompt.')
+                    : __('No content to save.'),
+            ], 422);
+        }
 
         try {
-            $entry = $this->generator->saveEntry(
-                $data['collection'],
-                $data['blueprint'] ?? '',
-                $locale,
-                $data['data'],
-            );
+            if ($entryId !== null) {
+                $entry = $this->generator->updateEntryFromData($entryId, $data['data']);
+                $operation = 'updated';
+            } else {
+                $entry = $this->generator->saveEntry(
+                    $data['collection'],
+                    $data['blueprint'] ?? '',
+                    $locale,
+                    $data['data'],
+                );
+                $operation = 'created';
+            }
 
             return response()->json([
                 'success' => true,
+                'operation' => $operation,
                 'entry_id' => $entry->id(),
                 'edit_url' => $entry->editUrl(),
                 'title' => $entry->value('title') ?? '',
             ]);
         } catch (\Exception $e) {
-            Log::error('Entry creation failed', ['error' => $e->getMessage()]);
+            Log::error('Entry persist failed', ['error' => $e->getMessage(), 'entry_id' => $entryId]);
 
-            return response()->json(['error' => __('Entry creation failed. Please try again.')], 500);
+            return response()->json(['error' => __('Saving the entry failed. Please try again.')], 500);
         }
     }
 

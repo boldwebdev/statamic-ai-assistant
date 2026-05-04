@@ -18,8 +18,8 @@ class PlanEntryDecorator
     /**
      * Decorate a single plan row. Useful for the agentic planner that adds rows one at a time.
      *
-     * @param  array{collection: string, blueprint: string, prompt: string, label: string}  $entry
-     * @return array{id: string, collection: string, blueprint: string, prompt: string, label: string, collection_title: string, blueprint_title: string}
+     * @param  array{collection: string, blueprint: string, prompt: string, label: string, entry_id?: string}  $entry
+     * @return array{id: string, collection: string, blueprint: string, prompt: string, label: string, collection_title: string, blueprint_title: string, entry_id: ?string}
      */
     public function decorateOne(array $entry): array
     {
@@ -63,14 +63,17 @@ class PlanEntryDecorator
     }
 
     /**
-     * @param  array{collection?: string, blueprint?: string, prompt?: string, label?: string}  $entry
+     * @param  array{collection?: string, blueprint?: string, prompt?: string, label?: string, entry_id?: ?string}  $entry
      * @param  array<string, array{title: string, blueprints: array<string, string>}>  $titleMap
-     * @return array{id: string, collection: string, blueprint: string, prompt: string, label: string, collection_title: string, blueprint_title: string}
+     * @return array{id: string, collection: string, blueprint: string, prompt: string, label: string, collection_title: string, blueprint_title: string, entry_id: ?string}
      */
     private function buildDecorated(array $entry, array $titleMap): array
     {
         $coll = (string) ($entry['collection'] ?? '');
         $bp = (string) ($entry['blueprint'] ?? '');
+        $entryId = isset($entry['entry_id']) && is_string($entry['entry_id']) && $entry['entry_id'] !== ''
+            ? $entry['entry_id']
+            : null;
 
         return [
             'id' => (string) Str::uuid(),
@@ -80,6 +83,7 @@ class PlanEntryDecorator
             'label' => (string) ($entry['label'] ?? ''),
             'collection_title' => $titleMap[$coll]['title'] ?? $coll,
             'blueprint_title' => $titleMap[$coll]['blueprints'][$bp] ?? $bp,
+            'entry_id' => $entryId,
         ];
     }
 }

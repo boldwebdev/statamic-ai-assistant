@@ -99,7 +99,10 @@ class EntryGenerationBatchService
      * (false when the cap is reached, the session is missing/cancelled, or the
      * id is already known — duplicate-safe so the planner can retry safely).
      *
-     * @param  array{id: string, collection: string, blueprint: string, prompt: string, label: string, collection_title: string, blueprint_title: string}  $decoratedRow
+     * `entry_id` (when set) signals an UPDATE row: the worker patches that
+     * existing Statamic entry instead of creating a new one.
+     *
+     * @param  array{id: string, collection: string, blueprint: string, prompt: string, label: string, collection_title: string, blueprint_title: string, entry_id?: ?string}  $decoratedRow
      */
     public function addPlannedEntry(string $sessionId, array $decoratedRow, int $cap = 0): bool
     {
@@ -122,6 +125,10 @@ class EntryGenerationBatchService
                 return $session;
             }
 
+            $entryId = isset($decoratedRow['entry_id']) && is_string($decoratedRow['entry_id']) && $decoratedRow['entry_id'] !== ''
+                ? $decoratedRow['entry_id']
+                : null;
+
             $session['entry_order'][] = $eid;
             $session['entries'][$eid] = [
                 'id' => $eid,
@@ -132,6 +139,8 @@ class EntryGenerationBatchService
                 'prompt' => (string) ($decoratedRow['prompt'] ?? ''),
                 'collection_title' => (string) ($decoratedRow['collection_title'] ?? ''),
                 'blueprint_title' => (string) ($decoratedRow['blueprint_title'] ?? ''),
+                'entry_id' => $entryId,
+                'operation' => $entryId !== null ? 'update' : 'create',
                 'status' => 'pending',
                 'token_length' => 0,
                 'stream_buffer' => '',
@@ -399,6 +408,8 @@ class EntryGenerationBatchService
                     'prompt' => (string) ($row['prompt'] ?? ''),
                     'collection_title' => (string) ($row['collection_title'] ?? ''),
                     'blueprint_title' => (string) ($row['blueprint_title'] ?? ''),
+                    'entry_id' => $row['entry_id'] ?? null,
+                    'operation' => (string) ($row['operation'] ?? 'create'),
                     'status' => (string) ($row['status'] ?? 'pending'),
                     'token_length' => (int) ($row['token_length'] ?? 0),
                     'stream_delta' => $delta,

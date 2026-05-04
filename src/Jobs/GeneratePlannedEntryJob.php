@@ -71,24 +71,43 @@ class GeneratePlannedEntryJob implements ShouldQueue
         }
 
         $prefetched = $batch->buildPrefetchedUrlAugmentation($this->sessionId);
+        $statamicEntryId = isset($row['entry_id']) && is_string($row['entry_id']) && $row['entry_id'] !== ''
+            ? $row['entry_id']
+            : null;
 
         try {
-            $result = $generator->generateContent(
-                (string) ($row['collection'] ?? ''),
-                (string) ($row['blueprint'] ?? ''),
-                (string) ($row['prompt'] ?? ''),
-                $locale,
-                $attachment,
-                function (string $delta) use ($batch): void {
-                    if ($delta === '') {
-                        return;
-                    }
-                    $batch->recordStreamDelta($this->sessionId, $this->entryId, $delta);
-                },
-                null,
-                $prefetched,
-                null,
-            );
+            $streamSink = function (string $delta) use ($batch): void {
+                if ($delta === '') {
+                    return;
+                }
+                $batch->recordStreamDelta($this->sessionId, $this->entryId, $delta);
+            };
+
+            if ($statamicEntryId !== null) {
+                // Update path: kept fully separate from the create path so it can
+                // be removed/swapped without touching generateContent.
+                $result = $generator->generateUpdateForEntry(
+                    $statamicEntryId,
+                    (string) ($row['prompt'] ?? ''),
+                    $locale,
+                    $attachment,
+                    $streamSink,
+                    $prefetched,
+                    null,
+                );
+            } else {
+                $result = $generator->generateContent(
+                    (string) ($row['collection'] ?? ''),
+                    (string) ($row['blueprint'] ?? ''),
+                    (string) ($row['prompt'] ?? ''),
+                    $locale,
+                    $attachment,
+                    $streamSink,
+                    null,
+                    $prefetched,
+                    null,
+                );
+            }
 
             $batch->setPreferredPaths(
                 $this->sessionId,
@@ -105,6 +124,11 @@ class GeneratePlannedEntryJob implements ShouldQueue
                 'session_id' => $this->sessionId,
                 'entry_id' => $this->entryId,
                 'error' => $e->getMessage(),
+                'exception' => get_class($e),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+                'is_update' => $statamicEntryId !== null,
             ]);
 
             $message = $e instanceof \RuntimeException

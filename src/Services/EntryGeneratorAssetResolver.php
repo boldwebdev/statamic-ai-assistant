@@ -201,6 +201,74 @@ class EntryGeneratorAssetResolver
     }
 
     /**
+     * Public listing of asset paths in the field's container — used by the BOLD
+     * agent UPDATE flow so the LLM can pick a specific image (e.g. respecting
+     * user constraints like "not from the set previews folder") instead of
+     * relying on the random pick fallback.
+     *
+     * @return array<int, string>
+     */
+    public function listFieldAssetPaths(Field $field, int $limit = 100): array
+    {
+        $paths = $this->getCandidateAssets($field)
+            ->map(fn ($a) => $a->path())
+            ->values()
+            ->all();
+
+        if ($limit > 0 && count($paths) > $limit) {
+            $paths = array_slice($paths, 0, $limit);
+        }
+
+        return $paths;
+    }
+
+    public function fieldHasAssetPath(Field $field, string $path): bool
+    {
+        foreach ($this->getCandidateAssets($field) as $asset) {
+            if ($asset->path() === $path) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Pick a replacement value for ONE asset field, respecting its max_files /
+     * min_files config. Single-file fields return a string path; multi-file
+     * fields return an array of paths. Returns null when the container has no
+     * candidates. Used by the BOLD agent UPDATE flow as a safe alternative to
+     * fillAssetFieldsWithRandom (which iterates the whole blueprint and would
+     * over-fill nested fields the user did not ask about).
+     */
+    public function pickReplacementForField(Field $field, array &$warnings, ?PreferredAssetPaths $preferred = null): mixed
+    {
+        $config = $field->config();
+        $maxFiles = max(1, (int) ($config['max_files'] ?? 1));
+        $minFiles = max(0, (int) ($config['min_files'] ?? 0));
+        $count = max($maxFiles, $minFiles);
+
+        $picked = [];
+
+        $containerHandle = $config['container'] ?? null;
+        if ($preferred !== null && is_string($containerHandle) && $containerHandle !== '') {
+            $picked = $preferred->takeForContainer($containerHandle, $count);
+        }
+
+        if (count($picked) < $count) {
+            $remaining = $count - count($picked);
+            $randomPaths = $this->pickRandomPathsForField($field, $warnings);
+            $picked = array_merge($picked, array_slice($randomPaths, 0, $remaining));
+        }
+
+        if ($picked === []) {
+            return null;
+        }
+
+        return $maxFiles === 1 ? $picked[0] : array_slice($picked, 0, $maxFiles);
+    }
+
+    /**
      * @return Collection<int, StatamicAsset|AssetContract>
      */
     private function getCandidateAssets(Field $field): Collection

@@ -13,6 +13,11 @@
           <div class="eg-entry-card__head-text">
             <p class="eg-entry-card__label">{{ displayLabel }}</p>
             <p class="eg-entry-card__target">
+              <span
+                v-if="isUpdate"
+                class="eg-entry-card__badge eg-entry-card__badge--update"
+                :title="__('Updating an existing entry')"
+              >{{ __('Update') }}</span>
               <span class="eg-entry-card__badge">{{ entry.collectionTitle || entry.collection }}</span>
               <template v-if="entry.blueprintTitle && entry.blueprintTitle !== entry.collectionTitle">
                 <span class="eg-entry-card__badge-sep">·</span>
@@ -70,7 +75,7 @@
           <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
         </svg>
       </span>
-      <span class="eg-entry-card__saved-text">{{ __('Saved as draft.') }}</span>
+      <span class="eg-entry-card__saved-text">{{ isUpdate ? __('Update applied.') : __('Saved as draft.') }}</span>
       <a
         v-if="!navigateAwayWouldAbortBatch"
         :href="entry.savedEntry.edit_url"
@@ -121,31 +126,43 @@
       </div>
     </div>
 
+    <!-- No changes notice for empty updates -->
+    <div v-if="entry.status === 'ready' && hasNoChanges" class="eg-entry-card__error">
+      <p>{{ isUpdate ? __('The AI did not produce any field changes. Try a more specific prompt.') : __('No content to save.') }}</p>
+    </div>
+
     <!-- Actions -->
     <div v-if="hasActions" class="eg-entry-card__actions">
       <template v-if="entry.status === 'ready'">
         <button type="button" class="eg-entry-card__btn eg-entry-card__btn--ghost" :disabled="busy" @click="$emit('discard')">
           {{ __('Discard') }}
         </button>
-        <button type="button" class="eg-entry-card__btn eg-entry-card__btn--ghost" :disabled="busy" @click="$emit('retry')">
+        <button
+          v-if="!isUpdate"
+          type="button"
+          class="eg-entry-card__btn eg-entry-card__btn--ghost"
+          :disabled="busy"
+          @click="$emit('retry')"
+        >
           {{ __('Retry') }}
         </button>
         <button
+          v-if="!hasNoChanges"
           type="button"
           class="eg-entry-card__btn eg-entry-card__btn--default"
           :disabled="busy"
           @click="$emit('save', 'draft')"
         >
-          {{ savingDraft ? __('Saving…') : __('Save as draft') }}
+          {{ savingDraft ? __('Saving…') : (isUpdate ? __('Apply update') : __('Save as draft')) }}
         </button>
         <button
-          v-if="!navigateAwayWouldAbortBatch"
+          v-if="!hasNoChanges && !navigateAwayWouldAbortBatch"
           type="button"
           class="eg-entry-card__btn eg-entry-card__btn--primary"
           :disabled="busy"
           @click="$emit('save', 'edit')"
         >
-          {{ savingEdit ? __('Saving…') : __('Save & edit') }}
+          {{ savingEdit ? __('Saving…') : (isUpdate ? __('Apply & edit') : __('Save & edit')) }}
         </button>
       </template>
       <template v-else-if="entry.status === 'failed'">
@@ -216,13 +233,22 @@ export default {
       return this.busy && this.entry.savingMode === 'edit';
     },
 
+    isUpdate() {
+      return this.entry.operation === 'update';
+    },
+
+    hasNoChanges() {
+      const d = this.entry.data;
+      return !d || (typeof d === 'object' && Object.keys(d).length === 0);
+    },
+
     statusLabel() {
       switch (this.entry.status) {
         case 'queued': return this.__('Waiting…');
-        case 'drafting': return this.__('Drafting…');
+        case 'drafting': return this.isUpdate ? this.__('Updating…') : this.__('Drafting…');
         case 'ready': return this.__('Ready to review');
         case 'saving': return this.__('Saving…');
-        case 'saved': return this.__('Saved');
+        case 'saved': return this.isUpdate ? this.__('Updated') : this.__('Saved');
         case 'failed': return this.__('Failed');
         default: return '';
       }

@@ -241,6 +241,18 @@ return [
     'entry_generator' => env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR', true),
 
     /*
+    | Show the "BOLD agent settings" entry in the CP Settings sidebar
+    |--------------------------------------------------------------------------
+    |
+    | Independent from `entry_generator`: set this to false to keep the agent
+    | itself running while hiding the per-set hints settings page from the
+    | sidebar (e.g. for editor accounts that should not see addon settings).
+    |
+    */
+
+    'bold_agent_settings_nav' => env('STATAMIC_AI_ASSISTANT_BOLD_AGENT_SETTINGS_NAV', true),
+
+    /*
     | BOLD agent — queued batch generation (after planner)
     |--------------------------------------------------------------------------
     |

@@ -193,6 +193,8 @@ function clearGenerationBatchPoll() {
 }
 
 function buildCardFromSnapshotEntry(se, index) {
+  const operation = se.operation === 'update' ? 'update' : 'create';
+  const entryId = typeof se.entry_id === 'string' && se.entry_id ? se.entry_id : null;
   return {
     id: se.id,
     index,
@@ -202,6 +204,8 @@ function buildCardFromSnapshotEntry(se, index) {
     blueprint: se.blueprint,
     collectionTitle: se.collection_title || se.collection,
     blueprintTitle: se.blueprint_title || se.blueprint,
+    operation,
+    entryId,
     status: STATUS.QUEUED,
     tokenLength: 0,
     data: null,
@@ -282,7 +286,12 @@ function applyBatchProgressSnapshot(data) {
       card.status = STATUS.DRAFTING;
       card.tokenLength = typeof se.token_length === 'number' ? se.token_length : card.tokenLength;
       const label = truncateActivityLabel(card.label || card.collectionTitle || card.collection);
-      pushActivityLine(_trans('Drafting — :label', { label }), card.id);
+      pushActivityLine(
+        card.operation === 'update'
+          ? _trans('Updating — :label', { label })
+          : _trans('Drafting — :label', { label }),
+        card.id,
+      );
     } else if (next === 'pending') {
       card.status = STATUS.QUEUED;
     }
@@ -305,7 +314,12 @@ function applyBatchProgressSnapshot(data) {
         });
       }
       const label = truncateActivityLabel(card.label || card.collectionTitle || card.collection);
-      pushActivityLine(_trans('Finished — :label', { label }), card.id);
+      pushActivityLine(
+        card.operation === 'update'
+          ? _trans('Update ready — :label', { label })
+          : _trans('Finished — :label', { label }),
+        card.id,
+      );
     }
 
     if (next === 'failed' && prev !== 'failed') {
@@ -586,33 +600,47 @@ export async function saveCard(id, mode) {
   const card = state.entries.find((e) => e.id === id);
   if (!card || card.status !== STATUS.READY) return;
 
+  const isUpdate = card.operation === 'update' && !!card.entryId;
+  const dataIsEmpty = !card.data || (typeof card.data === 'object' && Object.keys(card.data).length === 0);
+
+  // Empty data on an update means the AI did not actually produce field changes.
+  // Posting it would 422 with "no field changes were produced"; surface it here instead.
+  if (dataIsEmpty) {
+    if (_toast) {
+      _toast.error(isUpdate
+        ? _trans('No field changes were produced. Try a more specific prompt.')
+        : _trans('No content to save.'));
+    }
+    return;
+  }
+
   card.status = STATUS.SAVING;
   card.savingMode = mode;
 
+  const payload = isUpdate
+    ? { entry_id: card.entryId, data: card.data }
+    : { collection: card.collection, blueprint: card.blueprint, data: card.data };
+
   try {
-    const { data } = await axios.post('/cp/ai-generate/create-entry', {
-      collection: card.collection,
-      blueprint: card.blueprint,
-      data: card.data,
-    });
+    const { data } = await axios.post('/cp/ai-generate/create-entry', payload);
     if (data.success) {
       card.status = STATUS.SAVED;
       card.savedEntry = { entry_id: data.entry_id, edit_url: data.edit_url, title: data.title };
       if (_toast) {
         if (mode === 'edit') {
-          _toast.success(_trans('Entry created — opening editor.'));
+          _toast.success(isUpdate ? _trans('Entry updated — opening editor.') : _trans('Entry created — opening editor.'));
           setTimeout(() => { window.location.href = data.edit_url; }, 600);
         } else {
-          _toast.success(_trans('Entry saved as draft.'));
+          _toast.success(isUpdate ? _trans('Entry updated.') : _trans('Entry saved as draft.'));
         }
       }
     } else {
       card.status = STATUS.READY;
-      if (_toast) _toast.error(_trans('Entry creation failed.'));
+      if (_toast) _toast.error(isUpdate ? _trans('Entry update failed.') : _trans('Entry creation failed.'));
     }
   } catch (e) {
     card.status = STATUS.READY;
-    if (_toast) _toast.error(e.response?.data?.error || _trans('Entry creation failed.'));
+    if (_toast) _toast.error(e.response?.data?.error || (isUpdate ? _trans('Entry update failed.') : _trans('Entry creation failed.')));
   } finally {
     card.savingMode = null;
   }
@@ -627,19 +655,28 @@ export async function saveAll(mode) {
   let saved = 0;
   let failed = 0;
 
+  let updated = 0;
+
+  let skipped = 0;
+
   for (const card of targets) {
+    const isUpdate = card.operation === 'update' && !!card.entryId;
+    const dataIsEmpty = !card.data || (typeof card.data === 'object' && Object.keys(card.data).length === 0);
+    if (dataIsEmpty) {
+      skipped += 1;
+      continue;
+    }
+    const payload = isUpdate
+      ? { entry_id: card.entryId, data: card.data }
+      : { collection: card.collection, blueprint: card.blueprint, data: card.data };
     try {
       card.status = STATUS.SAVING;
       card.savingMode = mode;
-      const { data } = await axios.post('/cp/ai-generate/create-entry', {
-        collection: card.collection,
-        blueprint: card.blueprint,
-        data: card.data,
-      });
+      const { data } = await axios.post('/cp/ai-generate/create-entry', payload);
       if (data.success) {
         card.status = STATUS.SAVED;
         card.savedEntry = { entry_id: data.entry_id, edit_url: data.edit_url, title: data.title };
-        saved += 1;
+        if (isUpdate) updated += 1; else saved += 1;
       } else {
         card.status = STATUS.READY;
         failed += 1;
@@ -656,7 +693,9 @@ export async function saveAll(mode) {
 
   if (_toast) {
     if (saved > 0) _toast.success(_trans(':n entries saved as drafts.', { n: saved }));
+    if (updated > 0) _toast.success(_trans(':n entries updated.', { n: updated }));
     if (failed > 0) _toast.error(_trans(':n entries failed to save.', { n: failed }));
+    if (skipped > 0) _toast.error(_trans(':n entries skipped — no field changes produced.', { n: skipped }));
   }
 }
 

@@ -216,7 +216,8 @@ class EntryGenerationPlanner
             ? $session['attachment_content']
             : null;
 
-        $catalog = $this->generator->getCollectionsCatalog();
+        $shortlistLimit = max(0, (int) config('statamic-ai-assistant.bold_agent_catalog_entries_shortlist', 25));
+        $catalog = $this->generator->getCollectionsCatalog($shortlistLimit);
         if ($catalog === []) {
             throw new \RuntimeException(__('No collections with blueprints are available.'));
         }
@@ -224,19 +225,25 @@ class EntryGenerationPlanner
         $catalogJson = json_encode($catalog, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         $cap = max(1, min(500, (int) config('statamic-ai-assistant.bold_agent_max_plan_entries', 100)));
 
-        $system = "You are a Statamic CMS planner running asynchronously. The user described one or more entries they want to create. "
-            ."Your job is to discover every individual entry they want and create it via tool calls. **Never produce JSON output yourself** — entries are created exclusively through `create_entry_job` tool calls.\n\n"
+        $system = "You are a Statamic CMS planner running asynchronously. The user described one or more entries they want to create OR update. "
+            ."Your job is to figure out which case applies and dispatch tool calls accordingly. **Never produce JSON output yourself** — entries are created or updated exclusively through tool calls.\n\n"
+            ."AVAILABLE TOOLS:\n"
+            ."- `fetch_page_content`: read external http(s) URLs.\n"
+            ."- `create_entry_job`: queue ONE new entry for asynchronous creation.\n"
+            ."- `update_entry_job`: queue an UPDATE to an existing entry (you must know its `entry_id`).\n"
+            ."- `find_entries`: search existing entries by title/slug when the catalog shortlist below is not enough.\n\n"
             ."WORKFLOW:\n"
-            ."1. If the user message references one or more http(s) URLs, call **fetch_page_content** first to inspect them. Never guess content from a URL slug.\n"
-            ."2. For listing/index URLs (homepages, news lists, sitemaps), enumerate every relevant detail page; you may fetch the same listing or its sub-pages multiple times.\n"
-            ."3. As soon as you can identify a distinct entry the user wants, call **create_entry_job** for it — do not wait to plan all entries before dispatching. Each call enqueues a worker that starts generating immediately, in parallel.\n"
-            ."4. Use one **create_entry_job** call per distinct article/item. Never collapse many articles into a single call. The cap is {$cap} create_entry_job calls per request.\n"
-            ."5. Pick collection + blueprint **only** from the catalog below (handles must match exactly, case-sensitive). Each chosen blueprint must be one listed for that collection. If unsure, prefer the collection whose handle is `pages` if present; otherwise the first catalog collection.\n"
-            ."6. Each entry's `prompt` MUST be a complete, self-contained brief in the user's language: include the canonical detail URL (when applicable), the topic, and any constraints from the user's request. Do not reference other entries.\n"
-            ."7. The `label` is a short human title (2-6 words) for the UI in the user's language.\n"
+            ."1. Decide whether the user wants to create new entries, update existing entries, or both. Phrases like \"add\", \"new\", \"create\", \"write a post about\" → create. Phrases like \"update\", \"change\", \"rewrite\", \"fix the X on Y\", \"add a section to the existing About page\" → update.\n"
+            ."2. For UPDATES: find the target entry's `entry_id`. The catalog below carries an `entries` shortlist (recently updated) and a `count` per collection. If the right entry is in the shortlist, use its id directly. If not, call **find_entries** with a query (and optionally a collection handle) to search.\n"
+            ."3. For CREATES with URLs in the user message, call **fetch_page_content** first to inspect them. For listing/index URLs, enumerate every relevant detail page.\n"
+            ."4. Dispatch each entry as soon as you have enough info — do not wait to plan all entries before dispatching. Each tool call enqueues a worker that starts immediately, in parallel.\n"
+            ."5. Use one tool call per distinct entry. Never collapse many entries into a single call. The combined cap is {$cap} create_entry_job + update_entry_job calls per request.\n"
+            ."6. For CREATES: pick collection + blueprint **only** from the catalog below (handles must match exactly, case-sensitive). The chosen blueprint must be one listed for that collection. If unsure, prefer the collection whose handle is `pages` if present; otherwise the first catalog collection.\n"
+            ."7. Each `prompt` MUST be a complete, self-contained brief in the user's language: include the URL (when applicable), the topic, and any constraints. For updates, describe ONLY what should change — do not restate the rest of the entry. Do not reference other entries.\n"
+            ."8. The `label` is a short human title (2-6 words) for the UI in the user's language.\n"
             .$this->germanNoEszettPlannerRule($locale)
-            ."8. When you have dispatched every entry the user asked for (or hit the cap), end your turn with a short plain-text summary like `Done — N entries dispatched.` (no JSON, no tool calls).\n"
-            ."9. If the request is impossible (no usable URL, ambiguous intent that cannot be resolved by fetching), end your turn with a short plain-text explanation starting with `Cannot proceed:`.";
+            ."9. When you have dispatched every entry the user asked for (or hit the cap), end your turn with a short plain-text summary like `Done — N actions dispatched.` (no JSON, no tool calls).\n"
+            ."10. If the request is impossible (e.g. update target cannot be found, no usable URL, ambiguous intent), end your turn with a short plain-text explanation starting with `Cannot proceed:`.";
 
         $attachmentPart = $attachment
             ? "\n\nAdditional context from an attached document (excerpt):\n".Str::limit($attachment, 6000)
@@ -427,6 +434,12 @@ class EntryGenerationPlanner
         $tools = [
             $this->promptUrlFetcher->chatToolDefinition(),
             $this->createEntryJobToolDefinition($cap),
+            // The two tools below power the BOLD agent's UPDATE flow. They are
+            // intentionally separate from create_entry_job — to drop update
+            // support, remove these two tool defs + their handlers + the
+            // dispatch branches in the loop below; create_entry_job is unaffected.
+            $this->updateEntryJobToolDefinition($cap),
+            $this->findEntriesToolDefinition(),
         ];
         $maxRounds = (int) config('statamic-ai-assistant.entry_generator_tool_max_rounds', 120);
         $maxFetches = (int) config('statamic-ai-assistant.entry_generator_tool_max_fetches', 100);
@@ -527,6 +540,36 @@ class EntryGenerationPlanner
                         if (($result['ok'] ?? false) === true) {
                             $created++;
                         }
+
+                        $streamHeartbeat?->__invoke();
+
+                        continue;
+                    }
+
+                    // BOLD agent UPDATE branch — independent of create_entry_job above.
+                    if ($name === 'update_entry_job') {
+                        $result = $this->handleUpdateEntryJobToolCall($args, $sessionId, $catalog, $cap, $created);
+                        $working[] = [
+                            'role' => 'tool',
+                            'tool_call_id' => $id,
+                            'content' => json_encode($result, JSON_UNESCAPED_UNICODE),
+                        ];
+
+                        if (($result['ok'] ?? false) === true) {
+                            $created++;
+                        }
+
+                        $streamHeartbeat?->__invoke();
+
+                        continue;
+                    }
+
+                    if ($name === 'find_entries') {
+                        $working[] = [
+                            'role' => 'tool',
+                            'tool_call_id' => $id,
+                            'content' => json_encode($this->handleFindEntriesToolCall($args), JSON_UNESCAPED_UNICODE),
+                        ];
 
                         $streamHeartbeat?->__invoke();
 
@@ -678,6 +721,185 @@ class EntryGenerationPlanner
             'id' => (string) $decorated['id'],
             'count' => $alreadyCreated + 1,
         ];
+    }
+
+    // ---------------------------------------------------------------------
+    //  BOLD agent UPDATE tools — kept structurally separate from
+    //  create_entry_job so removing/replacing update support is a clean delete:
+    //  drop these three methods + the wiring in planAgenticToolLoop.
+    // ---------------------------------------------------------------------
+
+    /**
+     * @return array{type: string, function: array<string, mixed>}
+     */
+    private function updateEntryJobToolDefinition(int $cap): array
+    {
+        return [
+            'type' => 'function',
+            'function' => [
+                'name' => 'update_entry_job',
+                'description' => 'Queue an UPDATE to one existing entry. Use when the user wants to change, rewrite, fix, or extend an entry that already exists. You must provide the entry_id (from the catalog shortlist or from find_entries). The collection and blueprint are inferred from the entry. Counts toward the same '.$cap.'-call cap as create_entry_job.',
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'entry_id' => [
+                            'type' => 'string',
+                            'description' => 'Statamic entry id of the existing entry to update.',
+                        ],
+                        'label' => [
+                            'type' => 'string',
+                            'description' => 'Short 2-6 word title for the UI card, in the user\'s language. Usually the existing entry\'s title or a hint of what is changing.',
+                        ],
+                        'prompt' => [
+                            'type' => 'string',
+                            'description' => 'Self-contained brief describing ONLY what should change on this entry, in the user\'s language. Do not restate parts of the entry the user did not ask to modify.',
+                        ],
+                    ],
+                    'required' => ['entry_id', 'prompt'],
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * @return array{type: string, function: array<string, mixed>}
+     */
+    private function findEntriesToolDefinition(): array
+    {
+        return [
+            'type' => 'function',
+            'function' => [
+                'name' => 'find_entries',
+                'description' => 'Search existing entries by title or slug substring. Use when the catalog shortlist does not contain the entry the user is referring to. Returns up to `limit` rows with id/title/slug/collection.',
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'query' => [
+                            'type' => 'string',
+                            'description' => 'Substring to match in entry title or slug (case-insensitive). Required.',
+                        ],
+                        'collection' => [
+                            'type' => 'string',
+                            'description' => 'Optional collection handle to scope the search. Omit to search all collections.',
+                        ],
+                        'limit' => [
+                            'type' => 'integer',
+                            'description' => 'Max rows to return (default 10, max 50).',
+                        ],
+                    ],
+                    'required' => ['query'],
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * @param  array<int, array{handle: string, title: string, blueprints: array<int, array{handle: string, title: string}>}>  $catalog
+     * @return array{ok: bool, id?: string, count?: int, error?: string, entry_id?: string, collection?: string}
+     */
+    private function handleUpdateEntryJobToolCall(string $argumentsJson, string $sessionId, array $catalog, int $cap, int $alreadyCreated): array
+    {
+        if ($this->batch === null || $this->decorator === null) {
+            return ['ok' => false, 'error' => 'planner_dependencies_missing'];
+        }
+
+        if ($alreadyCreated >= $cap) {
+            return ['ok' => false, 'error' => 'cap_reached', 'count' => $alreadyCreated];
+        }
+
+        try {
+            $args = json_decode($argumentsJson, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            Log::warning('[entry-gen-tool] update_entry_job invalid args', ['error' => $e->getMessage()]);
+
+            return ['ok' => false, 'error' => 'invalid_arguments_json'];
+        }
+
+        if (! is_array($args)) {
+            return ['ok' => false, 'error' => 'invalid_arguments_shape'];
+        }
+
+        $entryId = isset($args['entry_id']) && is_string($args['entry_id']) ? trim($args['entry_id']) : '';
+        $entryPrompt = isset($args['prompt']) && is_string($args['prompt']) ? trim($args['prompt']) : '';
+        $label = isset($args['label']) && is_string($args['label']) ? trim($args['label']) : '';
+
+        if ($entryId === '' || $entryPrompt === '') {
+            return ['ok' => false, 'error' => 'missing_required_fields'];
+        }
+
+        $entry = \Statamic\Facades\Entry::find($entryId);
+        if (! $entry) {
+            return ['ok' => false, 'error' => 'entry_not_found', 'entry_id' => $entryId];
+        }
+
+        $collectionHandle = (string) $entry->collectionHandle();
+        $blueprintHandle = (string) ($entry->blueprint()?->handle() ?? '');
+
+        // Sanity-check that the entry's collection still exists in the catalog
+        // we showed the LLM. Blueprint we trust from the entry itself.
+        $catalogHandles = array_map(fn ($r) => $r['handle'] ?? '', $catalog);
+        if (! in_array($collectionHandle, $catalogHandles, true)) {
+            return ['ok' => false, 'error' => 'entry_collection_not_in_catalog', 'collection' => $collectionHandle];
+        }
+
+        if ($label === '') {
+            $label = (string) ($entry->value('title') ?? Str::limit(strip_tags($entryPrompt), 60));
+        }
+
+        $decorated = $this->decorator->decorateOne([
+            'collection' => $collectionHandle,
+            'blueprint' => $blueprintHandle,
+            'prompt' => $entryPrompt,
+            'label' => $label,
+            'entry_id' => $entryId,
+        ]);
+
+        $added = $this->batch->addPlannedEntry($sessionId, $decorated, $cap);
+        if (! $added) {
+            return ['ok' => false, 'error' => 'cap_or_session_rejected', 'count' => $alreadyCreated];
+        }
+
+        GeneratePlannedEntryJob::dispatch($sessionId, (string) $decorated['id']);
+
+        return [
+            'ok' => true,
+            'id' => (string) $decorated['id'],
+            'entry_id' => $entryId,
+            'collection' => $collectionHandle,
+            'count' => $alreadyCreated + 1,
+        ];
+    }
+
+    /**
+     * @return array{ok: bool, results?: array<int, array{id: string, title: string, slug: string, collection: string}>, error?: string}
+     */
+    private function handleFindEntriesToolCall(string $argumentsJson): array
+    {
+        try {
+            $args = json_decode($argumentsJson, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return ['ok' => false, 'error' => 'invalid_arguments_json'];
+        }
+
+        if (! is_array($args)) {
+            return ['ok' => false, 'error' => 'invalid_arguments_shape'];
+        }
+
+        $query = isset($args['query']) && is_string($args['query']) ? trim($args['query']) : '';
+        if ($query === '') {
+            return ['ok' => false, 'error' => 'missing_query'];
+        }
+
+        $collection = isset($args['collection']) && is_string($args['collection']) ? trim($args['collection']) : null;
+        if ($collection === '') {
+            $collection = null;
+        }
+
+        $limit = isset($args['limit']) && is_numeric($args['limit']) ? (int) $args['limit'] : 10;
+
+        $results = $this->generator->findEntriesShortlist($collection, $query, $limit);
+
+        return ['ok' => true, 'results' => $results];
     }
 
     /**
