@@ -394,16 +394,17 @@ return [
 
         // CSS selectors stripped from the page by Jina Reader before extraction
         // (passed via the X-Remove-Selector header). Keeps site nav, header,
-        // footer, sidebars, cookie banners etc. out of the migrated entry.
+        // footer, sidebars and consent-manager dialogs (Cookiebot, OneTrust,
+        // Usercentrics) out of the fetched text — consent banners otherwise
+        // inject huge cookie-declaration blocks that exhaust the char budget and
+        // truncate the real page content. Applies to every Jina fetch path
+        // (inline prompt URLs, the entry-generator tool, and website migration).
         // Override per-project if your source site uses different class names
         // (e.g. ".global-nav, #site-footer"). Set to an empty string to disable.
+        // The default lives on PromptUrlFetcher so code and config can't drift.
         'remove_selector' => env(
             'STATAMIC_AI_ASSISTANT_MIGRATION_REMOVE_SELECTOR',
-            'nav, header, footer, aside, '
-            .'[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], '
-            .'.nav, .navbar, .navigation, .menu, .header, .site-header, .footer, .site-footer, '
-            .'.sidebar, .breadcrumbs, .breadcrumb, .cookie-banner, .cookie-consent, .cookies, '
-            .'.skip-link, .share, .social, .related, .related-posts, .you-may-also-like'
+            \BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher::DEFAULT_REMOVE_SELECTOR,
         ),
     ],
 

@@ -13,8 +13,52 @@ use Illuminate\Support\Str;
  */
 class PromptUrlFetcher
 {
+    /**
+     * CSS selectors stripped from a page by Jina Reader before extraction
+     * (sent via the X-Remove-Selector header). Keeps site chrome — nav, header,
+     * footer, sidebars and, crucially, consent-manager dialogs (Cookiebot,
+     * OneTrust, Usercentrics) — out of the fetched text. Consent banners inject
+     * tens of thousands of characters of cookie-declaration boilerplate at the
+     * top of the body; left in, they exhaust max_chars_per_url and the real
+     * content gets truncated away before the LLM ever sees it.
+     *
+     * This is the single source of truth: config/statamic-ai-assistant.php
+     * references it as the default for `migration.remove_selector`, and both
+     * fetch paths read that config value via readerRemoveHeaders().
+     */
+    public const DEFAULT_REMOVE_SELECTOR =
+        'nav, header, footer, aside, '
+        .'[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], '
+        .'.nav, .navbar, .navigation, .menu, .header, .site-header, .footer, .site-footer, '
+        .'.sidebar, .breadcrumbs, .breadcrumb, '
+        .'.cookie-banner, .cookie-consent, .cookies, '
+        // Cookiebot
+        .'#CybotCookiebotDialog, #CybotCookiebotDialogBodyUnderlay, #CookieDeclaration, #CookiebotWidget, '
+        // OneTrust
+        .'#onetrust-banner-sdk, #onetrust-consent-sdk, #ot-sdk-cookie-policy, '
+        // Usercentrics
+        .'#usercentrics-root, #usercentrics-cmp-ui, '
+        .'.skip-link, .share, .social, .related, .related-posts, .you-may-also-like';
+
     /** @var array<string, array{ok: bool, body: string, error: ?string}> */
     private static array $fetchCache = [];
+
+    /**
+     * Reader chrome-stripping header, shared by every fetch path so the inline
+     * prompt augmentation, the entry-generator tool, and the migration flow all
+     * remove the same site furniture. Returns [] when stripping is disabled.
+     *
+     * @return array<string, string>
+     */
+    private function readerRemoveHeaders(): array
+    {
+        $selector = trim((string) config(
+            'statamic-ai-assistant.migration.remove_selector',
+            self::DEFAULT_REMOVE_SELECTOR,
+        ));
+
+        return $selector !== '' ? ['X-Remove-Selector' => $selector] : [];
+    }
 
     /**
      * @return array{appendix: string, warnings: array<int, string>, preferred: PreferredAssetPaths}
@@ -53,7 +97,7 @@ class PromptUrlFetcher
                 break;
             }
 
-            $result = $this->fetchViaJina($url, $base, $timeout, $apiKey ? (string) $apiKey : null);
+            $result = $this->fetchViaJina($url, $base, $timeout, $apiKey ? (string) $apiKey : null, $this->readerRemoveHeaders());
 
             if (! $result['ok']) {
                 $warnings[] = __('Could not fetch :url: :reason', [
@@ -294,8 +338,9 @@ class PromptUrlFetcher
      *
      * Used by the website migration flow, where each page URL is processed in its
      * own queue job and the Jina response needs to surface verbatim on failure.
-     * Strips site chrome (nav/header/footer/sidebar/cookie banners) at fetch time
-     * via Jina's X-Remove-Selector so it doesn't leak into the migrated entry.
+     * Strips site chrome (nav/header/footer/sidebar/consent dialogs) at fetch
+     * time via Jina's X-Remove-Selector so it doesn't leak into the migrated
+     * entry. Uses the same selector as every other fetch path.
      *
      * @return array{ok: bool, body: string, error: ?string}
      */
@@ -305,21 +350,12 @@ class PromptUrlFetcher
         $base = rtrim((string) config('statamic-ai-assistant.prompt_url_fetch.reader_base', 'https://r.jina.ai'), '/');
         $apiKey = config('statamic-ai-assistant.prompt_url_fetch.api_key');
 
-        $removeSelector = (string) config(
-            'statamic-ai-assistant.migration.remove_selector',
-            'nav, header, footer, aside, '
-            .'[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], '
-            .'.nav, .navbar, .navigation, .menu, .header, .site-header, .footer, .site-footer, '
-            .'.sidebar, .breadcrumbs, .breadcrumb, .cookie-banner, .cookie-consent, .cookies, '
-            .'.skip-link, .share, .social, .related, .related-posts, .you-may-also-like'
-        );
-
         return $this->fetchViaJina(
             $url,
             $base,
             $timeout,
             $apiKey ? (string) $apiKey : null,
-            $removeSelector !== '' ? ['X-Remove-Selector' => $removeSelector] : [],
+            $this->readerRemoveHeaders(),
         );
     }
 
