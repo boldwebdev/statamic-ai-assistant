@@ -3,6 +3,9 @@
 namespace BoldWeb\StatamicAiAssistant\Services;
 
 use BoldWeb\StatamicAiAssistant\Support\TrimAiOutput;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\RequestException;
+use Illuminate\Support\Str;
 use Statamic\Facades\Site;
 
 abstract class AbstractAiService
@@ -12,6 +15,101 @@ abstract class AbstractAiService
      * @return string
      */
     abstract protected function callApi(array $messages): string;
+
+    /**
+     * Whether a provider failure is transient and worth retrying: rate limiting,
+     * gateway/upstream errors, and dropped connections. Hard timeouts are treated
+     * as NON-transient on purpose — the model is simply slow, so retrying only
+     * stacks full-length waits and delays the eventual (same) failure.
+     */
+    protected function isTransientAiFailure(\Throwable $e): bool
+    {
+        if ($e instanceof ConnectionException) {
+            return ! Str::contains(Str::lower($e->getMessage()), ['timed out', 'timeout', 'operation too slow']);
+        }
+
+        if ($e instanceof RequestException) {
+            return in_array($e->response?->status(), [429, 500, 502, 503, 504], true);
+        }
+
+        return false;
+    }
+
+    /** Max attempts for a transient provider call (1 = no retry). */
+    protected function aiRetryTimes(): int
+    {
+        return max(1, (int) config('statamic-ai-assistant.ai_http_retry_times', 3));
+    }
+
+    /** Backoff between attempts (ms): honour Retry-After, else exponential + jitter. */
+    protected function aiRetrySleepMs(): \Closure
+    {
+        return function (int $attempt, \Throwable $exception): int {
+            if ($exception instanceof RequestException) {
+                $retryAfter = (int) $exception->response?->header('Retry-After');
+                if ($retryAfter > 0) {
+                    return min($retryAfter, 30) * 1000;
+                }
+            }
+
+            return min(8000, (2 ** max(0, $attempt - 1)) * 1000) + random_int(0, 300);
+        };
+    }
+
+    /** `$when` predicate for Http::retry — retry transient failures only. */
+    protected function aiRetryWhen(): \Closure
+    {
+        return fn (\Throwable $e): bool => $this->isTransientAiFailure($e);
+    }
+
+    /**
+     * Config key holding this provider's primary model, or null if the provider
+     * has no swappable model tier.
+     */
+    protected function modelConfigKey(): ?string
+    {
+        return null;
+    }
+
+    /**
+     * The fast/cheap model for lightweight tasks, or null to keep the primary model.
+     */
+    protected function fastModel(): ?string
+    {
+        return null;
+    }
+
+    /**
+     * Run $fn with the provider's fast model temporarily swapped in, restoring the
+     * primary model afterwards. This reuses the same config-override pattern as the
+     * max_tokens handling below, so there is no model handoff or context threading:
+     * the call simply uses a different model, then everything reverts.
+     *
+     * A no-op (runs $fn as-is) when the provider has no fast tier or it resolves to
+     * the same model — so callers can always wrap lightweight tasks safely.
+     *
+     * @template T
+     * @param  callable(): T  $fn
+     * @return T
+     */
+    public function usingFastModel(callable $fn): mixed
+    {
+        $key = $this->modelConfigKey();
+        $fast = $this->fastModel();
+
+        if ($key === null || $fast === null || $fast === '' || $fast === config($key)) {
+            return $fn();
+        }
+
+        $original = config($key);
+        config([$key => $fast]);
+
+        try {
+            return $fn();
+        } finally {
+            config([$key => $original]);
+        }
+    }
 
     /**
      * Send raw messages to the LLM and return the raw response.

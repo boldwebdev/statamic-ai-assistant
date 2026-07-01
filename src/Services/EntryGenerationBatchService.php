@@ -201,6 +201,26 @@ class EntryGenerationBatchService
     }
 
     /**
+     * Append one human-readable planner step ("Reading …") to a bounded buffer that
+     * snapshotForProgress() drains — so the CP shows a live activity feed while the
+     * planner works, instead of a static "0 entries" message.
+     */
+    public function appendPlannerActivity(string $sessionId, string $line): void
+    {
+        if (trim($line) === '') {
+            return;
+        }
+        $this->update($sessionId, function (array $session) use ($line): array {
+            $buffer = is_array($session['planner_activity_buffer'] ?? null) ? $session['planner_activity_buffer'] : [];
+            $buffer[] = $line;
+            // Bound the buffer in case the frontend is not polling (e.g. drawer closed).
+            $session['planner_activity_buffer'] = array_slice($buffer, -100);
+
+            return $session;
+        });
+    }
+
+    /**
      * @return array<string, mixed>|null
      */
     public function getSession(string $sessionId): ?array
@@ -420,6 +440,10 @@ class EntryGenerationBatchService
                 ];
             }
 
+            // Drain the planner activity buffer (delta pattern, like entry stream_buffer).
+            $activity = is_array($session['planner_activity_buffer'] ?? null) ? $session['planner_activity_buffer'] : [];
+            $session['planner_activity_buffer'] = [];
+
             $out = [
                 'session_id' => (string) ($session['id'] ?? ''),
                 'status' => (string) ($session['status'] ?? 'running'),
@@ -429,6 +453,7 @@ class EntryGenerationBatchService
                 'prompt' => (string) ($session['prompt'] ?? ''),
                 'entries' => $entriesOut,
                 'warnings' => $session['plan_warnings'] ?? [],
+                'planner_activity' => array_values($activity),
             ];
 
             return $session;

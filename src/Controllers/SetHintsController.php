@@ -76,7 +76,8 @@ class SetHintsController
         $messages = $this->buildGeneratePromptMessages($context);
 
         try {
-            $raw = $this->ai->generateFromMessages($messages, 700);
+            // Lightweight block-hint generation — use the fast model tier.
+            $raw = $this->ai->usingFastModel(fn () => $this->ai->generateFromMessages($messages, 700));
         } catch (\Throwable $e) {
             Log::error('AI generate hint failed', ['handle' => $data['handle'], 'error' => $e->getMessage()]);
 

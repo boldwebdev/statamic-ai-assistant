@@ -87,7 +87,16 @@ return [
     |
     */
     'groq_model' => env('GROQ_MODEL', 'llama-3.1-8b-instant'),
+
+    // Infomaniak tiered models: the strong model does the heavy work (planning +
+    // entry generation); the fast model handles lightweight tasks (target
+    // selection, collection matching, block hints). Both are set in .env:
+    //   INFOMANIAK_MODEL=<strong>        e.g. a larger, higher-quality model
+    //   INFOMANIAK_MODEL_FAST=<fast>     e.g. a smaller, quicker model
+    // If INFOMANIAK_MODEL_FAST is unset, the fast tier falls back to the strong
+    // model — so behaviour is unchanged until you opt in.
     'infomaniak_model' => env('INFOMANIAK_MODEL', 'mistral24b'),
+    'infomaniak_model_fast' => env('INFOMANIAK_MODEL_FAST') ?: env('INFOMANIAK_MODEL', 'mistral24b'),
 
     /*
     |--------------------------------------------------------------------------
@@ -108,6 +117,13 @@ return [
     | Groq HTTP client (Guzzle) timeout for direct chat/completions calls.
     */
     'groq_http_timeout' => max(30, (int) env('STATAMIC_AI_ASSISTANT_GROQ_HTTP_TIMEOUT', 600)),
+
+    /*
+    | Max attempts for an AI provider call when it fails transiently (HTTP
+    | 429/500/502/503/504 or a dropped connection). Hard timeouts are NOT retried
+    | — the model is just slow, and retrying only stacks waits. 1 disables retry.
+    */
+    'ai_http_retry_times' => max(1, (int) env('STATAMIC_AI_ASSISTANT_AI_HTTP_RETRY_TIMES', 3)),
 
     /*
     |--------------------------------------------------------------------------
@@ -290,6 +306,9 @@ return [
     'entry_generator_fetch_url_tool' => (bool) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_FETCH_URL_TOOL', true),
     'entry_generator_tool_max_rounds' => max(1, min(24, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_ROUNDS', 120))),
     'entry_generator_tool_max_fetches' => max(1, min(40, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_FETCHES', 100))),
+    // Max read_entry_structure calls per request (the agent reads existing entries
+    // to mirror their layout/components when creating or updating an entry).
+    'entry_generator_tool_max_read_entries' => max(1, min(40, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_READ_ENTRIES', 20))),
 
     /*
     |--------------------------------------------------------------------------
@@ -340,11 +359,44 @@ return [
     'prompt_url_fetch' => [
         'enabled' => env('STATAMIC_AI_ASSISTANT_PROMPT_URL_FETCH', true),
         'reader_base' => rtrim(env('STATAMIC_AI_ASSISTANT_JINA_READER_BASE', 'https://r.jina.ai'), '/'),
+        // How the reader returns content. 'html' (default) fetches raw HTML and
+        // runs our own extraction (HtmlReadableExtractor) — robust against Jina's
+        // built-in markdown mode, which drops the real article on listing-heavy
+        // pages. Set to 'markdown' to use Jina's own extraction as a kill-switch.
+        'reader_format' => env('STATAMIC_AI_ASSISTANT_JINA_READER_FORMAT', 'html'),
         'timeout' => max(5, (int) env('STATAMIC_AI_ASSISTANT_JINA_TIMEOUT', 120)),
         'max_urls' => max(1, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_URLS', 5)),
         'max_chars_per_url' => max(1000, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_CHARS', 12000)),
         'max_total_chars' => max(5000, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_TOTAL_CHARS', 40000)),
         'api_key' => env('STATAMIC_AI_ASSISTANT_JINA_API_KEY') ?: env('JINA_API_KEY'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Remote image copying (save_remote_image tool)
+    |--------------------------------------------------------------------------
+    |
+    | While the entry generator writes content from a source URL, the LLM can
+    | call the save_remote_image tool to download images from that page and
+    | attach them to the entry's image fields (so a copied page keeps its own
+    | imagery instead of getting random container assets).
+    |
+    | Images are stored in the container the entry's own asset fields point at
+    | (auto-detected from the blueprint), which is the only container they can be
+    | assigned from — so they reliably land on the page being created.
+    |
+    */
+
+    'image_fetch' => [
+        'enabled' => env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH', true),
+
+        // Folder inside the container where copied images are stored.
+        'folder' => env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_FOLDER', 'bold-agent-fetched'),
+
+        // Per-entry caps so a runaway generation can't flood the disk.
+        'max_images' => max(0, (int) env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_MAX', 30)),
+        'max_bytes' => max(1024, (int) env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_MAX_BYTES', 10 * 1024 * 1024)),
+        'timeout' => max(1, (int) env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_TIMEOUT', 20)),
     ],
 
     /*

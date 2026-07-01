@@ -125,10 +125,11 @@ class CollectionMatcher
             'Example: {"/blog/*": "blog", "/about": "pages"}';
 
         try {
-            $response = $this->ai->generateFromMessages([
+            // Lightweight URL→collection mapping — use the fast model tier.
+            $response = $this->ai->usingFastModel(fn () => $this->ai->generateFromMessages([
                 ['role' => 'system', 'content' => 'You output ONLY valid JSON. Never include commentary or code fences.'],
                 ['role' => 'user', 'content' => $prompt],
-            ], 600);
+            ], 600));
         } catch (\Throwable $e) {
             Log::notice('CollectionMatcher LLM call failed', ['message' => $e->getMessage()]);
 

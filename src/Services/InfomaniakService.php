@@ -29,6 +29,18 @@ class InfomaniakService extends AbstractAiService
         return (int) config('statamic-ai-assistant.infomaniak_http_timeout', 120);
     }
 
+    protected function modelConfigKey(): string
+    {
+        return 'statamic-ai-assistant.infomaniak_model';
+    }
+
+    protected function fastModel(): ?string
+    {
+        $fast = (string) config('statamic-ai-assistant.infomaniak_model_fast', '');
+
+        return $fast !== '' ? $fast : null;
+    }
+
     /**
      * Build a RuntimeException message from a failed HTTP response.
      */
@@ -76,6 +88,7 @@ class InfomaniakService extends AbstractAiService
 
         try {
             $response = Http::timeout($this->timeout())
+                ->retry($this->aiRetryTimes(), $this->aiRetrySleepMs(), $this->aiRetryWhen(), throw: false)
                 ->withToken(config('statamic-ai-assistant.infomaniak_api_token'))
                 ->withOptions($guzzleExtras)
                 ->post($this->endpointUrl(), $payload);
@@ -116,6 +129,7 @@ class InfomaniakService extends AbstractAiService
 
         try {
             $response = Http::timeout($this->timeout())
+                ->retry($this->aiRetryTimes(), $this->aiRetrySleepMs(), $this->aiRetryWhen(), throw: false)
                 ->withToken(config('statamic-ai-assistant.infomaniak_api_token'))
                 ->post($this->endpointUrl(), $payload);
 

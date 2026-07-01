@@ -26,6 +26,16 @@ class PreferredAssetPaths
     }
 
     /**
+     * Append a {container, path} pair. Used by the save_remote_image tool to
+     * register an image it just downloaded so the asset resolver assigns it to
+     * one of the entry's asset fields (matched by container handle).
+     */
+    public function add(string $container, string $path): void
+    {
+        $this->entries[] = ['container' => $container, 'path' => $path];
+    }
+
+    /**
      * Remaining {container, path} pairs after any takeForContainer calls.
      * Used to persist shared preferred-asset state between chained generation jobs.
      *

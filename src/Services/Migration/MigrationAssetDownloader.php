@@ -2,10 +2,8 @@
 
 namespace BoldWeb\StatamicAiAssistant\Services\Migration;
 
-use Illuminate\Http\UploadedFile;
-use Illuminate\Support\Facades\Http;
+use BoldWeb\StatamicAiAssistant\Services\AssetImageDownloader;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
 use Statamic\Facades\AssetContainer;
 
 /**
@@ -14,12 +12,14 @@ use Statamic\Facades\AssetContainer;
  * images instead of random container assets. Used by the website migration
  * flow (folder = bold-agent-migration/{sessionId}).
  *
- * Filename format is deterministic ({slug}-{8 chars of url md5}.{ext}) so a
- * retried job sees the existing file on disk and reuses it instead of
- * re-uploading.
+ * The per-image download + upload is delegated to {@see AssetImageDownloader};
+ * this class only handles markdown URL discovery, relative-URL resolution and
+ * rewriting the markdown to point at the local public URLs.
  */
 class MigrationAssetDownloader
 {
+    public function __construct(private AssetImageDownloader $downloader) {}
+
     /**
      * @return array{
      *   markdown: string,
@@ -74,7 +74,7 @@ class MigrationAssetDownloader
             }
             $seen[$absolute] = true;
 
-            $downloaded = $this->downloadOne($container, $folder, $absolute, $timeout, $maxBytes);
+            $downloaded = $this->downloader->save($container, $folder, $absolute, $timeout, $maxBytes);
             if ($downloaded === null) {
                 continue;
             }
@@ -159,105 +159,5 @@ class MigrationAssetDownloader
         $basePath = (string) preg_replace('~/[^/]*$~', '/', $basePath);
 
         return $scheme.'://'.$host.$port.$basePath.$candidate;
-    }
-
-    private function slugFilename(string $url, string $contentType): string
-    {
-        $path = (string) (parse_url($url, PHP_URL_PATH) ?? '');
-        $name = pathinfo($path, PATHINFO_FILENAME) ?: 'image';
-        $ext = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
-        if ($ext === '' || strlen($ext) > 5) {
-            $ext = match (true) {
-                str_contains($contentType, 'jpeg') => 'jpg',
-                str_contains($contentType, 'png') => 'png',
-                str_contains($contentType, 'webp') => 'webp',
-                str_contains($contentType, 'gif') => 'gif',
-                str_contains($contentType, 'svg') => 'svg',
-                default => 'bin',
-            };
-        }
-        $base = Str::slug(Str::limit($name, 80, ''));
-        if ($base === '') {
-            $base = 'image';
-        }
-        $hash = substr(md5($url), 0, 8);
-
-        return $base.'-'.$hash.'.'.$ext;
-    }
-
-    /**
-     * @return array{path: string, public_url: ?string}|null
-     */
-    private function downloadOne($container, string $folder, string $url, int $timeout, int $maxBytes): ?array
-    {
-        try {
-            // Provisional path so we can short-circuit on retry without a HEAD.
-            // Filename is fully URL-derived, so this is stable across attempts.
-            $filename = $this->slugFilename($url, 'application/octet-stream');
-            $tentativePath = $folder.'/'.$filename;
-            if ($container->disk()->exists($tentativePath)) {
-                $existing = $container->makeAsset($tentativePath);
-
-                return ['path' => $tentativePath, 'public_url' => $this->safeUrl($existing)];
-            }
-
-            $response = Http::timeout($timeout)
-                ->withHeaders(['User-Agent' => 'StatamicAiAssistant-Migration/1.0'])
-                ->get($url);
-
-            if (! $response->successful()) {
-                return null;
-            }
-
-            $contentType = (string) ($response->header('Content-Type') ?: '');
-            if (! str_starts_with(strtolower($contentType), 'image/')) {
-                return null;
-            }
-
-            $body = (string) $response->body();
-            if ($body === '' || strlen($body) > $maxBytes) {
-                return null;
-            }
-
-            // Re-derive filename now that we know the real content type, in case
-            // the URL had no extension.
-            $filename = $this->slugFilename($url, $contentType);
-            $path = $folder.'/'.$filename;
-
-            // Race window: another worker may have written this exact path
-            // between the early check and here. upload() overwrites idempotently
-            // (same URL → same bytes), so the race is benign.
-            $tmp = tempnam(sys_get_temp_dir(), 'bold-mig-');
-            if ($tmp === false) {
-                return null;
-            }
-            file_put_contents($tmp, $body);
-
-            $upload = new UploadedFile($tmp, basename($filename), $contentType, null, true);
-            $asset = $container->makeAsset($path);
-            $asset->upload($upload);
-
-            @unlink($tmp);
-
-            return ['path' => $path, 'public_url' => $this->safeUrl($asset)];
-        } catch (\Throwable $e) {
-            Log::notice('Migration asset download failed', [
-                'url' => $url,
-                'message' => $e->getMessage(),
-            ]);
-
-            return null;
-        }
-    }
-
-    private function safeUrl($asset): ?string
-    {
-        try {
-            $url = $asset->url();
-
-            return is_string($url) && $url !== '' ? $url : null;
-        } catch (\Throwable) {
-            return null;
-        }
     }
 }

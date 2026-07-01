@@ -91,7 +91,9 @@
       <div v-if="renderedStep === 3 && store.plan" class="eg-chat__msg eg-chat__msg--agent">
         <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
         <p v-if="store.plan.entries.length === 1">{{ __('Drafting one entry for you.') }}</p>
-        <p v-else>{{ __('I will create :n entries:', { n: store.plan.entries.length }) }}</p>
+        <!-- Only announce a count once at least one entry is planned; while the count
+             is still 0 the planning panel + activity feed carry the UX (no "0 entries"). -->
+        <p v-else-if="store.plan.entries.length > 1">{{ __('I will create :n entries:', { n: store.plan.entries.length }) }}</p>
 
         <div v-if="store.plan.entries.length > 1" class="eg-chat__plan-summary">
           <span
@@ -219,7 +221,7 @@
           ref="promptTextarea"
           v-model="store.pendingPrompt"
           class="eg-chat__composer-input"
-          :placeholder="__('Describe one or more entries you want to create…')"
+          :placeholder="__('Describe one or more entries you want to create… Paste a URL to copy a page (text and images).')"
           rows="1"
           @keyup.enter.ctrl="handleGenerate"
           @keyup.enter.meta="handleGenerate"
@@ -374,7 +376,7 @@
 
     <div v-if="step === 2" class="entry-generator__panel">
       <h2 class="entry-generator__panel-title">{{ __('Describe your entry') }}</h2>
-      <p class="entry-generator__panel-desc">{{ __('Tell the AI what content you want. Be as specific as you can.') }}</p>
+      <p class="entry-generator__panel-desc">{{ __('Tell the AI what content you want. Be as specific as you can. Paste a URL to copy a page — its text and images are pulled in for you.') }}</p>
       <div class="entry-generator__form-group">
         <label class="entry-generator__label">{{ __('Prompt') }}</label>
         <textarea ref="promptTextarea" v-model="store.pendingPrompt" class="entry-generator__textarea" :placeholder="__('e.g. Create a page about our company event last Friday. Include a summary, key highlights, and a call to action...')" rows="6" @keyup.enter.ctrl="handleGenerate" @keyup.enter.meta="handleGenerate" />

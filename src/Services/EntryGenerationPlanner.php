@@ -6,6 +6,10 @@ use BoldWeb\StatamicAiAssistant\Jobs\GeneratePlannedEntryJob;
 use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
 use BoldWeb\StatamicAiAssistant\Support\JsonObjectExtractor;
 use BoldWeb\StatamicAiAssistant\Support\PlanEntryDecorator;
+use BoldWeb\StatamicAiAssistant\Tools\ChatToolRunner;
+use BoldWeb\StatamicAiAssistant\Tools\ReadEntryStructureTool;
+use BoldWeb\StatamicAiAssistant\Tools\ToolContext;
+use BoldWeb\StatamicAiAssistant\Tools\UrlFetchTool;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -231,7 +235,8 @@ class EntryGenerationPlanner
             ."- `fetch_page_content`: read external http(s) URLs.\n"
             ."- `create_entry_job`: queue ONE new entry for asynchronous creation.\n"
             ."- `update_entry_job`: queue an UPDATE to an existing entry (you must know its `entry_id`).\n"
-            ."- `find_entries`: search existing entries by title/slug when the catalog shortlist below is not enough.\n\n"
+            ."- `find_entries`: search existing entries by title/slug when the catalog shortlist below is not enough.\n"
+            ."- `read_entry_structure`: read an existing entry's layout/components (its sets in order) so a new or updated entry can mirror them. Pass `entry_id` (from the catalog or find_entries) or a title/slug `query`. The reference entry may use a different blueprint — mirror the structure, but each per-entry `prompt` you write must instruct mapping onto the target blueprint's own sets, never copying set handles blindly.\n\n"
             ."WORKFLOW:\n"
             ."1. Decide whether the user wants to create new entries, update existing entries, or both. Phrases like \"add\", \"new\", \"create\", \"write a post about\" → create. Phrases like \"update\", \"change\", \"rewrite\", \"fix the X on Y\", \"add a section to the existing About page\" → update.\n"
             ."2. For UPDATES: find the target entry's `entry_id`. The catalog below carries an `entries` shortlist (recently updated) and a `count` per collection. If the right entry is in the shortlist, use its id directly. If not, call **find_entries** with a query (and optionally a collection handle) to search.\n"
@@ -293,12 +298,22 @@ class EntryGenerationPlanner
      */
     private function planWithToolLoop(array $messages, string $userPrompt, array &$toolWarningsOut, ?callable $streamHeartbeat = null): string
     {
-        $tools = [$this->promptUrlFetcher->chatToolDefinition()];
+        $runner = new ChatToolRunner([
+            new UrlFetchTool($this->promptUrlFetcher),
+            new ReadEntryStructureTool(
+                new EntryStructureSerializer,
+                fn (?string $collection, string $query, int $limit) => $this->generator->findEntriesShortlist($collection, $query, $limit),
+            ),
+        ], new ToolContext(
+            warningSink: function (string $w) use (&$toolWarningsOut) {
+                $toolWarningsOut[] = $w;
+            },
+            heartbeat: $streamHeartbeat,
+        ));
+
         $maxRounds = (int) config('statamic-ai-assistant.entry_generator_tool_max_rounds', 120);
-        $maxFetches = (int) config('statamic-ai-assistant.entry_generator_tool_max_fetches', 100);
         // Planner JSON can be huge (many URLs + briefs); keep separate from per-entry generator_max_tokens.
         $maxTokens = max(4096, (int) config('statamic-ai-assistant.entry_generator_planner_max_output_tokens', 12000));
-        $fetches = 0;
 
         $promptHasUrl = (bool) preg_match('~\bhttps?://[^\s<>\]\}\)\"\'`]+~iu', $userPrompt);
         $working = $messages;
@@ -306,12 +321,12 @@ class EntryGenerationPlanner
         for ($round = 0; $round < $maxRounds; $round++) {
             $streamHeartbeat?->__invoke();
 
-            $forceTool = $promptHasUrl && $fetches === 0;
+            $forceTool = $promptHasUrl && $runner->callCount('fetch_page_content') === 0;
             $toolChoice = $forceTool
                 ? ['type' => 'function', 'function' => ['name' => 'fetch_page_content']]
                 : 'auto';
 
-            $data = $this->aiService->createChatCompletion($working, $maxTokens, $tools, $toolChoice, $streamHeartbeat);
+            $data = $this->aiService->createChatCompletion($working, $maxTokens, $runner->definitions(), $toolChoice, $streamHeartbeat);
             $choice = $data['choices'][0] ?? null;
             $msg = is_array($choice) ? ($choice['message'] ?? null) : null;
 
@@ -336,58 +351,7 @@ class EntryGenerationPlanner
                     'tool_calls' => $toolCalls,
                 ];
 
-                foreach ($toolCalls as $tc) {
-                    if (! is_array($tc)) {
-                        continue;
-                    }
-
-                    $id = isset($tc['id']) && is_string($tc['id']) ? $tc['id'] : '';
-                    if (($tc['type'] ?? '') !== 'function' || $id === '') {
-                        continue;
-                    }
-
-                    $fn = $tc['function'] ?? [];
-                    $name = isset($fn['name']) && is_string($fn['name']) ? $fn['name'] : '';
-                    $args = isset($fn['arguments']) && is_string($fn['arguments']) ? $fn['arguments'] : '{}';
-
-                    if ($name !== 'fetch_page_content') {
-                        $working[] = [
-                            'role' => 'tool',
-                            'tool_call_id' => $id,
-                            'content' => json_encode(['ok' => false, 'error' => 'unknown tool: '.$name], JSON_UNESCAPED_UNICODE),
-                        ];
-
-                        continue;
-                    }
-
-                    if ($fetches >= $maxFetches) {
-                        Log::warning('[entry-gen-tool] planner fetch limit reached', [
-                            'fetches' => $fetches,
-                            'max_fetches' => $maxFetches,
-                        ]);
-                        $toolWarningsOut[] = __('URL fetch tool: maximum number of fetches for the planner was reached.');
-                        $working[] = [
-                            'role' => 'tool',
-                            'tool_call_id' => $id,
-                            'content' => json_encode([
-                                'ok' => false,
-                                'error' => 'fetch_limit_reached',
-                                'reason_echo' => '',
-                                'url' => '',
-                            ], JSON_UNESCAPED_UNICODE),
-                        ];
-
-                        continue;
-                    }
-
-                    $fetches++;
-                    $working[] = [
-                        'role' => 'tool',
-                        'tool_call_id' => $id,
-                        'content' => $this->promptUrlFetcher->executeChatTool($args, null, $toolWarningsOut),
-                    ];
-                    $streamHeartbeat?->__invoke();
-                }
+                $runner->consume($toolCalls, $working);
 
                 continue;
             }
@@ -396,7 +360,7 @@ class EntryGenerationPlanner
             if (is_string($content) && trim($content) !== '') {
                 Log::info('[entry-gen-tool] planner done', [
                     'rounds' => $round + 1,
-                    'fetches' => $fetches,
+                    'fetches' => $runner->callCount('fetch_page_content'),
                 ]);
 
                 return $content;
@@ -407,7 +371,7 @@ class EntryGenerationPlanner
 
         Log::error('[entry-gen-tool] planner tool loop exceeded max rounds', [
             'max_rounds' => $maxRounds,
-            'fetches' => $fetches,
+            'fetches' => $runner->callCount('fetch_page_content'),
         ]);
         throw new \RuntimeException(__('Planner stopped: too many tool rounds.'));
     }
@@ -431,20 +395,40 @@ class EntryGenerationPlanner
         array &$toolWarningsOut,
         ?callable $streamHeartbeat = null,
     ): void {
-        $tools = [
-            $this->promptUrlFetcher->chatToolDefinition(),
+        // Shared runner for the stateless read tools (URL fetch + entry-structure
+        // read). The stateful job tools (create/update/find) stay outside the
+        // runner and are handled via the $fallback in consume() below, since they
+        // mutate session/cap state that a generic runner shouldn't own.
+        $toolContext = new ToolContext(
+            warningSink: function (string $w) use (&$toolWarningsOut) {
+                $toolWarningsOut[] = $w;
+            },
+            heartbeat: $streamHeartbeat,
+            activitySink: fn (string $line) => $this->batch?->appendPlannerActivity($sessionId, $line),
+        );
+        $runner = new ChatToolRunner([
+            new UrlFetchTool($this->promptUrlFetcher),
+            new ReadEntryStructureTool(
+                new EntryStructureSerializer,
+                fn (?string $collection, string $query, int $limit) => $this->generator->findEntriesShortlist($collection, $query, $limit),
+            ),
+        ], $toolContext);
+
+        // Seed the activity feed so the CP never shows an empty "0 entries" panel
+        // while the planner is thinking before its first tool call.
+        $this->batch?->appendPlannerActivity($sessionId, (string) __('Analyzing your request…'));
+
+        $tools = array_merge($runner->definitions(), [
             $this->createEntryJobToolDefinition($cap),
             // The two tools below power the BOLD agent's UPDATE flow. They are
             // intentionally separate from create_entry_job — to drop update
             // support, remove these two tool defs + their handlers + the
-            // dispatch branches in the loop below; create_entry_job is unaffected.
+            // dispatch branches below; create_entry_job is unaffected.
             $this->updateEntryJobToolDefinition($cap),
             $this->findEntriesToolDefinition(),
-        ];
+        ]);
         $maxRounds = (int) config('statamic-ai-assistant.entry_generator_tool_max_rounds', 120);
-        $maxFetches = (int) config('statamic-ai-assistant.entry_generator_tool_max_fetches', 100);
         $maxTokens = max(4096, (int) config('statamic-ai-assistant.entry_generator_planner_max_output_tokens', 12000));
-        $fetches = 0;
         $created = 0;
 
         $promptHasUrl = (bool) preg_match('~\bhttps?://[^\s<>\]\}\)\"\'`]+~iu', $userPrompt);
@@ -453,7 +437,7 @@ class EntryGenerationPlanner
         for ($round = 0; $round < $maxRounds; $round++) {
             $streamHeartbeat?->__invoke();
 
-            $forceTool = $promptHasUrl && $fetches === 0 && $created === 0;
+            $forceTool = $promptHasUrl && $runner->callCount('fetch_page_content') === 0 && $created === 0;
             $toolChoice = $forceTool
                 ? ['type' => 'function', 'function' => ['name' => 'fetch_page_content']]
                 : 'auto';
@@ -483,105 +467,35 @@ class EntryGenerationPlanner
                     'tool_calls' => $toolCalls,
                 ];
 
-                foreach ($toolCalls as $tc) {
-                    if (! is_array($tc)) {
-                        continue;
-                    }
-
-                    $id = isset($tc['id']) && is_string($tc['id']) ? $tc['id'] : '';
-                    if (($tc['type'] ?? '') !== 'function' || $id === '') {
-                        continue;
-                    }
-
-                    $fn = $tc['function'] ?? [];
-                    $name = isset($fn['name']) && is_string($fn['name']) ? $fn['name'] : '';
-                    $args = isset($fn['arguments']) && is_string($fn['arguments']) ? $fn['arguments'] : '{}';
-
-                    if ($name === 'fetch_page_content') {
-                        if ($fetches >= $maxFetches) {
-                            Log::warning('[entry-gen-tool] agentic planner fetch limit reached', [
-                                'fetches' => $fetches,
-                                'max_fetches' => $maxFetches,
-                            ]);
-                            $toolWarningsOut[] = __('URL fetch tool: maximum number of fetches for the planner was reached.');
-                            $working[] = [
-                                'role' => 'tool',
-                                'tool_call_id' => $id,
-                                'content' => json_encode([
-                                    'ok' => false,
-                                    'error' => 'fetch_limit_reached',
-                                    'reason_echo' => '',
-                                    'url' => '',
-                                ], JSON_UNESCAPED_UNICODE),
-                            ];
-
-                            continue;
-                        }
-
-                        $fetches++;
-                        $working[] = [
-                            'role' => 'tool',
-                            'tool_call_id' => $id,
-                            'content' => $this->promptUrlFetcher->executeChatTool($args, null, $toolWarningsOut),
-                        ];
-                        $streamHeartbeat?->__invoke();
-
-                        continue;
-                    }
-
+                // Read tools (fetch_page_content, read_entry_structure) go through
+                // the shared runner. The stateful job tools are handled in the
+                // fallback so their session/cap mutations stay in the planner.
+                $runner->consume($toolCalls, $working, function (string $name, string $args) use ($sessionId, $catalog, $cap, &$created) {
                     if ($name === 'create_entry_job') {
                         $result = $this->handleCreateEntryJobToolCall($args, $sessionId, $catalog, $cap, $created);
-                        $working[] = [
-                            'role' => 'tool',
-                            'tool_call_id' => $id,
-                            'content' => json_encode($result, JSON_UNESCAPED_UNICODE),
-                        ];
-
                         if (($result['ok'] ?? false) === true) {
                             $created++;
                         }
 
-                        $streamHeartbeat?->__invoke();
-
-                        continue;
+                        return $result;
                     }
 
-                    // BOLD agent UPDATE branch — independent of create_entry_job above.
+                    // BOLD agent UPDATE tool — independent of create_entry_job.
                     if ($name === 'update_entry_job') {
                         $result = $this->handleUpdateEntryJobToolCall($args, $sessionId, $catalog, $cap, $created);
-                        $working[] = [
-                            'role' => 'tool',
-                            'tool_call_id' => $id,
-                            'content' => json_encode($result, JSON_UNESCAPED_UNICODE),
-                        ];
-
                         if (($result['ok'] ?? false) === true) {
                             $created++;
                         }
 
-                        $streamHeartbeat?->__invoke();
-
-                        continue;
+                        return $result;
                     }
 
                     if ($name === 'find_entries') {
-                        $working[] = [
-                            'role' => 'tool',
-                            'tool_call_id' => $id,
-                            'content' => json_encode($this->handleFindEntriesToolCall($args), JSON_UNESCAPED_UNICODE),
-                        ];
-
-                        $streamHeartbeat?->__invoke();
-
-                        continue;
+                        return $this->handleFindEntriesToolCall($args);
                     }
 
-                    $working[] = [
-                        'role' => 'tool',
-                        'tool_call_id' => $id,
-                        'content' => json_encode(['ok' => false, 'error' => 'unknown tool: '.$name], JSON_UNESCAPED_UNICODE),
-                    ];
-                }
+                    return null;
+                });
 
                 continue;
             }
@@ -590,7 +504,7 @@ class EntryGenerationPlanner
             if (is_string($content) && trim($content) !== '') {
                 Log::info('[entry-gen-tool] agentic planner done', [
                     'rounds' => $round + 1,
-                    'fetches' => $fetches,
+                    'fetches' => $runner->callCount('fetch_page_content'),
                     'entries_created' => $created,
                 ]);
 
@@ -608,7 +522,7 @@ class EntryGenerationPlanner
 
         Log::error('[entry-gen-tool] agentic planner tool loop exceeded max rounds', [
             'max_rounds' => $maxRounds,
-            'fetches' => $fetches,
+            'fetches' => $runner->callCount('fetch_page_content'),
             'entries_created' => $created,
         ]);
 

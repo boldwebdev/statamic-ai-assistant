@@ -91,11 +91,15 @@ class MigratePageJobTest extends TestCase
 
     public function test_unchanged_content_skips_generation(): void
     {
+        $html = '<html><body><main><p>Unchanged body content for dedup.</p></main></body></html>';
         Http::fake([
-            'r.jina.ai/*' => Http::response('# Unchanged body', 200),
+            'r.jina.ai/*' => Http::response($html, 200),
         ]);
 
-        $priorHash = hash('sha256', '# Unchanged body');
+        // The job hashes the extracted markdown (default html reader mode), so the
+        // prior hash must be derived from the same extraction the fetcher runs.
+        $extracted = (new PromptUrlFetcher)->fetchSingle('https://example.com/a')['body'];
+        $priorHash = hash('sha256', $extracted);
         $this->migration->markPageSuccess($this->sessionId, 'https://example.com/a', 'old-entry-1', $priorHash);
 
         $generator = $this->createMock(EntryGeneratorService::class);
@@ -167,6 +171,10 @@ class MigratePageJobTest extends TestCase
         // Returns the markdown unchanged with no preferred assets, so the
         // existing job tests aren't affected by the new asset-download step.
         return new class extends MigrationAssetDownloader {
+            // Skip the parent constructor (which now requires an
+            // AssetImageDownloader) — this stub overrides the only method used.
+            public function __construct() {}
+
             public function downloadFromMarkdown(string $sessionId, string $sourceUrl, string $markdown): array
             {
                 return ['markdown' => $markdown, 'preferred' => new PreferredAssetPaths];

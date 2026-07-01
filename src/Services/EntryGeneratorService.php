@@ -4,6 +4,11 @@ namespace BoldWeb\StatamicAiAssistant\Services;
 
 use BoldWeb\StatamicAiAssistant\Services\Concerns\TranslatesFields;
 use BoldWeb\StatamicAiAssistant\Support\JsonObjectExtractor;
+use BoldWeb\StatamicAiAssistant\Tools\ChatToolRunner;
+use BoldWeb\StatamicAiAssistant\Tools\ReadEntryStructureTool;
+use BoldWeb\StatamicAiAssistant\Tools\SaveImageTool;
+use BoldWeb\StatamicAiAssistant\Tools\ToolContext;
+use BoldWeb\StatamicAiAssistant\Tools\UrlFetchTool;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
@@ -57,6 +62,10 @@ class EntryGeneratorService
 
     private ?FigmaContentFetcher $figma;
 
+    private ?RemoteImageFetcher $imageFetcher;
+
+    private EntryStructureSerializer $structureSerializer;
+
     public function __construct(
         AbstractAiService $aiService,
         ?EntryGeneratorAssetResolver $assetResolver = null,
@@ -64,6 +73,8 @@ class EntryGeneratorService
         ?PromptUrlFetcher $promptUrlFetcher = null,
         ?SetHintsService $setHints = null,
         ?FigmaContentFetcher $figma = null,
+        ?RemoteImageFetcher $imageFetcher = null,
+        ?EntryStructureSerializer $structureSerializer = null,
     ) {
         $this->aiService = $aiService;
         $this->assetResolver = $assetResolver ?? new EntryGeneratorAssetResolver;
@@ -71,6 +82,8 @@ class EntryGeneratorService
         $this->promptUrlFetcher = $promptUrlFetcher ?? new PromptUrlFetcher;
         $this->setHints = $setHints ?? new SetHintsService;
         $this->figma = $figma;
+        $this->imageFetcher = $imageFetcher;
+        $this->structureSerializer = $structureSerializer ?? new EntryStructureSerializer;
     }
 
     /**
@@ -159,6 +172,12 @@ class EntryGeneratorService
         $maxTokens = (int) config('statamic-ai-assistant.generator_max_tokens', 4000);
         $toolWarnings = [];
 
+        // Images the LLM copies from the source via save_remote_image land here;
+        // merged into the preferred-asset queue below so the resolver assigns
+        // them to this entry's image fields (matched by container).
+        $fetchedImages = new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+        $imageContainerHint = $this->assetResolver->primaryAssetContainer($blueprint);
+
         if ($useUrlTool) {
             try {
                 $rawResponse = $this->generateContentWithUrlFetchToolLoop(
@@ -166,6 +185,9 @@ class EntryGeneratorService
                     $maxTokens,
                     $onStreamToken,
                     $toolWarnings,
+                    $fetchedImages,
+                    $imageContainerHint,
+                    true,
                     $streamHeartbeat,
                 );
             } catch (\Throwable $e) {
@@ -189,6 +211,7 @@ class EntryGeneratorService
         // (single-prompt path) with the explicit ones passed in (migration
         // path). Either or both can be empty.
         $aggregatedPreferred = \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths::merge(
+            $fetchedImages,
             $preferredAssets ?? new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths,
             $urlAug['preferred'] ?? new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths,
         );
@@ -224,14 +247,34 @@ class EntryGeneratorService
         int $maxTokens,
         ?callable $onStreamToken,
         array &$toolWarningsOut,
+        \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths $imageSink,
+        ?string $imageContainerHint,
+        bool $allowImageTool,
         ?callable $streamHeartbeat = null,
     ): string {
+        // The image tool only makes sense on the create path, where empty asset
+        // fields are auto-filled from the preferred-asset queue afterwards. On
+        // the update path ($allowImageTool === false) the resolver is skipped, so
+        // a saved image would upload but never attach — don't offer it there.
+        // A null container hint means the blueprint has no asset field to receive
+        // images, so saving them would just orphan files — skip the tool then too.
+        $useImageTool = $allowImageTool
+            && $this->imageFetcher !== null
+            && $imageContainerHint !== null
+            && (bool) config('statamic-ai-assistant.image_fetch.enabled', true);
+
+        $imageRule = $useImageTool
+            ? "6. To keep the source page's imagery, call **save_remote_image** for each image you want on the entry, passing its absolute **url** (from the fetched content) and a short **reason**. Save the hero/lead image first. Saved images are attached to the entry's image fields automatically — never place image URLs in text or rich-text fields.\n"
+            : '';
+
         $toolHint = "URL HANDLING RULES — these take priority over any later JSON output rule:\n"
             ."1. If the user message references one or more http(s) URLs, you MUST call the **fetch_page_content** tool to retrieve them BEFORE producing any output. Never invent or guess content from a URL alone.\n"
             ."2. After fetching, inspect the returned content. If it is a listing or index page (multiple teasers, news cards, 'read more' links, item summaries with detail URLs), identify the specific item the user asked for and call **fetch_page_content** AGAIN on that item's detail page URL. Write the entry from the detail page body, not from the listing teaser.\n"
             ."3. If the user asked for 'the first', 'the latest', 'the next', 'the second', or a specific item from a listing, pick the URL that matches that intent and fetch it.\n"
             ."4. You may call the tool multiple times. Pass **url** (full link, https preferred) and **reason** (short: which item or which blueprint field this supports).\n"
             ."5. ONLY after you have the full source text you need, respond with the JSON object for the entry fields — no markdown fences, no commentary — exactly as required by the rules below.\n"
+            .$imageRule
+            ."- If the user asks to base this entry on the layout/components of an existing entry, call **read_entry_structure** (pass its **entry_id**, or a title/slug **query**) to read that entry's sections in order, then reproduce the same structure. The reference entry may use a different blueprint: map each section onto a set/field that exists in THIS entry's schema below — never copy set handles that are not in this schema.\n"
             ."---\n";
 
         $working = $messages;
@@ -241,10 +284,30 @@ class EntryGeneratorService
         // models miss them.
         $working[0]['content'] = $toolHint."\n".($working[0]['content'] ?? '');
 
-        $tools = [$this->promptUrlFetcher->chatToolDefinition()];
+        // Shared tool runner: one dispatch + per-tool call budgets for both this
+        // loop and the planner. Read tools (fetch/image/read-entry) implement the
+        // ChatTool contract; the runner owns the tool_call → tool-reply plumbing.
+        $toolContext = new ToolContext(
+            warningSink: function (string $w) use (&$toolWarningsOut) {
+                $toolWarningsOut[] = $w;
+            },
+            onStreamToken: $onStreamToken,
+            heartbeat: $streamHeartbeat,
+            imageSink: $imageSink,
+            imageContainerHint: $imageContainerHint,
+        );
+
+        $toolset = [new UrlFetchTool($this->promptUrlFetcher)];
+        if ($useImageTool && $this->imageFetcher !== null) {
+            $toolset[] = new SaveImageTool($this->imageFetcher);
+        }
+        $toolset[] = new ReadEntryStructureTool(
+            $this->structureSerializer,
+            fn (?string $collection, string $query, int $limit) => $this->findEntriesShortlist($collection, $query, $limit),
+        );
+        $runner = new ChatToolRunner($toolset, $toolContext);
+
         $maxRounds = (int) config('statamic-ai-assistant.entry_generator_tool_max_rounds', 120);
-        $maxFetches = (int) config('statamic-ai-assistant.entry_generator_tool_max_fetches', 100);
-        $fetches = 0;
 
         // Detect URLs in the user message(s). If any are present, the model MUST
         // call the fetch tool on the first round, otherwise it tends to fabricate
@@ -262,7 +325,7 @@ class EntryGeneratorService
         for ($round = 0; $round < $maxRounds; $round++) {
             $streamHeartbeat?->__invoke();
 
-            $forceTool = $promptHasUrl && $fetches === 0;
+            $forceTool = $promptHasUrl && $runner->callCount('fetch_page_content') === 0;
             // Use the explicit named-tool form on the first round when a URL is
             // present. Some OpenAI-compatible providers (notably Infomaniak's
             // Mistral deployments) silently ignore tool_choice: 'required' but
@@ -271,7 +334,7 @@ class EntryGeneratorService
                 ? ['type' => 'function', 'function' => ['name' => 'fetch_page_content']]
                 : 'auto';
 
-            $data = $this->aiService->createChatCompletion($working, $maxTokens, $tools, $toolChoice, $streamHeartbeat);
+            $data = $this->aiService->createChatCompletion($working, $maxTokens, $runner->definitions(), $toolChoice, $streamHeartbeat);
             $choice = $data['choices'][0] ?? null;
 
             if (! is_array($choice)) {
@@ -299,71 +362,16 @@ class EntryGeneratorService
                 ]);
             }
 
-            if (is_array($toolCalls) && $toolCalls !== []) {
-                $assistantPayload = [
+            if ($hasToolCalls) {
+                $working[] = [
                     'role' => 'assistant',
                     'content' => array_key_exists('content', $msg) ? $msg['content'] : null,
                     'tool_calls' => $toolCalls,
                 ];
-                $working[] = $assistantPayload;
 
-                foreach ($toolCalls as $tc) {
-                    if (! is_array($tc)) {
-                        continue;
-                    }
-
-                    $id = isset($tc['id']) && is_string($tc['id']) ? $tc['id'] : '';
-                    $type = $tc['type'] ?? '';
-
-                    if ($type !== 'function' || $id === '') {
-                        continue;
-                    }
-
-                    $fn = $tc['function'] ?? [];
-                    $name = isset($fn['name']) && is_string($fn['name']) ? $fn['name'] : '';
-                    $args = isset($fn['arguments']) && is_string($fn['arguments']) ? $fn['arguments'] : '{}';
-
-                    if ($name !== 'fetch_page_content') {
-                        Log::warning('[entry-gen-tool] unknown tool requested', ['name' => $name]);
-                        $working[] = [
-                            'role' => 'tool',
-                            'tool_call_id' => $id,
-                            'content' => json_encode(['ok' => false, 'error' => 'unknown tool: '.$name], JSON_UNESCAPED_UNICODE),
-                        ];
-
-                        continue;
-                    }
-
-                    if ($fetches >= $maxFetches) {
-                        Log::warning('[entry-gen-tool] fetch limit reached', [
-                            'fetches' => $fetches,
-                            'max_fetches' => $maxFetches,
-                        ]);
-                        $toolWarningsOut[] = __('URL fetch tool: maximum number of fetches for this entry was reached.');
-                        $working[] = [
-                            'role' => 'tool',
-                            'tool_call_id' => $id,
-                            'content' => json_encode([
-                                'ok' => false,
-                                'error' => 'fetch_limit_reached',
-                                'reason_echo' => '',
-                                'url' => '',
-                            ], JSON_UNESCAPED_UNICODE),
-                        ];
-
-                        continue;
-                    }
-
-                    $fetches++;
-                    $toolResult = $this->promptUrlFetcher->executeChatTool($args, $onStreamToken, $toolWarningsOut);
-
-                    $working[] = [
-                        'role' => 'tool',
-                        'tool_call_id' => $id,
-                        'content' => $toolResult,
-                    ];
-                    $streamHeartbeat?->__invoke();
-                }
+                // Single shared dispatch: per-tool budgets, JSON encoding and the
+                // role:tool replies are all handled by the runner.
+                $runner->consume($toolCalls, $working);
 
                 continue;
             }
@@ -373,7 +381,7 @@ class EntryGeneratorService
             if ($text !== '') {
                 Log::info('[entry-gen-tool] generation done', [
                     'rounds' => $round + 1,
-                    'fetches' => $fetches,
+                    'fetches' => $runner->callCount('fetch_page_content'),
                     'text_chars' => strlen($text),
                 ]);
 
@@ -385,7 +393,7 @@ class EntryGeneratorService
 
         Log::error('[entry-gen-tool] tool loop exceeded max rounds', [
             'max_rounds' => $maxRounds,
-            'fetches' => $fetches,
+            'fetches' => $runner->callCount('fetch_page_content'),
         ]);
         throw new \RuntimeException(__('Entry generation stopped: too many tool rounds.'));
     }
@@ -562,7 +570,8 @@ class EntryGeneratorService
             ['role' => 'user', 'content' => $user],
         ];
 
-        $raw = $this->aiService->generateFromMessages($messages, 256);
+        // Lightweight classification (pick collection + blueprint) — use the fast model tier.
+        $raw = $this->aiService->usingFastModel(fn () => $this->aiService->generateFromMessages($messages, 256));
 
         if ($raw === null || trim($raw) === '') {
             return $this->fallbackTargetSelection($catalog);
@@ -647,6 +656,7 @@ class EntryGeneratorService
             $lastBrace = strrpos($response, '}');
 
             if ($firstBrace === false || $lastBrace === false || $lastBrace <= $firstBrace) {
+                $this->logUnparseableResponse('target_selection', $rawResponse);
                 throw new \RuntimeException(__('Could not parse AI response as JSON. Please try again.'));
             }
 
@@ -656,10 +666,12 @@ class EntryGeneratorService
         try {
             $decoded = json_decode($jsonStr, true, 512, JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
+            $this->logUnparseableResponse('target_selection', $rawResponse, $e->getMessage());
             throw new \RuntimeException(__('Invalid JSON in AI response: :message', ['message' => $e->getMessage()]));
         }
 
         if (! is_array($decoded) || array_is_list($decoded)) {
+            $this->logUnparseableResponse('target_selection', $rawResponse, 'response was not a JSON object');
             throw new \RuntimeException(__('AI response must be a JSON object, not an array.'));
         }
 
@@ -1325,6 +1337,23 @@ class EntryGeneratorService
             return $this->finalizeSchemaEntry($field, $entry);
         }
 
+        if ($type === 'grid') {
+            $entry['type'] = 'grid';
+            $entry['description'] = ($instructions ? $instructions.' ' : '')
+                .'Repeating grid (a list/table). Provide an ARRAY OF ROWS where EACH row represents ONE discrete item. '
+                .'Every row is a JSON object using the handles under "row_fields" as its keys, and has NO "type" key. '
+                .'When the source material for this field is a list of discrete items (bullet points, key/value pairs, dates, features, steps, FAQ entries), create ONE row per item — never combine several items into a single row field. '
+                .'Use a single row only when the content is genuinely one item.';
+
+            $rowFields = $this->buildGridRowSchema($field, $siteHandle);
+
+            if (! empty($rowFields)) {
+                $entry['row_fields'] = $rowFields;
+            }
+
+            return $this->finalizeSchemaEntry($field, $entry);
+        }
+
         if (in_array($type, self::GEN_RECURSIVE_TYPES)) {
             $entry['type'] = 'structured';
             $entry['description'] = ($instructions ? $instructions.' ' : '')
@@ -1377,24 +1406,32 @@ class EntryGeneratorService
 
                 $sets[$setHandle] = $setSchema;
             }
-        } elseif ($field->type() === 'grid') {
-            $gridFields = $fieldtype->fields();
-            $gridSchema = [];
-
-            foreach ($gridFields->all() as $subField) {
-                $subEntry = $this->buildFieldSchemaEntry($subField, true, $siteHandle);
-
-                if ($subEntry !== null) {
-                    $gridSchema[$subField->handle()] = $subEntry;
-                }
-            }
-
-            if (! empty($gridSchema)) {
-                $sets['_grid_row'] = $gridSchema;
-            }
         }
 
         return $sets;
+    }
+
+    /**
+     * Schema for a single grid row: the grid's sub-fields keyed by handle.
+     * Grids are a repeating list of identically-shaped rows (unlike
+     * replicator/components, which pick between named sets), so this is
+     * presented to the model under "row_fields" rather than "sets".
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private function buildGridRowSchema(\Statamic\Fields\Field $field, string $siteHandle): array
+    {
+        $rowSchema = [];
+
+        foreach ($field->fieldtype()->fields()->all() as $subField) {
+            $subEntry = $this->buildFieldSchemaEntry($subField, true, $siteHandle);
+
+            if ($subEntry !== null) {
+                $rowSchema[$subField->handle()] = $subEntry;
+            }
+        }
+
+        return $rowSchema;
     }
 
     /**
@@ -1490,49 +1527,41 @@ class EntryGeneratorService
      */
     private function fieldSchemaContainsStructuredType(array $schema): bool
     {
-        foreach ($schema as $entry) {
-            if (! is_array($entry)) {
-                continue;
-            }
-
-            if (($entry['type'] ?? null) === 'structured') {
-                return true;
-            }
-
-            if (isset($entry['fields']) && is_array($entry['fields']) && $this->fieldSchemaContainsStructuredType($entry['fields'])) {
-                return true;
-            }
-
-            if (isset($entry['sets']) && is_array($entry['sets'])) {
-                foreach ($entry['sets'] as $setSchema) {
-                    if (is_array($setSchema) && $this->fieldSchemaContainsStructuredType($setSchema)) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        return false;
+        return $this->fieldSchemaContainsType($schema, 'structured');
     }
 
     private function fieldSchemaContainsTaxonomyTerms(array $schema): bool
+    {
+        return $this->fieldSchemaContainsType($schema, 'taxonomy_terms');
+    }
+
+    /**
+     * Whether any field entry in the schema (or nested inside a group's
+     * "fields", a replicator/components "sets", or a grid's "row_fields") has
+     * the given schema type.
+     *
+     * @param  array<string, array<string, mixed>>  $schema
+     */
+    private function fieldSchemaContainsType(array $schema, string $type): bool
     {
         foreach ($schema as $entry) {
             if (! is_array($entry)) {
                 continue;
             }
 
-            if (($entry['type'] ?? null) === 'taxonomy_terms') {
+            if (($entry['type'] ?? null) === $type) {
                 return true;
             }
 
-            if (isset($entry['fields']) && is_array($entry['fields']) && $this->fieldSchemaContainsTaxonomyTerms($entry['fields'])) {
-                return true;
+            foreach (['fields', 'row_fields'] as $nestedKey) {
+                if (isset($entry[$nestedKey]) && is_array($entry[$nestedKey]) && $this->fieldSchemaContainsType($entry[$nestedKey], $type)) {
+                    return true;
+                }
             }
 
             if (isset($entry['sets']) && is_array($entry['sets'])) {
                 foreach ($entry['sets'] as $setSchema) {
-                    if (is_array($setSchema) && $this->fieldSchemaContainsTaxonomyTerms($setSchema)) {
+                    if (is_array($setSchema) && $this->fieldSchemaContainsType($setSchema, $type)) {
                         return true;
                     }
                 }
@@ -1567,6 +1596,12 @@ class EntryGeneratorService
                 ."- For type \"asset_description\" (inside sets): a concise phrase describing the desired image; empty string is allowed and imagery may be assigned automatically.\n";
         }
 
+        if ($this->fieldSchemaContainsType($fieldSchema, 'grid')) {
+            $structuredRules .= "\n"
+                ."- For fields with type \"grid\": this is a REPEATING list/table, not a single rich-text block. Return an ARRAY OF ROWS. Each row is one discrete item — an object keyed by the handles under \"row_fields\", with NO \"type\" key.\n"
+                ."- One item per row: when the field's source material is a list (bullet points, key/value pairs, dates, features, steps, FAQ entries), output ONE row per item. Do NOT pour the whole list into a single row's field, even when that row field is rich text / HTML.\n";
+        }
+
         return $preface."\n\n"
             ."You MUST write all content in this language/locale: {$locale}\n\n"
             .$this->germanNoEszettInstructions($locale)
@@ -1580,6 +1615,7 @@ class EntryGeneratorService
             ."- For fields with type \"boolean\": provide true or false.\n"
             .$this->statamicDateFieldRulesForPrompt()
             ."- For fields with type \"structured\": provide an array of objects, each with a \"type\" key matching a set handle, plus the set's field values.\n"
+            ."- For fields with type \"grid\": provide an array of rows, each row an object keyed by the handles under \"row_fields\" (no \"type\" key). Each row is one item; make one row per discrete item.\n"
             ."- For fields with type \"group\": provide a JSON object whose keys match the nested field handles (see \"fields\" in the schema).\n"
             ."- For fields with type \"link\": provide a URL, path, or entry::UUID reference as described in the field description.\n"
             ."- For fields with type \"video_url\": provide a YouTube or video page URL, or an empty string.\n"
@@ -1662,6 +1698,7 @@ class EntryGeneratorService
             $lastBrace = strrpos($response, '}');
 
             if ($firstBrace === false || $lastBrace === false || $lastBrace <= $firstBrace) {
+                $this->logUnparseableResponse('generation', $rawResponse);
                 throw new \RuntimeException(__('Could not parse AI response as JSON. Please try again.'));
             }
 
@@ -1671,14 +1708,31 @@ class EntryGeneratorService
         try {
             $decoded = json_decode($jsonStr, true, 512, JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
+            $this->logUnparseableResponse('generation', $rawResponse, $e->getMessage());
             throw new \RuntimeException(__('Invalid JSON in AI response: :message', ['message' => $e->getMessage()]));
         }
 
         if (! is_array($decoded) || array_is_list($decoded)) {
+            $this->logUnparseableResponse('generation', $rawResponse, 'response was not a JSON object');
             throw new \RuntimeException(__('AI response must be a JSON object, not an array.'));
         }
 
         return $decoded;
+    }
+
+    /**
+     * Log the raw AI response when JSON parsing fails, so a future failure can be
+     * diagnosed from the logs (the model output is otherwise lost). The response
+     * is capped to keep log lines manageable.
+     */
+    private function logUnparseableResponse(string $stage, string $rawResponse, ?string $error = null): void
+    {
+        Log::error('[entry-gen] could not parse AI JSON response', [
+            'stage' => $stage,
+            'error' => $error,
+            'length' => strlen($rawResponse),
+            'raw_response' => Str::limit($rawResponse, 20000),
+        ]);
     }
 
     /**
@@ -1907,6 +1961,19 @@ class EntryGeneratorService
                 $setType = $set['type'] ?? null;
 
                 if (! $setType) {
+                    continue;
+                }
+
+                // Cross-blueprint safety: when a new entry is modelled on another
+                // entry's layout (read_entry_structure), the LLM may emit a set
+                // handle that does not exist in THIS field. Skip it with a warning
+                // rather than persisting an empty, invalid block.
+                if (! collect($fieldtype->flattenedSetsConfig())->has($setType)) {
+                    $warnings[] = __('Unknown set type ":type" in :field. Skipped.', [
+                        'type' => $setType,
+                        'field' => $field->display(),
+                    ]);
+
                     continue;
                 }
 
@@ -2357,6 +2424,9 @@ class EntryGeneratorService
                     $maxTokens,
                     $onStreamToken,
                     $toolWarnings,
+                    new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths,
+                    null,
+                    false,
                     $streamHeartbeat,
                 );
             } catch (\Throwable $e) {
@@ -2709,106 +2779,7 @@ class EntryGeneratorService
      */
     private function buildCurrentEntrySnapshot(StatamicEntry $entry, Blueprint $blueprint): string
     {
-        $raw = is_array($entry->data()->all()) ? $entry->data()->all() : [];
-
-        $totalCap = 16000;
-        $perFieldCap = 6000;
-        $textCap = 1200;
-        $usedTotal = 0;
-        $lines = [];
-
-        $append = function (string $line) use (&$lines, &$usedTotal, $totalCap): void {
-            $usedTotal += strlen($line);
-            $lines[] = $line;
-        };
-
-        $encode = function ($value, int $cap) use (&$usedTotal, $totalCap): ?string {
-            if ($usedTotal >= $totalCap) {
-                return null;
-            }
-            $json = json_encode($value, JSON_UNESCAPED_UNICODE);
-            if ($json === false) {
-                return null;
-            }
-            if (strlen($json) > $cap) {
-                $json = substr($json, 0, $cap).'  /* truncated — full content exists; return the COMPLETE new value to change this field */';
-            }
-
-            return $json;
-        };
-
-        foreach ($blueprint->fields()->all() as $field) {
-            $handle = $field->handle();
-            if (! array_key_exists($handle, $raw)) {
-                continue;
-            }
-            $value = $raw[$handle];
-            $type = $field->type();
-
-            if ($type === 'section' || $type === 'color') {
-                continue;
-            }
-
-            if ($type === 'assets') {
-                if ($value === null || $value === [] || $value === '') {
-                    $append("{$handle}: (no asset set)");
-                } else {
-                    $append("{$handle}: ".json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-                }
-                continue;
-            }
-
-            if (in_array($type, self::GEN_TEXT_TYPES, true) && is_string($value)) {
-                $append("{$handle}: ".json_encode(Str::limit($value, $textCap), JSON_UNESCAPED_UNICODE));
-                continue;
-            }
-
-            if (in_array($type, self::GEN_CHOICE_TYPES, true) || in_array($type, self::GEN_BOOLEAN_TYPES, true) || in_array($type, self::GEN_DATE_TYPES, true)) {
-                $append("{$handle}: ".json_encode($value, JSON_UNESCAPED_UNICODE));
-                continue;
-            }
-
-            if (in_array($type, self::GEN_HTML_TYPES, true)) {
-                $encoded = $encode($value, $perFieldCap);
-                $append($encoded === null
-                    ? "{$handle}: (current Bard content omitted — return full new HTML to replace it)"
-                    : "{$handle}: {$encoded}");
-                $usedTotal += $encoded === null ? 0 : strlen($encoded);
-                continue;
-            }
-
-            if (in_array($type, self::GEN_RECURSIVE_TYPES, true)) {
-                $count = is_array($value) ? count($value) : 0;
-                $encoded = $encode($value, $perFieldCap);
-                $append($encoded === null
-                    ? "{$handle}: (structured field — {$count} block(s); return the COMPLETE new array to change, or omit to keep)"
-                    : "{$handle}: {$encoded}");
-                $usedTotal += $encoded === null ? 0 : strlen($encoded);
-                continue;
-            }
-
-            if (in_array($type, self::GEN_GROUP_TYPES, true)) {
-                $encoded = $encode($value, $perFieldCap);
-                $append($encoded === null
-                    ? "{$handle}: (group field — return the COMPLETE new object to change, or omit to keep)"
-                    : "{$handle}: {$encoded}");
-                $usedTotal += $encoded === null ? 0 : strlen($encoded);
-                continue;
-            }
-
-            if (is_scalar($value)) {
-                $append("{$handle}: ".json_encode($value, JSON_UNESCAPED_UNICODE));
-                continue;
-            }
-
-            $encoded = $encode($value, $perFieldCap);
-            $append($encoded === null
-                ? "{$handle}: (non-scalar value — return the COMPLETE new value to change, or omit to keep)"
-                : "{$handle}: {$encoded}");
-            $usedTotal += $encoded === null ? 0 : strlen($encoded);
-        }
-
-        return implode("\n", $lines);
+        return $this->structureSerializer->serialize($entry, $blueprint);
     }
 
     /**

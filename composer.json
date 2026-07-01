@@ -16,7 +16,8 @@
         "statamic/cms": "^6.5",
         "lucianotonet/groq-laravel": "^0.0.10",
         "deeplcom/deepl-php": "^1.9",
-        "smalot/pdfparser": "^2.0"
+        "smalot/pdfparser": "^2.0",
+        "league/html-to-markdown": "^5.1"
     },
     "require-dev": {
         "orchestra/testbench": "^10.0"

@@ -43,6 +43,13 @@ class PromptUrlFetcher
     /** @var array<string, array{ok: bool, body: string, error: ?string}> */
     private static array $fetchCache = [];
 
+    private ?HtmlReadableExtractor $htmlExtractor = null;
+
+    private function htmlExtractor(): HtmlReadableExtractor
+    {
+        return $this->htmlExtractor ??= new HtmlReadableExtractor;
+    }
+
     /**
      * Reader chrome-stripping header, shared by every fetch path so the inline
      * prompt augmentation, the entry-generator tool, and the migration flow all
@@ -240,6 +247,12 @@ class PromptUrlFetcher
                             'type' => 'string',
                             'description' => 'Why this URL is needed, tied to the user task (e.g. which item, which field, what is missing from current context).',
                         ],
+                        'scope' => [
+                            'type' => 'string',
+                            'enum' => ['main_content', 'full_page'],
+                            'description' => 'Use "main_content" (default) to read an article/detail page body. '
+                                .'Use "full_page" for a listing/overview page when you need the teaser links to discover detail pages to fetch next.',
+                        ],
                     ],
                     'required' => ['url', 'reason'],
                 ],
@@ -278,6 +291,9 @@ class PromptUrlFetcher
 
         $url = isset($args['url']) && is_string($args['url']) ? trim($args['url']) : '';
         $reason = isset($args['reason']) && is_string($args['reason']) ? trim($args['reason']) : '';
+        $scope = (isset($args['scope']) && $args['scope'] === 'full_page')
+            ? HtmlReadableExtractor::SCOPE_FULL
+            : HtmlReadableExtractor::SCOPE_MAIN;
 
         if ($url === '' || $reason === '') {
             return json_encode([
@@ -292,7 +308,7 @@ class PromptUrlFetcher
             $onStreamToken("\n\n[".__('Fetching: :url', ['url' => $url])." — {$reason}]\n\n");
         }
 
-        $result = $this->fetchSingle($url);
+        $result = $this->fetchSingle($url, $scope);
 
         if (! $result['ok']) {
             $err = $result['error'] ?? __('unavailable or blocked');
@@ -344,7 +360,7 @@ class PromptUrlFetcher
      *
      * @return array{ok: bool, body: string, error: ?string}
      */
-    public function fetchSingle(string $url): array
+    public function fetchSingle(string $url, string $scope = HtmlReadableExtractor::SCOPE_MAIN): array
     {
         $timeout = max(5, (int) config('statamic-ai-assistant.prompt_url_fetch.timeout', 25));
         $base = rtrim((string) config('statamic-ai-assistant.prompt_url_fetch.reader_base', 'https://r.jina.ai'), '/');
@@ -356,14 +372,61 @@ class PromptUrlFetcher
             $timeout,
             $apiKey ? (string) $apiKey : null,
             $this->readerRemoveHeaders(),
+            $scope,
         );
     }
 
     /**
+     * Fetch a URL via Jina and return readable markdown.
+     *
+     * In the default 'html' reader_format we ask Jina for raw HTML (chrome still
+     * stripped via X-Remove-Selector) and run our own DOM extraction +
+     * html→markdown, because Jina's built-in markdown mode drops the real
+     * article on listing-heavy pages. $extractScope decides whether we narrow to
+     * the <main>/<article> landmark (copying content) or keep the full body
+     * (discovering teasers/links). If HTML extraction yields nothing usable we
+     * fall back to Jina's own markdown so a page never comes back empty.
+     *
      * @param  array<string, string>  $extraHeaders
      * @return array{ok: bool, body: string, error: ?string}
      */
-    private function fetchViaJina(string $targetUrl, string $readerBase, int $timeout, ?string $apiKey, array $extraHeaders = []): array
+    private function fetchViaJina(string $targetUrl, string $readerBase, int $timeout, ?string $apiKey, array $extraHeaders = [], string $extractScope = HtmlReadableExtractor::SCOPE_MAIN): array
+    {
+        $format = strtolower((string) config('statamic-ai-assistant.prompt_url_fetch.reader_format', 'html'));
+
+        if ($format === 'html') {
+            $raw = $this->fetchRaw(
+                $targetUrl,
+                $readerBase,
+                $timeout,
+                $apiKey,
+                array_merge($extraHeaders, ['X-Return-Format' => 'html']),
+            );
+
+            // Transport/HTTP failure: surface it verbatim, don't mask with a retry.
+            if (! $raw['ok']) {
+                return $raw;
+            }
+
+            $markdown = $this->htmlExtractor()->extract($raw['body'], $extractScope);
+            if ($markdown !== '') {
+                return ['ok' => true, 'body' => $markdown, 'error' => null];
+            }
+
+            Log::notice('HTML extraction empty, falling back to markdown reader', ['url' => $targetUrl]);
+        }
+
+        return $this->fetchRaw($targetUrl, $readerBase, $timeout, $apiKey, $extraHeaders);
+    }
+
+    /**
+     * Raw fetch from the reader with caching — no extraction, returns exactly
+     * what Jina sent (markdown or HTML depending on the headers).
+     *
+     * @param  array<string, string>  $extraHeaders
+     * @return array{ok: bool, body: string, error: ?string}
+     */
+    private function fetchRaw(string $targetUrl, string $readerBase, int $timeout, ?string $apiKey, array $extraHeaders = []): array
     {
         // Cache key includes header fingerprint so two callers asking for the
         // same URL with different selectors don't share a result.

@@ -30,7 +30,9 @@ use BoldWeb\StatamicAiAssistant\Services\Migration\UrlClusterer;
 use BoldWeb\StatamicAiAssistant\Services\Migration\MigrationStructureReconciler;
 use BoldWeb\StatamicAiAssistant\Services\Migration\WebsiteMigrationService;
 use BoldWeb\StatamicAiAssistant\Services\NavigationTreeSyncService;
+use BoldWeb\StatamicAiAssistant\Services\AssetImageDownloader;
 use BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher;
+use BoldWeb\StatamicAiAssistant\Services\RemoteImageFetcher;
 use BoldWeb\StatamicAiAssistant\Services\SetHintsService;
 use BoldWeb\StatamicAiAssistant\Services\TranslationService;
 use Illuminate\Cache\RateLimiting\Limit;
@@ -108,6 +110,16 @@ class ServiceProvider extends AddonServiceProvider
             return new PromptUrlFetcher;
         });
 
+        $this->app->singleton(AssetImageDownloader::class, function () {
+            return new AssetImageDownloader;
+        });
+
+        $this->app->singleton(RemoteImageFetcher::class, function ($app) {
+            return new RemoteImageFetcher(
+                $app->make(AssetImageDownloader::class),
+            );
+        });
+
         $this->app->singleton(FigmaOAuthService::class, function () {
             return new FigmaOAuthService;
         });
@@ -135,6 +147,7 @@ class ServiceProvider extends AddonServiceProvider
                 $app->make(PromptUrlFetcher::class),
                 $app->make(SetHintsService::class),
                 $app->make(FigmaContentFetcher::class),
+                $app->make(RemoteImageFetcher::class),
             );
         });
 
@@ -174,8 +187,10 @@ class ServiceProvider extends AddonServiceProvider
             );
         });
 
-        $this->app->singleton(MigrationAssetDownloader::class, function () {
-            return new MigrationAssetDownloader;
+        $this->app->singleton(MigrationAssetDownloader::class, function ($app) {
+            return new MigrationAssetDownloader(
+                $app->make(AssetImageDownloader::class),
+            );
         });
 
         $this->app->singleton(CollectionMatcher::class, function ($app) {

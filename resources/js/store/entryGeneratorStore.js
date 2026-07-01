@@ -239,6 +239,12 @@ function applyBatchProgressSnapshot(data) {
     }
   }
 
+  // Live planner step feed (fetching URLs, reading layouts, deciding). The buffer
+  // is drained server-side on each poll, so every line here is new — just append.
+  for (const line of (data.planner_activity || [])) {
+    pushActivityLine(line, null);
+  }
+
   const rows = data.entries || [];
 
   // 1. Add any entries the planner has just discovered. Cards appear in the

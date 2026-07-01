@@ -162,6 +162,85 @@ class EntryGeneratorAssetResolver
     }
 
     /**
+     * Handle of the first assets-field container found anywhere in the blueprint
+     * tree (top-level fields, groups, replicator/components sets, grids). Used to
+     * steer images saved by the save_remote_image tool into the container the
+     * entry's own image fields point at, so they actually get assigned. Returns
+     * null when the blueprint has no assets fields.
+     */
+    public function primaryAssetContainer(Blueprint $blueprint): ?string
+    {
+        foreach ($blueprint->fields()->all() as $field) {
+            $handle = $this->findAssetContainerInField($field);
+
+            if ($handle !== null) {
+                return $handle;
+            }
+        }
+
+        return null;
+    }
+
+    private function findAssetContainerInField(Field $field): ?string
+    {
+        $type = $field->type();
+
+        if ($type === 'assets') {
+            $handle = $field->config()['container'] ?? null;
+
+            return is_string($handle) && $handle !== '' ? $handle : null;
+        }
+
+        if ($type === 'group') {
+            foreach ($field->fieldtype()->fields()->all() as $child) {
+                $handle = $this->findAssetContainerInField($child);
+
+                if ($handle !== null) {
+                    return $handle;
+                }
+            }
+
+            return null;
+        }
+
+        if (in_array($type, self::RECURSIVE_CONTAINER_TYPES, true)) {
+            $fieldtype = $field->fieldtype();
+
+            if ($type === 'grid') {
+                foreach ($fieldtype->fields()->all() as $child) {
+                    $handle = $this->findAssetContainerInField($child);
+
+                    if ($handle !== null) {
+                        return $handle;
+                    }
+                }
+
+                return null;
+            }
+
+            foreach ($fieldtype->flattenedSetsConfig() as $setHandle => $setConfig) {
+                try {
+                    $setFields = $fieldtype->fields($setHandle);
+                } catch (\Exception) {
+                    continue;
+                }
+
+                foreach ($setFields->all() as $child) {
+                    $handle = $this->findAssetContainerInField($child);
+
+                    if ($handle !== null) {
+                        return $handle;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        return null;
+    }
+
+    /**
      * @return array<int, string>
      */
     private function pickRandomPathsForField(Field $field, array &$warnings): array
