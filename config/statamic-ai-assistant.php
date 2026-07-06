@@ -226,6 +226,43 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | DeepL glossary & style rules storage
+    |--------------------------------------------------------------------------
+    |
+    | YAML file paths for the CP-managed DeepL glossary (term table synced to a
+    | DeepL v3 multilingual glossary) and the per-language style rules (synced
+    | to DeepL v3 style rules). Defaults live under content/ so they can be
+    | versioned in git.
+    |
+    */
+
+    'translation_glossary_path' => env('STATAMIC_AI_ASSISTANT_TRANSLATION_GLOSSARY_PATH', base_path('content/statamic-ai-assistant/translation-glossary.yaml')),
+
+    'translation_style_rules_path' => env('STATAMIC_AI_ASSISTANT_TRANSLATION_STYLE_RULES_PATH', base_path('content/statamic-ai-assistant/translation-style-rules.yaml')),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Glossary terminology takes precedence over style tone
+    |--------------------------------------------------------------------------
+    |
+    | DeepL applies glossaries reliably ("hard") only with the classic model
+    | (model_type=latency_optimized). Any request carrying a style_id is served
+    | by the next-gen model, which treats glossary entries as SOFT hints — so a
+    | term like "Apartment" → "apart." is often ignored when a style rule is
+    | also active.
+    |
+    | When this is true (default) and BOTH a glossary term and a style rule
+    | would apply to the same translation, the text is split: segments that
+    | contain a glossary term are translated on the classic model so the term is
+    | enforced, and the remaining segments keep the style rule. Set to false to
+    | always prefer the style rule (glossary stays soft) in one request.
+    |
+    */
+
+    'prefer_glossary_over_style' => env('STATAMIC_AI_ASSISTANT_PREFER_GLOSSARY_OVER_STYLE', true),
+
+    /*
+    |--------------------------------------------------------------------------
     | Figma OAuth (entry generator design context)
     |--------------------------------------------------------------------------
     |
@@ -273,8 +310,8 @@ return [
     |--------------------------------------------------------------------------
     |
     | Multi-entry content generation runs in Bus::chain jobs so the CP request
-    | ends after the plan. Requires QUEUE_CONNECTION other than "sync" (same as
-    | website migration). preferred_paths are updated between chained jobs.
+    | ends after the plan. Requires QUEUE_CONNECTION other than "sync".
+    | preferred_paths are updated between chained jobs.
     |
     */
     'entry_generator_batch' => [
@@ -321,6 +358,23 @@ return [
     |
     */
     'bold_agent_max_plan_entries' => max(1, min(500, (int) env('STATAMIC_AI_ASSISTANT_BOLD_AGENT_MAX_PLAN_ENTRIES', 100))),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Editor entry-creation limit (non-super users)
+    |--------------------------------------------------------------------------
+    |
+    | When enabled (default), only super users can create/update multiple
+    | entries in a single BOLD agent request. Everyone else is capped to a
+    | SINGLE entry per request — editors can still use the agent, but a prompt
+    | like "create every page of this website" can never fan out into a bulk
+    | run for a non-admin. Super users keep the full bold_agent_max_plan_entries
+    | cap. Disable to let all users run multi-entry batches:
+    |
+    | EDITOR_LIMIT_ENTRIES=false
+    |
+    */
+    'editor_limit_entries' => (bool) env('EDITOR_LIMIT_ENTRIES', true),
 
     'prompt_generator_preface' => env(
         'STATAMIC_AI_ASSISTANT_GENERATOR_PREFACE',
@@ -369,6 +423,21 @@ return [
         'max_chars_per_url' => max(1000, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_CHARS', 12000)),
         'max_total_chars' => max(5000, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_TOTAL_CHARS', 40000)),
         'api_key' => env('STATAMIC_AI_ASSISTANT_JINA_API_KEY') ?: env('JINA_API_KEY'),
+
+        // CSS selectors stripped from the page by Jina Reader before extraction
+        // (passed via the X-Remove-Selector header). Keeps site nav, header,
+        // footer, sidebars and consent-manager dialogs (Cookiebot, OneTrust,
+        // Usercentrics) out of the fetched text — consent banners otherwise
+        // inject huge cookie-declaration blocks that exhaust the char budget and
+        // truncate the real page content. Applies to every Jina fetch path
+        // (inline prompt URLs and the entry-generator tool). Override
+        // per-project if your source site uses different class names
+        // (e.g. ".global-nav, #site-footer"). Set to an empty string to disable.
+        // The default lives on PromptUrlFetcher so code and config can't drift.
+        'remove_selector' => env(
+            'STATAMIC_AI_ASSISTANT_REMOVE_SELECTOR',
+            \BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher::DEFAULT_REMOVE_SELECTOR,
+        ),
     ],
 
     /*
@@ -393,71 +462,16 @@ return [
         // Folder inside the container where copied images are stored.
         'folder' => env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_FOLDER', 'bold-agent-fetched'),
 
+        // Asset container that downloaded images go into when the blueprint
+        // does not dictate one. If null, the first available container is used.
+        // Set to the handle (e.g. "images") of the container your blueprints'
+        // assets fields point at.
+        'asset_container' => env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_ASSET_CONTAINER', null),
+
         // Per-entry caps so a runaway generation can't flood the disk.
         'max_images' => max(0, (int) env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_MAX', 30)),
         'max_bytes' => max(1024, (int) env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_MAX_BYTES', 10 * 1024 * 1024)),
         'timeout' => max(1, (int) env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_TIMEOUT', 20)),
-    ],
-
-    /*
-    |--------------------------------------------------------------------------
-    | Website migration
-    |--------------------------------------------------------------------------
-    |
-    | Settings for the "migrate a whole website" tool. Each page becomes a queued
-    | MigratePageJob that fetches via Jina, runs the EntryGeneratorService, and
-    | saves a draft entry.
-    |
-    */
-
-    'migration' => [
-        'enabled' => env('STATAMIC_AI_ASSISTANT_MIGRATION_ENABLED', true),
-        // Queue name used to dispatch MigratePageJob. Defaults to "default" so a
-        // stock Horizon / queue:work setup picks it up without extra config.
-        // Set to a dedicated queue (e.g. "migrations") only if your worker
-        // supervisor is explicitly configured to watch it.
-        'queue' => env('STATAMIC_AI_ASSISTANT_MIGRATION_QUEUE', 'default'),
-        'max_pages_per_session' => max(1, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_MAX_PAGES', 500)),
-        'crawl_max_depth' => max(0, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_CRAWL_DEPTH', 3)),
-        'crawl_per_host_rps' => max(1, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_HOST_RPS', 3)),
-        'respect_robots_txt' => (bool) env('STATAMIC_AI_ASSISTANT_MIGRATION_RESPECT_ROBOTS', true),
-        'discovery_timeout' => max(5, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_DISCOVERY_TIMEOUT', 20)),
-        'discovery_budget' => max(10, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_DISCOVERY_BUDGET', 25)),
-        'fetch_timeout' => max(5, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_FETCH_TIMEOUT', 90)),
-
-        // When a child page migrates before its parent finishes saving, the job
-        // polls the session for the parent's entry_id (structure placement).
-        'parent_entry_wait_attempts' => max(10, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_PARENT_WAIT_ATTEMPTS', 60)),
-        'parent_entry_wait_ms' => max(50, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_PARENT_WAIT_MS', 250)),
-
-        // Asset container that downloaded migration images go into. If null,
-        // the first available container is used. Set to the handle (e.g. "images")
-        // of the container your blueprints' assets fields point at, otherwise
-        // downloaded images are uploaded but not preferred when filling fields.
-        'asset_container' => env('STATAMIC_AI_ASSISTANT_MIGRATION_ASSET_CONTAINER', null),
-
-        // Folder prefix inside the container. The downloader appends "/{sessionId}".
-        'asset_folder' => env('STATAMIC_AI_ASSISTANT_MIGRATION_ASSET_FOLDER', 'bold-agent-migration'),
-
-        // Per-page caps to keep a runaway page from filling the disk.
-        'asset_max_per_page' => max(0, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_ASSET_MAX_PER_PAGE', 20)),
-        'asset_max_bytes' => max(0, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_ASSET_MAX_BYTES', 10 * 1024 * 1024)),
-        'asset_timeout' => max(1, (int) env('STATAMIC_AI_ASSISTANT_MIGRATION_ASSET_TIMEOUT', 15)),
-
-        // CSS selectors stripped from the page by Jina Reader before extraction
-        // (passed via the X-Remove-Selector header). Keeps site nav, header,
-        // footer, sidebars and consent-manager dialogs (Cookiebot, OneTrust,
-        // Usercentrics) out of the fetched text — consent banners otherwise
-        // inject huge cookie-declaration blocks that exhaust the char budget and
-        // truncate the real page content. Applies to every Jina fetch path
-        // (inline prompt URLs, the entry-generator tool, and website migration).
-        // Override per-project if your source site uses different class names
-        // (e.g. ".global-nav, #site-footer"). Set to an empty string to disable.
-        // The default lives on PromptUrlFetcher so code and config can't drift.
-        'remove_selector' => env(
-            'STATAMIC_AI_ASSISTANT_MIGRATION_REMOVE_SELECTOR',
-            \BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher::DEFAULT_REMOVE_SELECTOR,
-        ),
     ],
 
 ];

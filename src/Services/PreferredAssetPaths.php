@@ -1,11 +1,11 @@
 <?php
 
-namespace BoldWeb\StatamicAiAssistant\Services\Migration;
+namespace BoldWeb\StatamicAiAssistant\Services;
 
 /**
  * Mutable queue of {container, path} pairs the asset resolver should consume
  * before falling back to random container assets. Mutability is intentional:
- * the resolver pops paths as fields are filled, and each migration job has
+ * the resolver pops paths as fields are filled, and each generation job has
  * its own instance, so there is no shared-state hazard between concurrent
  * queue workers.
  */

@@ -11,10 +11,10 @@ use Statamic\Facades\AssetContainer;
 /**
  * Downloads a single remote image and stores it in a Statamic asset container.
  *
- * Single source of truth for "pull an image URL into an asset" — shared by the
- * website migration flow ({@see Migration\MigrationAssetDownloader}) and the
- * save_remote_image LLM tool ({@see RemoteImageFetcher}) so both go through one
- * battle-tested upload path with the same validation, idempotency and naming.
+ * Single source of truth for "pull an image URL into an asset" — used by the
+ * save_remote_image LLM tool ({@see RemoteImageFetcher}) so every download goes
+ * through one battle-tested upload path with the same validation, idempotency
+ * and naming.
  *
  * Filenames are deterministic ({slug}-{8 chars of url md5}.{ext}) so a retried
  * job sees the existing file on disk and reuses it instead of re-uploading.
@@ -22,15 +22,15 @@ use Statamic\Facades\AssetContainer;
 class AssetImageDownloader
 {
     /**
-     * Resolve a usable container: the given handle first, then the
-     * migration-configured container, then the first available container.
+     * Resolve a usable container: the given handle first, then the configured
+     * `image_fetch.asset_container`, then the first available container.
      * Returns null only when the site has no asset containers at all.
      */
     public function resolveContainer(?string $preferredHandle = null)
     {
         $candidates = [
             $preferredHandle,
-            config('statamic-ai-assistant.migration.asset_container'),
+            config('statamic-ai-assistant.image_fetch.asset_container'),
         ];
 
         foreach ($candidates as $handle) {
@@ -74,7 +74,7 @@ class AssetImageDownloader
             }
 
             $response = Http::timeout($timeout)
-                ->withHeaders(['User-Agent' => 'StatamicAiAssistant-Migration/1.0'])
+                ->withHeaders(['User-Agent' => 'StatamicAiAssistant/1.0'])
                 ->get($url);
 
             if (! $response->successful()) {

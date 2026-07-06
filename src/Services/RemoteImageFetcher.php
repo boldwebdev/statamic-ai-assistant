@@ -2,7 +2,7 @@
 
 namespace BoldWeb\StatamicAiAssistant\Services;
 
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -14,7 +14,7 @@ use Illuminate\Support\Str;
  * EntryGeneratorAssetResolver drains into the entry's asset fields (matched by
  * container handle), so a page copied from a URL keeps its own imagery instead
  * of getting random container assets. The actual download/upload is delegated
- * to {@see AssetImageDownloader} — the same path the website migration uses.
+ * to {@see AssetImageDownloader}.
  */
 class RemoteImageFetcher
 {
@@ -97,7 +97,7 @@ class RemoteImageFetcher
 
         // Save into the entry's own asset-field container (auto-detected from the
         // blueprint) so the resolver can attach the image; resolveContainer falls
-        // back to the migration container / first container only if that is null.
+        // back to the configured / first container only if that is null.
         $container = $this->downloader->resolveContainer($containerHint);
         if ($container === null) {
             $warningsOut[] = __('Could not save image :url: no asset container is configured.', ['url' => $url]);

@@ -30,12 +30,19 @@ class EntryStructureSerializer
 
     private const TEXT_CAP = 1200;
 
-    public function serialize(StatamicEntry $entry, Blueprint $blueprint): string
+    /**
+     * @param  array<int, string>|null  $incompleteFields  Out-list: handles whose value
+     *                                                     was truncated or omitted (the LLM never saw the full
+     *                                                     content). Callers that let the LLM REPLACE such fields
+     *                                                     wholesale should treat that as a data-loss risk.
+     */
+    public function serialize(StatamicEntry $entry, Blueprint $blueprint, ?array &$incompleteFields = null): string
     {
         $raw = is_array($entry->data()->all()) ? $entry->data()->all() : [];
 
         $usedTotal = 0;
         $lines = [];
+        $incompleteFields = [];
 
         $omit = ' — omitted (exceeds size cap); the field has content';
 
@@ -104,6 +111,9 @@ class EntryStructureSerializer
                     ? 'list — '.count($value).' item(s)'
                     : 'object';
                 $encoded = $encode($value, self::PER_FIELD_CAP);
+                if ($encoded === null || str_ends_with($encoded, '/* truncated */')) {
+                    $incompleteFields[] = $handle;
+                }
                 $append($encoded === null
                     ? "{$handle}: ({$label}{$omit})"
                     : "{$handle}: {$encoded}");
@@ -113,6 +123,9 @@ class EntryStructureSerializer
             }
 
             $encoded = $encode($value, self::PER_FIELD_CAP);
+            if ($encoded === null || str_ends_with($encoded, '/* truncated */')) {
+                $incompleteFields[] = $handle;
+            }
             $append($encoded === null
                 ? "{$handle}: (value omitted{$omit})"
                 : "{$handle}: {$encoded}");

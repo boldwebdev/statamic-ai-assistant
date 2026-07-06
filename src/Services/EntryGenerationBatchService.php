@@ -2,7 +2,7 @@
 
 namespace BoldWeb\StatamicAiAssistant\Services;
 
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -52,6 +52,7 @@ class EntryGenerationBatchService
         array $urlAugmentation,
         ?string $collectionHandle = null,
         ?string $blueprintHandle = null,
+        ?int $maxPlanEntries = null,
     ): string {
         $id = (string) Str::uuid();
         $preferred = $urlAugmentation['preferred'] ?? new PreferredAssetPaths;
@@ -70,6 +71,10 @@ class EntryGenerationBatchService
             'prompt' => $prompt,
             'collection_handle' => $collectionHandle ?? '',
             'blueprint_handle' => $blueprintHandle ?? '',
+            // Effective per-request entry cap, resolved from the CP user's role
+            // at request time (see EntryCreationPolicy). Null → planner falls
+            // back to the configured cap. Non-super users get 1 when limited.
+            'max_plan_entries' => $maxPlanEntries !== null ? max(1, $maxPlanEntries) : null,
             'locale' => $locale,
             'attachment_content' => $attachmentContent,
             'plan_warnings' => [],

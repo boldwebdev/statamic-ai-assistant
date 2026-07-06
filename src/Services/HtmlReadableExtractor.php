@@ -41,14 +41,28 @@ class HtmlReadableExtractor
      */
     public function extract(string $html, string $scope = self::SCOPE_MAIN): string
     {
+        return $this->extractReadable($html, $scope)['markdown'];
+    }
+
+    /**
+     * Convert fetched HTML to markdown AND surface the page's primary heading
+     * (first <h1>) from the same parse. The headline lets callers pin the entry
+     * title to the source page's real H1 — a copied page should keep its own
+     * title rather than one the model paraphrases from the body.
+     *
+     * @param  string  $scope  self::SCOPE_MAIN or self::SCOPE_FULL
+     * @return array{markdown: string, headline: ?string}
+     */
+    public function extractReadable(string $html, string $scope = self::SCOPE_MAIN): array
+    {
         $html = trim($html);
         if ($html === '') {
-            return '';
+            return ['markdown' => '', 'headline' => null];
         }
 
         $doc = $this->loadDocument($html);
         if ($doc === null) {
-            return '';
+            return ['markdown' => '', 'headline' => null];
         }
 
         $this->stripNonContentNodes($doc);
@@ -58,15 +72,64 @@ class HtmlReadableExtractor
             : $this->bodyNode($doc);
 
         if ($node === null) {
-            return '';
+            return ['markdown' => '', 'headline' => null];
         }
+
+        $headline = $this->firstHeading($node) ?? $this->firstHeading($this->bodyNode($doc));
 
         $innerHtml = $this->nodeHtml($node);
         if (trim($innerHtml) === '') {
-            return '';
+            return ['markdown' => '', 'headline' => $headline];
         }
 
-        return trim($this->converter()->convert($innerHtml));
+        return [
+            'markdown' => trim($this->converter()->convert($innerHtml)),
+            'headline' => $headline,
+        ];
+    }
+
+    /**
+     * First non-empty <h1> text within (or below) the given node. Returns null
+     * when the subtree has no usable level-1 heading.
+     */
+    private function firstHeading(?\DOMNode $node): ?string
+    {
+        if ($node === null) {
+            return null;
+        }
+
+        $doc = $node->ownerDocument;
+        if ($doc === null) {
+            return null;
+        }
+
+        $xpath = new \DOMXPath($doc);
+        // descendant-or-self so an <article> that *is* wrapped tightly around its
+        // heading still matches, and a body scope finds the first h1 anywhere.
+        $nodes = $xpath->query('.//h1', $node);
+        if ($nodes === false) {
+            return null;
+        }
+
+        foreach ($nodes as $h1) {
+            $text = $this->normalizeHeading((string) $h1->textContent);
+            if ($text !== '') {
+                return $text;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Collapse whitespace and trim a heading's text so a multi-line or
+     * indentation-padded <h1> becomes a clean single-line title.
+     */
+    private function normalizeHeading(string $text): string
+    {
+        $text = preg_replace('/\s+/u', ' ', $text) ?? $text;
+
+        return trim($text);
     }
 
     private function loadDocument(string $html): ?\DOMDocument

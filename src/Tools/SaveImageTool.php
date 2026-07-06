@@ -2,7 +2,7 @@
 
 namespace BoldWeb\StatamicAiAssistant\Tools;
 
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
 use BoldWeb\StatamicAiAssistant\Services\RemoteImageFetcher;
 
 /**

@@ -68,6 +68,70 @@ class EntryStructureSerializerTest extends TestCase
         $this->assertStringContainsString('truncated', $out);
     }
 
+    public function test_incomplete_fields_are_reported_for_truncated_values(): void
+    {
+        $entry = Entry::make()->data([
+            'title' => 'Fits fine',
+            'blocks' => [['type' => 'text', 'body' => str_repeat('x', 9000)]],
+        ]);
+
+        $incomplete = [];
+        (new EntryStructureSerializer)->serialize($entry, $this->blueprint(), $incomplete);
+
+        $this->assertSame(['blocks'], $incomplete);
+    }
+
+    public function test_incomplete_fields_is_empty_when_everything_fits(): void
+    {
+        $entry = Entry::make()->data([
+            'title' => 'Small',
+            'blocks' => [['type' => 'text', 'body' => 'short']],
+        ]);
+
+        $incomplete = [];
+        (new EntryStructureSerializer)->serialize($entry, $this->blueprint(), $incomplete);
+
+        $this->assertSame([], $incomplete);
+    }
+
+    /**
+     * Update-mode data integrity: when the LLM echoes existing block ids (shown
+     * in the update snapshot), the mapper keeps them so Statamic revision diffs
+     * and the CP UI reflect which blocks actually changed. Garbage ids are
+     * replaced with fresh UUIDs.
+     */
+    public function test_echoed_block_ids_are_preserved_and_invalid_ones_regenerated(): void
+    {
+        $field = new Field('blocks', [
+            'type' => 'replicator',
+            'sets' => [
+                'group_one' => [
+                    'sets' => [
+                        'hero' => ['fields' => [['handle' => 'heading', 'field' => ['type' => 'text']]]],
+                    ],
+                ],
+            ],
+        ]);
+
+        $service = app(EntryGeneratorService::class);
+        $method = new \ReflectionMethod($service, 'mapReplicatorData');
+        $method->setAccessible(true);
+
+        $warnings = [];
+        $sets = [
+            ['type' => 'hero', 'id' => 'existing-block-id-1', 'heading' => 'Keeps id'],
+            ['type' => 'hero', 'heading' => 'No id — gets a fresh one'],
+            ['type' => 'hero', 'id' => 'bad id with spaces!', 'heading' => 'Invalid id — regenerated'],
+        ];
+        $args = [$sets, $field, &$warnings, 'default'];
+        $result = $method->invokeArgs($service, $args);
+
+        $this->assertSame('existing-block-id-1', $result[0]['id']);
+        $this->assertNotEmpty($result[1]['id']);
+        $this->assertNotSame('bad id with spaces!', $result[2]['id']);
+        $this->assertMatchesRegularExpression('/^[0-9a-f-]{36}$/', $result[2]['id']);
+    }
+
     /**
      * Cross-blueprint safety: when a referenced entry's set type does not exist
      * in the target blueprint, the mapper skips it with a warning instead of

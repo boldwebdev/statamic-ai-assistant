@@ -2,7 +2,7 @@
 
 namespace BoldWeb\StatamicAiAssistant\Services;
 
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
 use Illuminate\Support\Collection;
 use Statamic\Assets\Asset as StatamicAsset;
 use Statamic\Contracts\Assets\Asset as AssetContract;
@@ -18,7 +18,7 @@ class EntryGeneratorAssetResolver
     /**
      * Fill every assets field in the blueprint tree (groups, replicator sets, grids)
      * when the value is empty. Assets are drawn from $preferred first (downloaded
-     * by the migration job), then from random paths in the field's container.
+     * by the save_remote_image tool), then from random paths in the field's container.
      *
      * @param  array<string, mixed>  $data
      * @param  array<string, mixed>  $displayData

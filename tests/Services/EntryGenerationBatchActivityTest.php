@@ -3,7 +3,7 @@
 namespace BoldWeb\StatamicAiAssistant\Tests\Services;
 
 use BoldWeb\StatamicAiAssistant\Services\EntryGenerationBatchService;
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
 use BoldWeb\StatamicAiAssistant\Tests\TestCase;
 use Illuminate\Support\Facades\Cache;
 

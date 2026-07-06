@@ -5,7 +5,7 @@ namespace BoldWeb\StatamicAiAssistant\Tests\Jobs;
 use BoldWeb\StatamicAiAssistant\Jobs\GeneratePlannedEntryJob;
 use BoldWeb\StatamicAiAssistant\Services\EntryGenerationBatchService;
 use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorService;
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
 use BoldWeb\StatamicAiAssistant\Tests\TestCase;
 use Illuminate\Support\Facades\Cache;
 

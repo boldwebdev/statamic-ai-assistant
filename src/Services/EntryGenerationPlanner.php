@@ -3,7 +3,8 @@
 namespace BoldWeb\StatamicAiAssistant\Services;
 
 use BoldWeb\StatamicAiAssistant\Jobs\GeneratePlannedEntryJob;
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy;
 use BoldWeb\StatamicAiAssistant\Support\JsonObjectExtractor;
 use BoldWeb\StatamicAiAssistant\Support\PlanEntryDecorator;
 use BoldWeb\StatamicAiAssistant\Tools\ChatToolRunner;
@@ -227,10 +228,22 @@ class EntryGenerationPlanner
         }
 
         $catalogJson = json_encode($catalog, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
-        $cap = max(1, min(500, (int) config('statamic-ai-assistant.bold_agent_max_plan_entries', 100)));
+        // The session carries the effective cap resolved from the requesting CP
+        // user's role (EntryCreationPolicy). Non-super users are limited to a
+        // single entry; fall back to the configured cap for legacy sessions.
+        $cap = $this->resolvePlanCap($session);
+
+        // Hard single-entry mode for capped (non-super) users: make the one-entry
+        // rule impossible to miss, on top of the server-side cap enforcement.
+        $singleEntryRule = $cap === 1
+            ? "STRICT SINGLE-ENTRY LIMIT: you may create OR update EXACTLY ONE entry in this request. "
+                ."Make a single create_entry_job OR a single update_entry_job call, then stop. "
+                ."If the user asked for several entries, pick the single best match, do that one, and note in your final summary that only one was created due to the current permission limit.\n\n"
+            : '';
 
         $system = "You are a Statamic CMS planner running asynchronously. The user described one or more entries they want to create OR update. "
             ."Your job is to figure out which case applies and dispatch tool calls accordingly. **Never produce JSON output yourself** — entries are created or updated exclusively through tool calls.\n\n"
+            .$singleEntryRule
             ."AVAILABLE TOOLS:\n"
             ."- `fetch_page_content`: read external http(s) URLs.\n"
             ."- `create_entry_job`: queue ONE new entry for asynchronous creation.\n"
@@ -238,8 +251,9 @@ class EntryGenerationPlanner
             ."- `find_entries`: search existing entries by title/slug when the catalog shortlist below is not enough.\n"
             ."- `read_entry_structure`: read an existing entry's layout/components (its sets in order) so a new or updated entry can mirror them. Pass `entry_id` (from the catalog or find_entries) or a title/slug `query`. The reference entry may use a different blueprint — mirror the structure, but each per-entry `prompt` you write must instruct mapping onto the target blueprint's own sets, never copying set handles blindly.\n\n"
             ."WORKFLOW:\n"
-            ."1. Decide whether the user wants to create new entries, update existing entries, or both. Phrases like \"add\", \"new\", \"create\", \"write a post about\" → create. Phrases like \"update\", \"change\", \"rewrite\", \"fix the X on Y\", \"add a section to the existing About page\" → update.\n"
-            ."2. For UPDATES: find the target entry's `entry_id`. The catalog below carries an `entries` shortlist (recently updated) and a `count` per collection. If the right entry is in the shortlist, use its id directly. If not, call **find_entries** with a query (and optionally a collection handle) to search.\n"
+            ."1. Decide whether the user wants to create new entries, update existing entries, or both. Phrases like \"add\", \"new\", \"create\", \"write a post about\" → create. Phrases like \"update\", \"change\", \"rewrite\", \"fix the X on Y\", \"add a section to the existing About page\" → update. When the user refers to content by a definite name (\"the About page\", \"our rooms page\", \"unsere Zimmer-Seite\") the entry most likely EXISTS — treat that as update intent unless they explicitly ask for a new entry.\n"
+            ."2. For UPDATES: find the target entry's `entry_id`. The catalog below carries an `entries` shortlist (recently updated) and a `count` per collection. If the right entry is in the shortlist, use its id directly. If not, call **find_entries** with a query (and optionally a collection handle) to search. If the intent is clearly UPDATE but neither the shortlist nor find_entries locates the entry, do NOT fall back to creating a new entry — end with `Cannot proceed:` naming the entry you could not find.\n"
+            ."2b. AVOID DUPLICATES on creates: before dispatching create_entry_job for content that may already exist (a topic matching an entry title in the shortlist, or a fetched URL whose title matches an existing entry), check the shortlist or call find_entries. If a matching entry exists and the user's wording is compatible with updating it, prefer update_entry_job over creating a near-duplicate.\n"
             ."3. For CREATES with URLs in the user message, call **fetch_page_content** first to inspect them. For listing/index URLs, enumerate every relevant detail page.\n"
             ."4. Dispatch each entry as soon as you have enough info — do not wait to plan all entries before dispatching. Each tool call enqueues a worker that starts immediately, in parallel.\n"
             ."5. Use one tool call per distinct entry. Never collapse many entries into a single call. The combined cap is {$cap} create_entry_job + update_entry_job calls per request.\n"
@@ -532,6 +546,25 @@ class EntryGenerationPlanner
 
         // Some entries were dispatched — surface a warning instead of failing the whole batch.
         $toolWarningsOut[] = __('Planner stopped after :n entries (too many tool rounds). Re-run if you need more.', ['n' => $created]);
+    }
+
+    /**
+     * Effective per-request cap for this planning session. Prefers the value the
+     * controller resolved from the CP user's role (persisted on the session);
+     * falls back to the configured ceiling for older sessions without it.
+     *
+     * @param  array<string, mixed>  $session
+     */
+    private function resolvePlanCap(array $session): int
+    {
+        $configured = EntryCreationPolicy::configuredMaxPlanEntries();
+
+        $sessionCap = $session['max_plan_entries'] ?? null;
+        if (is_int($sessionCap) || (is_string($sessionCap) && is_numeric($sessionCap))) {
+            return max(1, min($configured, (int) $sessionCap));
+        }
+
+        return $configured;
     }
 
     /**

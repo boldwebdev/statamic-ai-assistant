@@ -21,30 +21,42 @@ class SetHintsController
     }
 
     /**
-     * Return the discovered set list with existing hints.
+     * Return the discovered set + field lists with existing hints.
      */
     public function index(): JsonResponse
     {
         return response()->json([
             'sets' => $this->hints->discoverSets(),
+            'fields' => $this->hints->discoverFields(),
         ]);
     }
 
     /**
-     * Persist the submitted hint map.
+     * Persist the submitted hint maps (block hints and/or field hints).
      */
     public function save(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'hints' => 'present|array',
+            'hints' => 'sometimes|array',
             'hints.*' => 'array',
             'hints.*.ai_description' => 'nullable|string|max:4000',
             'hints.*.when_to_use' => 'nullable|array',
             'hints.*.when_to_use.*' => 'nullable|string|max:500',
+            'field_hints' => 'sometimes|array',
+            'field_hints.*' => 'array',
+            'field_hints.*.ai_description' => 'nullable|string|max:4000',
+            'field_hints.*.when_to_use' => 'nullable|array',
+            'field_hints.*.when_to_use.*' => 'nullable|string|max:500',
         ]);
 
         try {
-            $this->hints->save($data['hints'] ?? []);
+            if ($request->has('hints')) {
+                $this->hints->save($data['hints'] ?? []);
+            }
+
+            if ($request->has('field_hints')) {
+                $this->hints->saveFieldHints($data['field_hints'] ?? []);
+            }
         } catch (\Throwable $e) {
             Log::error('Failed to save set hints', ['error' => $e->getMessage()]);
 
@@ -54,6 +66,7 @@ class SetHintsController
         return response()->json([
             'success' => true,
             'sets' => $this->hints->discoverSets(),
+            'fields' => $this->hints->discoverFields(),
         ]);
     }
 
@@ -65,15 +78,28 @@ class SetHintsController
     {
         $data = $request->validate([
             'handle' => 'required|string|max:200',
+            'kind' => 'sometimes|string|in:set,field',
         ]);
 
-        $context = $this->hints->collectSetContext((string) $data['handle']);
+        $kind = (string) ($data['kind'] ?? 'set');
 
-        if ($context === null) {
-            return response()->json(['error' => __('Block not found in any blueprint.')], 404);
+        if ($kind === 'field') {
+            $context = $this->hints->collectFieldContext((string) $data['handle']);
+
+            if ($context === null) {
+                return response()->json(['error' => __('Field not found in any blueprint.')], 404);
+            }
+
+            $messages = $this->buildFieldGeneratePromptMessages($context);
+        } else {
+            $context = $this->hints->collectSetContext((string) $data['handle']);
+
+            if ($context === null) {
+                return response()->json(['error' => __('Block not found in any blueprint.')], 404);
+            }
+
+            $messages = $this->buildGeneratePromptMessages($context);
         }
-
-        $messages = $this->buildGeneratePromptMessages($context);
 
         try {
             // Lightweight block-hint generation — use the fast model tier.
@@ -195,6 +221,74 @@ class SetHintsController
             ."Block display title: \"{$context['title']}\"\n\n"
             .$instructions
             ."Inner fields:\n{$fieldsBlock}\n\n"
+            ."Used in:\n{$locationBlock}";
+
+        return [
+            ['role' => 'system', 'content' => $system],
+            ['role' => 'user', 'content' => $user],
+        ];
+    }
+
+    /**
+     * @param  array{
+     *   handle: string,
+     *   title: string,
+     *   type: string,
+     *   instructions: string,
+     *   options: array<int, string>,
+     *   character_limit: ?int,
+     *   locations: array<int, array{collection: string, blueprint: string, field: string}>
+     * }  $context
+     * @return array<int, array{role: string, content: string}>
+     */
+    private function buildFieldGeneratePromptMessages(array $context): array
+    {
+        $locationLines = [];
+
+        foreach ($context['locations'] as $loc) {
+            $locationLines[] = '- '.$loc['collection'].' › '.$loc['blueprint'].' › '.$loc['field'];
+        }
+
+        $locationBlock = $locationLines !== [] ? implode("\n", $locationLines) : '(no known locations)';
+
+        $details = [];
+        $details[] = 'Field type: '.$context['type'];
+
+        if ($context['instructions'] !== '') {
+            $details[] = 'Author-provided instructions: '.$context['instructions'];
+        }
+
+        if ($context['options'] !== []) {
+            $details[] = 'Options: '.implode(', ', $context['options']);
+        }
+
+        if ($context['character_limit'] !== null) {
+            $details[] = 'Character limit: '.$context['character_limit'];
+        }
+
+        $system = 'You are helping an editor document a single Statamic CMS blueprint field so an AI content generator writes exactly the right kind of content into it.'
+            ."\n\n"
+            .'Given the field\'s handle, type, and where it is used, produce:'
+            ."\n"
+            .'1. A concise "ai_description" — 1 to 3 sentences explaining what content belongs in this field and how it appears on the page (e.g. "Main page headline rendered large over the hero image"). Infer sensibly from the handle, type, and blueprint context.'
+            ."\n"
+            .'2. A "when_to_use" list — 2 to 5 short WRITING GUIDELINES for this field (ideally 4–12 words each), such as length limits, tone, or structural rules (e.g. "Keep under 60 characters", "One short benefit-driven sentence, no punctuation at the end").'
+            ."\n\n"
+            .'Respond ONLY with a JSON object:'
+            ."\n"
+            .'{"ai_description": "…", "when_to_use": ["…", "…"]}'
+            ."\n\n"
+            .'Rules:'
+            ."\n"
+            .'- No markdown fences, no commentary.'
+            ."\n"
+            .'- Be factual and specific; do not invent rendering details the field name does not imply.'
+            ."\n"
+            .'- Guidelines must be actionable writing rules, not generic platitudes.';
+
+        $user = "Field handle: \"{$context['handle']}\"\n"
+            ."Field display title: \"{$context['title']}\"\n"
+            .implode("\n", $details)."\n\n"
             ."Used in:\n{$locationBlock}";
 
         return [

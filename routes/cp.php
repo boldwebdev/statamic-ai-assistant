@@ -4,7 +4,7 @@ use BoldWeb\StatamicAiAssistant\Controllers\EntryGeneratorController;
 use BoldWeb\StatamicAiAssistant\Controllers\FigmaOAuthController;
 use BoldWeb\StatamicAiAssistant\Controllers\SetHintsController;
 use BoldWeb\StatamicAiAssistant\Controllers\TranslationController;
-use BoldWeb\StatamicAiAssistant\Controllers\WebsiteMigrationController;
+use BoldWeb\StatamicAiAssistant\Controllers\TranslationGlossaryController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('ai-generate')->name('statamic-ai-assistant.generate.')->group(function () {
@@ -37,6 +37,19 @@ Route::prefix('ai-block-hints')->name('statamic-ai-assistant.block-hints.')->gro
     Route::post('/figma/disconnect', [FigmaOAuthController::class, 'disconnect'])->name('figma.disconnect');
 });
 
+Route::prefix('ai-translation-glossary')->name('statamic-ai-assistant.glossary.')->group(function () {
+    Route::get('/', function () {
+        if (! config('statamic-ai-assistant.translations', true)) {
+            abort(404);
+        }
+
+        return view('statamic-ai-assistant::translation-glossary');
+    })->name('page');
+
+    Route::get('/data', [TranslationGlossaryController::class, 'data'])->name('data');
+    Route::post('/save', [TranslationGlossaryController::class, 'save'])->name('save');
+});
+
 Route::prefix('ai-translations')->name('statamic-ai-assistant.')->group(function () {
     Route::get('/', function () {
         if (! config('statamic-ai-assistant.bulk_translations', true)) {
@@ -56,12 +69,4 @@ Route::prefix('ai-translations')->name('statamic-ai-assistant.')->group(function
     Route::get('/collection-entries', [TranslationController::class, 'collectionEntries'])->name('translate.collection-entries');
     Route::get('/navigation-entries', [TranslationController::class, 'navigationEntries'])->name('translate.navigation-entries');
     Route::post('/navigation-sync', [TranslationController::class, 'navigationSync'])->name('translate.navigation-sync');
-});
-
-Route::prefix('ai-migration')->name('statamic-ai-assistant.migration.')->group(function () {
-    Route::post('/discover', [WebsiteMigrationController::class, 'discover'])->name('discover');
-    Route::post('/start', [WebsiteMigrationController::class, 'start'])->name('start');
-    Route::get('/progress/{sessionId}', [WebsiteMigrationController::class, 'progress'])->name('progress');
-    Route::post('/cancel/{sessionId}', [WebsiteMigrationController::class, 'cancel'])->name('cancel');
-    Route::post('/retry/{sessionId}', [WebsiteMigrationController::class, 'retry'])->name('retry');
 });

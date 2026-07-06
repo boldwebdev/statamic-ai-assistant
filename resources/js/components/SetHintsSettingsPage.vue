@@ -14,12 +14,31 @@
           <p class="translation-page__eyebrow">{{ __('BOLD agent') }}</p>
           <h1 class="translation-page__title">{{ __('BOLD agent settings') }}</h1>
           <p class="translation-page__subtitle">
-            {{ __('Tell the AI what each page-builder block is for and when to use it. Hints are passed to the model whenever content is generated.') }}
+            {{ __('Tell the AI what each page-builder block and blueprint field is for and when to use it. Hints are passed to the model whenever content is generated.') }}
           </p>
         </div>
       </div>
       <div class="translation-page__hero-actions">
         <span v-if="dirty" class="sh-dirty-pill">{{ __('Unsaved changes') }}</span>
+        <button
+          v-if="!loading && !loadError"
+          type="button"
+          class="sh-btn sh-btn--ai"
+          :disabled="saving || generatingAll || totalUnconfiguredCount === 0"
+          :title="totalUnconfiguredCount === 0 ? __('Every block and field is already configured.') : __('Draft AI descriptions for all unconfigured blocks and fields')"
+          @click="generateAllUnconfigured"
+        >
+          <svg v-if="generatingAll" class="sh-spinner" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" stroke-width="3" fill="none" stroke-linecap="round" />
+          </svg>
+          <svg v-else class="sh-btn__ai-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3l1.8 4.6L18 9l-4.2 1.6L12 15l-1.8-4.4L6 9l4.2-1.4L12 3z" fill="currentColor" opacity=".9" />
+            <path d="M19 14l.9 2.2L22 17l-2.1.8L19 20l-.9-2.2L16 17l2.1-.8L19 14z" fill="currentColor" opacity=".6" />
+          </svg>
+          <span v-if="generatingAll">{{ __('Drafting :current of :total…', { current: generatingAllProgress.current, total: generatingAllProgress.total }) }}</span>
+          <span v-else>{{ __('AI fill unconfigured') }}</span>
+          <span v-if="!generatingAll && totalUnconfiguredCount > 0" class="sh-btn__count">{{ totalUnconfiguredCount }}</span>
+        </button>
         <button
           type="button"
           class="sh-btn sh-btn--primary"
@@ -132,13 +151,45 @@ STATAMIC_AI_ASSISTANT_FIGMA_OAUTH_CLIENT_SECRET=</pre>
         <button type="button" class="sh-btn" @click="load">{{ __('Retry') }}</button>
       </div>
 
-      <!-- Empty -->
-      <div v-else-if="sets.length === 0" class="sh-state">
-        <p>{{ __('No replicator or components fields were found in any blueprint.') }}</p>
-      </div>
-
       <!-- List -->
       <template v-else>
+        <!-- Blocks / Fields tabs -->
+        <nav class="sh-tabs" role="tablist">
+          <button
+            type="button"
+            class="sh-tab"
+            role="tab"
+            :class="{ 'sh-tab--active': activeTab === 'blocks' }"
+            :aria-selected="activeTab === 'blocks'"
+            @click="activeTab = 'blocks'"
+          >
+            {{ __('Blocks') }}
+            <span class="sh-tab__count">{{ sets.length }}</span>
+          </button>
+          <button
+            type="button"
+            class="sh-tab"
+            role="tab"
+            :class="{ 'sh-tab--active': activeTab === 'fields' }"
+            :aria-selected="activeTab === 'fields'"
+            @click="activeTab = 'fields'"
+          >
+            {{ __('Fields') }}
+            <span class="sh-tab__count">{{ fields.length }}</span>
+          </button>
+        </nav>
+
+        <p v-if="activeTab === 'fields'" class="sh-tab-hint">
+          {{ __('Field hints describe what belongs in a blueprint field (hero title, lead, …) and add writing guidelines like length or tone. A hint applies to every field with that handle, wherever it appears.') }}
+        </p>
+
+        <!-- Empty -->
+        <div v-if="activeRows.length === 0" class="sh-state">
+          <p v-if="activeTab === 'blocks'">{{ __('No replicator or components fields were found in any blueprint.') }}</p>
+          <p v-else>{{ __('No hintable fields were found in any blueprint.') }}</p>
+        </div>
+
+        <template v-else>
         <!-- Toolbar -->
         <div class="sh-toolbar">
           <div class="sh-search">
@@ -150,7 +201,7 @@ STATAMIC_AI_ASSISTANT_FIGMA_OAUTH_CLIENT_SECRET=</pre>
               v-model="search"
               type="search"
               class="sh-search__input"
-              :placeholder="__('Filter blocks by handle, title or location…')"
+              :placeholder="activeTab === 'blocks' ? __('Filter blocks by handle, title or location…') : __('Filter fields by handle, title or location…')"
             />
           </div>
           <button
@@ -173,11 +224,11 @@ STATAMIC_AI_ASSISTANT_FIGMA_OAUTH_CLIENT_SECRET=</pre>
         </div>
 
         <!-- Filtered to nothing -->
-        <div v-if="filteredSets.length === 0" class="sh-state">
+        <div v-if="filteredRows.length === 0" class="sh-state">
           <p v-if="onlyUnconfigured && unconfiguredCount === 0">
-            {{ __('Every block has a description and tips. Nice work.') }}
+            {{ activeTab === 'blocks' ? __('Every block has a description and tips. Nice work.') : __('Every field has a description and guidelines. Nice work.') }}
           </p>
-          <p v-else>{{ __('No blocks match the current filters.') }}</p>
+          <p v-else>{{ activeTab === 'blocks' ? __('No blocks match the current filters.') : __('No fields match the current filters.') }}</p>
           <button
             v-if="onlyUnconfigured || search"
             type="button"
@@ -188,20 +239,21 @@ STATAMIC_AI_ASSISTANT_FIGMA_OAUTH_CLIENT_SECRET=</pre>
           </button>
         </div>
 
-        <!-- Block cards -->
+        <!-- Cards -->
         <div v-else class="sh-cards">
           <article
-            v-for="set in filteredSets"
-            :key="set.handle"
-            :data-handle="set.handle"
+            v-for="row in filteredRows"
+            :key="activeTab + ':' + row.handle"
+            :data-handle="row.handle"
             class="sh-card"
-            :class="{ 'sh-card--configured': isConfigured(set.handle) }"
+            :class="{ 'sh-card--configured': isConfigured(row.handle) }"
           >
             <header class="sh-card__head">
               <div class="sh-card__title">
-                <h2>{{ set.title }}</h2>
-                <code class="sh-card__handle">{{ set.handle }}</code>
-                <span v-if="isConfigured(set.handle)" class="sh-card__badge">
+                <h2>{{ row.title }}</h2>
+                <code class="sh-card__handle">{{ row.handle }}</code>
+                <code v-if="activeTab === 'fields' && row.type" class="sh-card__handle sh-card__handle--type">{{ row.type }}</code>
+                <span v-if="isConfigured(row.handle)" class="sh-card__badge">
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M5 12l4 4 10-10" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
                   </svg>
@@ -213,18 +265,18 @@ STATAMIC_AI_ASSISTANT_FIGMA_OAUTH_CLIENT_SECRET=</pre>
                 <button
                   type="button"
                   class="sh-ai-fill"
-                  :disabled="!!generating[set.handle]"
-                  :title="__('Draft a description and tips based on this block\'s fields')"
-                  @click="generateForSet(set.handle)"
+                  :disabled="!!generating[row.handle]"
+                  :title="activeTab === 'blocks' ? __('Draft a description and tips based on this block\'s fields') : __('Draft a description and writing guidelines for this field')"
+                  @click="generateForRow(row.handle)"
                 >
-                  <svg v-if="!generating[set.handle]" class="sh-ai-fill__icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <svg v-if="!generating[row.handle]" class="sh-ai-fill__icon" viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M12 3l1.8 4.6L18 9l-4.2 1.6L12 15l-1.8-4.4L6 9l4.2-1.4L12 3z" fill="currentColor" opacity=".9" />
                     <path d="M19 14l.9 2.2L22 17l-2.1.8L19 20l-.9-2.2L16 17l2.1-.8L19 14z" fill="currentColor" opacity=".6" />
                   </svg>
                   <svg v-else class="sh-ai-fill__icon sh-ai-fill__icon--spin" viewBox="0 0 24 24" aria-hidden="true">
                     <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" stroke-dasharray="40" stroke-dashoffset="20" />
                   </svg>
-                  <span>{{ generating[set.handle] ? __('Drafting…') : __('AI fill') }}</span>
+                  <span>{{ generating[row.handle] ? __('Drafting…') : __('AI fill') }}</span>
                 </button>
               </div>
             </header>
@@ -233,27 +285,29 @@ STATAMIC_AI_ASSISTANT_FIGMA_OAUTH_CLIENT_SECRET=</pre>
             <div class="sh-field">
               <label class="sh-field__label">
                 {{ __('AI description') }}
-                <span class="sh-field__hint">{{ __('What is this block? What does it look like?') }}</span>
+                <span class="sh-field__hint">{{ activeTab === 'blocks' ? __('What is this block? What does it look like?') : __('What content belongs in this field? How is it shown?') }}</span>
               </label>
               <textarea
-                v-model="draft[set.handle].ai_description"
+                v-model="currentDraft[row.handle].ai_description"
                 class="sh-textarea"
                 rows="3"
-                :placeholder="__('e.g. Large, visually prominent introductory paragraph that appears immediately after the hero. Provides context. 2–4 sentences, 100–300 words.')"
+                :placeholder="activeTab === 'blocks'
+                  ? __('e.g. Large, visually prominent introductory paragraph that appears immediately after the hero. Provides context. 2–4 sentences, 100–300 words.')
+                  : __('e.g. Main page headline shown large over the hero image. One short, benefit-driven sentence.')"
                 @input="markDirty"
               ></textarea>
             </div>
 
-            <!-- When to use -->
+            <!-- When to use / writing guidelines -->
             <div class="sh-field">
               <label class="sh-field__label">
-                {{ __('When to use') }}
-                <span class="sh-field__hint">{{ __('Short trigger phrases the AI should match against.') }}</span>
+                {{ activeTab === 'blocks' ? __('When to use') : __('Writing guidelines') }}
+                <span class="sh-field__hint">{{ activeTab === 'blocks' ? __('Short trigger phrases the AI should match against.') : __('Concrete rules: length, tone, structure.') }}</span>
               </label>
 
               <ul class="sh-tips">
                 <li
-                  v-for="(tip, idx) in draft[set.handle].when_to_use"
+                  v-for="(tip, idx) in currentDraft[row.handle].when_to_use"
                   :key="idx"
                   class="sh-tip"
                 >
@@ -262,16 +316,16 @@ STATAMIC_AI_ASSISTANT_FIGMA_OAUTH_CLIENT_SECRET=</pre>
                     type="text"
                     class="sh-tip__input"
                     :value="tip"
-                    :placeholder="__('e.g. Executive summary or overview')"
-                    @input="updateTip(set.handle, idx, $event.target.value)"
-                    @keydown.enter.prevent="handleTipEnter(set.handle, idx)"
-                    @keydown.backspace="handleTipBackspace(set.handle, idx, $event)"
+                    :placeholder="activeTab === 'blocks' ? __('e.g. Executive summary or overview') : __('e.g. Keep under 60 characters')"
+                    @input="updateTip(row.handle, idx, $event.target.value)"
+                    @keydown.enter.prevent="handleTipEnter(row.handle, idx)"
+                    @keydown.backspace="handleTipBackspace(row.handle, idx, $event)"
                   />
                   <button
                     type="button"
                     class="sh-tip__remove"
                     :aria-label="__('Remove tip')"
-                    @click="removeTip(set.handle, idx)"
+                    @click="removeTip(row.handle, idx)"
                   >
                     <svg viewBox="0 0 24 24" aria-hidden="true">
                       <path d="M6 6l12 12M18 6l-12 12" fill="none" stroke-width="2" stroke-linecap="round" />
@@ -283,7 +337,7 @@ STATAMIC_AI_ASSISTANT_FIGMA_OAUTH_CLIENT_SECRET=</pre>
               <button
                 type="button"
                 class="sh-add-tip"
-                @click="addTip(set.handle)"
+                @click="addTip(row.handle)"
               >
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12 5v14M5 12h14" fill="none" stroke-width="2" stroke-linecap="round" />
@@ -293,6 +347,7 @@ STATAMIC_AI_ASSISTANT_FIGMA_OAUTH_CLIENT_SECRET=</pre>
             </div>
           </article>
         </div>
+        </template>
       </template>
     </div>
   </div>
@@ -305,16 +360,22 @@ export default {
       loading: true,
       saving: false,
       loadError: null,
+      activeTab: "blocks",
       sets: [],
+      fields: [],
       // Shape: { [handle]: { ai_description: string, when_to_use: string[] } }
       draft: {},
       originalDraft: {},
+      fieldDraft: {},
+      originalFieldDraft: {},
       dirty: false,
       search: "",
       // When true, only blocks without ai_description AND without any when_to_use tip are shown.
       onlyUnconfigured: false,
       // Per-handle AI-fill state: { [handle]: boolean }
       generating: {},
+      generatingAll: false,
+      generatingAllProgress: { current: 0, total: 0 },
       figmaLoading: true,
       figmaError: null,
       figmaStatus: null,
@@ -332,21 +393,37 @@ export default {
       return s || "—";
     },
 
-    unconfiguredCount() {
-      return this.sets.filter((s) => !this.isConfigured(s.handle)).length;
+    activeRows() {
+      return this.activeTab === "blocks" ? this.sets : this.fields;
     },
 
-    filteredSets() {
+    currentDraft() {
+      return this.activeTab === "blocks" ? this.draft : this.fieldDraft;
+    },
+
+    unconfiguredCount() {
+      return this.activeRows.filter((s) => !this.isConfigured(s.handle)).length;
+    },
+
+    totalUnconfiguredCount() {
+      const blocks = this.sets.filter((s) => !this.isConfiguredIn(this.draft, s.handle)).length;
+      const fields = this.fields.filter((f) => !this.isConfiguredIn(this.fieldDraft, f.handle)).length;
+
+      return blocks + fields;
+    },
+
+    filteredRows() {
       const q = this.search.trim().toLowerCase();
       const onlyUnconfigured = this.onlyUnconfigured;
 
-      return this.sets.filter((s) => {
+      return this.activeRows.filter((s) => {
         if (onlyUnconfigured && this.isConfigured(s.handle)) return false;
 
         if (!q) return true;
 
         if (s.handle.toLowerCase().includes(q)) return true;
         if ((s.title || "").toLowerCase().includes(q)) return true;
+        if ((s.type || "").toLowerCase().includes(q)) return true;
         return (s.locations || []).some((l) =>
           [l.collection, l.blueprint, l.field]
             .filter(Boolean)
@@ -356,16 +433,23 @@ export default {
     },
 
     countLabel() {
-      const total = this.sets.length;
-      const shown = this.filteredSets.length;
-      const configured = this.sets.filter((s) => this.isConfigured(s.handle)).length;
+      const total = this.activeRows.length;
+      const shown = this.filteredRows.length;
+      const configured = this.activeRows.filter((s) => this.isConfigured(s.handle)).length;
       if (shown === total) {
-        return this.__n(
-          ':configured of :total block configured',
-          ':configured of :total blocks configured',
-          total,
-          { configured, total }
-        );
+        return this.activeTab === "blocks"
+          ? this.__n(
+              ':configured of :total block configured',
+              ':configured of :total blocks configured',
+              total,
+              { configured, total }
+            )
+          : this.__n(
+              ':configured of :total field configured',
+              ':configured of :total fields configured',
+              total,
+              { configured, total }
+            );
       }
       return this.__(':shown of :total shown', { shown, total });
     },
@@ -429,7 +513,7 @@ export default {
       this.loadError = null;
       try {
         const { data } = await this.$axios.get("/cp/ai-block-hints/list");
-        this.applyServerState(data.sets || []);
+        this.applyServerState(data.sets || [], data.fields || []);
       } catch (e) {
         this.loadError =
           (e && e.response && e.response.data && e.response.data.error) ||
@@ -439,18 +523,25 @@ export default {
       }
     },
 
-    applyServerState(sets) {
+    applyServerState(sets, fields) {
       this.sets = sets;
+      this.fields = fields;
+      this.draft = this.buildDraft(sets);
+      this.fieldDraft = this.buildDraft(fields);
+      this.originalDraft = this.cloneDraft(this.draft);
+      this.originalFieldDraft = this.cloneDraft(this.fieldDraft);
+      this.dirty = false;
+    },
+
+    buildDraft(rows) {
       const draft = {};
-      for (const s of sets) {
+      for (const s of rows) {
         draft[s.handle] = {
           ai_description: s.ai_description || "",
           when_to_use: Array.isArray(s.when_to_use) ? [...s.when_to_use] : [],
         };
       }
-      this.draft = draft;
-      this.originalDraft = this.cloneDraft(draft);
-      this.dirty = false;
+      return draft;
     },
 
     cloneDraft(draft) {
@@ -465,7 +556,11 @@ export default {
     },
 
     isConfigured(handle) {
-      const d = this.draft[handle];
+      return this.isConfiguredIn(this.currentDraft, handle);
+    },
+
+    isConfiguredIn(draft, handle) {
+      const d = draft[handle];
       if (!d) return false;
       if ((d.ai_description || "").trim() !== "") return true;
       return (d.when_to_use || []).some((t) => (t || "").trim() !== "");
@@ -476,13 +571,17 @@ export default {
     },
 
     computeDirty() {
-      const keys = new Set([
-        ...Object.keys(this.draft),
-        ...Object.keys(this.originalDraft),
-      ]);
+      return (
+        this.draftsDiffer(this.draft, this.originalDraft) ||
+        this.draftsDiffer(this.fieldDraft, this.originalFieldDraft)
+      );
+    },
+
+    draftsDiffer(draft, original) {
+      const keys = new Set([...Object.keys(draft), ...Object.keys(original)]);
       for (const k of keys) {
-        const a = this.draft[k] || { ai_description: "", when_to_use: [] };
-        const b = this.originalDraft[k] || { ai_description: "", when_to_use: [] };
+        const a = draft[k] || { ai_description: "", when_to_use: [] };
+        const b = original[k] || { ai_description: "", when_to_use: [] };
         if ((a.ai_description || "").trim() !== (b.ai_description || "").trim()) {
           return true;
         }
@@ -497,8 +596,8 @@ export default {
     },
 
     addTip(handle) {
-      if (!this.draft[handle]) return;
-      this.draft[handle].when_to_use.push("");
+      if (!this.currentDraft[handle]) return;
+      this.currentDraft[handle].when_to_use.push("");
       this.markDirty();
       this.$nextTick(() => {
         // Focus the new input
@@ -511,19 +610,19 @@ export default {
     },
 
     updateTip(handle, idx, value) {
-      if (!this.draft[handle]) return;
-      this.draft[handle].when_to_use.splice(idx, 1, value);
+      if (!this.currentDraft[handle]) return;
+      this.currentDraft[handle].when_to_use.splice(idx, 1, value);
       this.markDirty();
     },
 
     removeTip(handle, idx) {
-      if (!this.draft[handle]) return;
-      this.draft[handle].when_to_use.splice(idx, 1);
+      if (!this.currentDraft[handle]) return;
+      this.currentDraft[handle].when_to_use.splice(idx, 1);
       this.markDirty();
     },
 
     handleTipEnter(handle, idx) {
-      const list = this.draft[handle].when_to_use;
+      const list = this.currentDraft[handle].when_to_use;
       // Only add a new tip if the current one has content
       if ((list[idx] || "").trim() === "") return;
       list.splice(idx + 1, 0, "");
@@ -544,7 +643,7 @@ export default {
     },
 
     handleTipBackspace(handle, idx, event) {
-      const list = this.draft[handle].when_to_use;
+      const list = this.currentDraft[handle].when_to_use;
       // Remove the tip if it's empty and user presses backspace
       if ((list[idx] || "") === "" && list.length > 0) {
         event.preventDefault();
@@ -553,27 +652,32 @@ export default {
       }
     },
 
+    serializeDraft(draft) {
+      const payload = {};
+      for (const handle of Object.keys(draft)) {
+        const d = draft[handle];
+        const desc = (d.ai_description || "").trim();
+        const tips = (d.when_to_use || [])
+          .map((t) => (t || "").trim())
+          .filter(Boolean);
+        // Always send an entry so the server can remove empty ones
+        payload[handle] = {
+          ai_description: desc,
+          when_to_use: tips,
+        };
+      }
+      return payload;
+    },
+
     async save() {
       if (this.saving) return;
       this.saving = true;
       try {
-        const payload = {};
-        for (const handle of Object.keys(this.draft)) {
-          const d = this.draft[handle];
-          const desc = (d.ai_description || "").trim();
-          const tips = (d.when_to_use || [])
-            .map((t) => (t || "").trim())
-            .filter(Boolean);
-          // Always send an entry so the server can remove empty ones
-          payload[handle] = {
-            ai_description: desc,
-            when_to_use: tips,
-          };
-        }
         const { data } = await this.$axios.post("/cp/ai-block-hints/save", {
-          hints: payload,
+          hints: this.serializeDraft(this.draft),
+          field_hints: this.serializeDraft(this.fieldDraft),
         });
-        this.applyServerState(data.sets || this.sets);
+        this.applyServerState(data.sets || this.sets, data.fields || this.fields);
         this.$toast.success(this.__("BOLD agent settings saved."));
       } catch (e) {
         const msg =
@@ -585,11 +689,14 @@ export default {
       }
     },
 
-    async generateForSet(handle) {
+    async generateForRow(handle) {
       if (!handle || this.generating[handle]) return;
 
+      const draft = this.currentDraft;
+      const kind = this.activeTab === "blocks" ? "set" : "field";
+
       // Confirm overwrite if there's existing content the user might lose.
-      const d = this.draft[handle];
+      const d = draft[handle];
       const hasExisting =
         d &&
         ((d.ai_description || "").trim() !== "" ||
@@ -605,22 +712,11 @@ export default {
       this.generating = { ...this.generating, [handle]: true };
 
       try {
-        const { data } = await this.$axios.post(
-          "/cp/ai-block-hints/generate",
-          { handle }
-        );
-
-        if (!this.draft[handle]) {
-          this.draft[handle] = { ai_description: "", when_to_use: [] };
+        const applied = await this.fetchGeneratedHint(handle, kind, draft);
+        if (applied) {
+          this.markDirty();
+          this.$toast.success(this.__("AI draft applied. Review and save when ready."));
         }
-
-        this.draft[handle].ai_description = data.ai_description || "";
-        this.draft[handle].when_to_use = Array.isArray(data.when_to_use)
-          ? [...data.when_to_use]
-          : [];
-
-        this.markDirty();
-        this.$toast.success(this.__("AI draft applied. Review and save when ready."));
       } catch (e) {
         const msg =
           (e && e.response && e.response.data && e.response.data.error) ||
@@ -628,6 +724,97 @@ export default {
         this.$toast.error(msg);
       } finally {
         this.generating = { ...this.generating, [handle]: false };
+      }
+    },
+
+    async fetchGeneratedHint(handle, kind, draft) {
+      const { data } = await this.$axios.post("/cp/ai-block-hints/generate", {
+        handle,
+        kind,
+      });
+
+      if (!draft[handle]) {
+        draft[handle] = { ai_description: "", when_to_use: [] };
+      }
+
+      draft[handle].ai_description = data.ai_description || "";
+      draft[handle].when_to_use = Array.isArray(data.when_to_use)
+        ? [...data.when_to_use]
+        : [];
+
+      return true;
+    },
+
+    async generateAllUnconfigured() {
+      if (this.generatingAll || this.totalUnconfiguredCount === 0) return;
+
+      const jobs = [
+        ...this.sets
+          .filter((s) => !this.isConfiguredIn(this.draft, s.handle))
+          .map((s) => ({ kind: "set", handle: s.handle, draft: this.draft })),
+        ...this.fields
+          .filter((f) => !this.isConfiguredIn(this.fieldDraft, f.handle))
+          .map((f) => ({ kind: "field", handle: f.handle, draft: this.fieldDraft })),
+      ];
+
+      const ok = window.confirm(
+        this.__n(
+          "Draft AI descriptions for :count unconfigured block?",
+          "Draft AI descriptions for :count unconfigured blocks and fields?",
+          jobs.length,
+          { count: jobs.length }
+        )
+      );
+      if (!ok) return;
+
+      this.generatingAll = true;
+      this.generatingAllProgress = { current: 0, total: jobs.length };
+
+      let succeeded = 0;
+      let failed = 0;
+
+      for (const job of jobs) {
+        this.generatingAllProgress = {
+          current: this.generatingAllProgress.current + 1,
+          total: jobs.length,
+        };
+        this.generating = { ...this.generating, [job.handle]: true };
+
+        try {
+          await this.fetchGeneratedHint(job.handle, job.kind, job.draft);
+          succeeded++;
+        } catch {
+          failed++;
+        } finally {
+          this.generating = { ...this.generating, [job.handle]: false };
+        }
+      }
+
+      this.generatingAll = false;
+      this.generatingAllProgress = { current: 0, total: 0 };
+
+      if (succeeded > 0) {
+        this.markDirty();
+      }
+
+      if (failed === 0 && succeeded > 0) {
+        this.$toast.success(
+          this.__n(
+            "Filled :count hint with an AI draft. Review and save when ready.",
+            "Filled :count hints with AI drafts. Review and save when ready.",
+            succeeded,
+            { count: succeeded }
+          )
+        );
+      } else if (succeeded > 0 && failed > 0) {
+        this.$toast.error(
+          this.__(":succeeded filled, :failed failed. Review drafts and retry failed items.", {
+            succeeded,
+            failed,
+          })
+        );
+      } else if (failed > 0) {
+        this.$toast.error(this.__("Could not generate hints. Please try again."));
       }
     },
 
@@ -689,6 +876,44 @@ export default {
   border-color: var(--tp-border);
   color: var(--tp-text-muted);
   opacity: 0.7;
+}
+.sh-btn--ai {
+  border-color: var(--tp-accent);
+  color: var(--tp-accent);
+  background: var(--tp-accent-soft, var(--tp-surface));
+}
+.sh-btn--ai:hover:not(:disabled) {
+  background: var(--tp-accent-soft, var(--tp-surface-muted));
+  border-color: var(--tp-accent-bright, var(--tp-accent));
+}
+.sh-btn--ai:disabled {
+  opacity: 0.55;
+}
+.sh-btn__ai-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.sh-btn__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.08);
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+}
+.sh-btn--ai .sh-btn__count {
+  background: var(--tp-accent);
+  color: #fff;
+}
+.sh-btn--ai:disabled .sh-btn__count {
+  background: rgba(0, 0, 0, 0.08);
+  color: inherit;
 }
 
 .sh-spinner {
@@ -860,6 +1085,66 @@ a.sh-btn {
   border: 3px solid var(--tp-border);
   border-top-color: var(--tp-accent);
   animation: sh-spin 0.9s linear infinite;
+}
+
+.sh-tabs {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  margin-bottom: 0.9rem;
+  border: 1px solid var(--tp-border);
+  border-radius: 10px;
+  background: var(--tp-surface-muted);
+}
+.sh-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 0.95rem;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--tp-text-muted);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  line-height: 1;
+  transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+.sh-tab:hover {
+  color: var(--tp-text);
+}
+.sh-tab--active {
+  background: var(--tp-surface);
+  color: var(--tp-text);
+  box-shadow: var(--tp-shadow);
+  font-weight: 600;
+}
+.sh-tab__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.08);
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.sh-tab-hint {
+  font-size: 0.8125rem;
+  color: var(--tp-text-muted);
+  line-height: 1.5;
+  margin: 0 0 1rem;
+  max-width: 72ch;
+}
+
+.sh-card__handle--type {
+  background: var(--tp-accent-soft, var(--tp-surface-muted));
+  color: var(--tp-accent, var(--tp-text-muted));
 }
 
 .sh-toolbar {

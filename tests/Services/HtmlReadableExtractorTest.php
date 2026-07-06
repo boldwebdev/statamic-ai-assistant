@@ -101,4 +101,34 @@ class HtmlReadableExtractorTest extends TestCase
         $this->assertSame('', $this->extractor->extract('', HtmlReadableExtractor::SCOPE_MAIN));
         $this->assertSame('', $this->extractor->extract('   ', HtmlReadableExtractor::SCOPE_MAIN));
     }
+
+    public function test_extract_readable_surfaces_the_page_h1_as_headline(): void
+    {
+        $html = "<html><body><main><article><h1>  Oldtimertreff\n  im Hof </h1><p>Von April bis September trifft man sich im Hof zum Fachsimpeln und Geniessen.</p></article></main></body></html>";
+
+        $result = $this->extractor->extractReadable($html, HtmlReadableExtractor::SCOPE_MAIN);
+
+        $this->assertSame('Oldtimertreff im Hof', $result['headline']);
+        $this->assertStringContainsString('Von April bis September', $result['markdown']);
+    }
+
+    public function test_extract_readable_finds_h1_outside_main_when_landmark_has_none(): void
+    {
+        // The <main> body qualifies as the content landmark but has no heading of
+        // its own; the page H1 lives in the header. Fall back to the body's h1.
+        $html = '<html><body><header><h1>Real Page Heading</h1></header><main><p>A sufficiently long article body so the main landmark is trusted as the real readable content here.</p></main></body></html>';
+
+        $result = $this->extractor->extractReadable($html, HtmlReadableExtractor::SCOPE_MAIN);
+
+        $this->assertSame('Real Page Heading', $result['headline']);
+    }
+
+    public function test_extract_readable_returns_null_headline_when_no_h1(): void
+    {
+        $html = '<html><body><main><h2>Only a subheading</h2><p>Body content with no level-one heading anywhere on the page at all.</p></main></body></html>';
+
+        $result = $this->extractor->extractReadable($html, HtmlReadableExtractor::SCOPE_MAIN);
+
+        $this->assertNull($result['headline']);
+    }
 }

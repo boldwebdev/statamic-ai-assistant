@@ -7,11 +7,13 @@ use Statamic\Facades\Collection;
 use Statamic\Facades\YAML;
 
 /**
- * Stores and retrieves BOLD agent settings (per-set hints) for replicator / components sets.
+ * Stores and retrieves BOLD agent settings for replicator / components sets
+ * (block hints) and for regular blueprint fields (field hints — hero, lead, …).
  *
- * For each set handle the author can configure:
- *   - ai_description : one-paragraph description of what the block is
+ * For each set or field handle the author can configure:
+ *   - ai_description : one-paragraph description of what the block/field is
  *   - when_to_use    : array of short trigger phrases describing ideal usage
+ *     (for fields these act as writing guidelines, e.g. "max 60 characters")
  *
  * Both are optional. When absent, the entry is omitted from the LLM
  * catalog and the previous behaviour is preserved.
@@ -20,13 +22,18 @@ use Statamic\Facades\YAML;
  * content/statamic-ai-assistant/set-hints.yaml). Legacy storage path is
  * migrated automatically on first read when the configured file is missing.
  *
- * File shape (new):
+ * File shape:
  *   hints:
  *     hero:
  *       ai_description: "Large, visually prominent opener …"
  *       when_to_use:
  *         - "Page introduction immediately after hero"
  *         - "Executive summary"
+ *   field_hints:
+ *     hero_title:
+ *       ai_description: "Main page headline shown over the hero image."
+ *       when_to_use:
+ *         - "Keep under 60 characters"
  *
  * File shape (legacy, still parsed):
  *   hints:
@@ -34,8 +41,20 @@ use Statamic\Facades\YAML;
  */
 class SetHintsService
 {
+    /**
+     * Field types that never receive field hints: purely visual/config types,
+     * plus replicator/components which are covered by block hints instead.
+     */
+    private const FIELD_HINT_SKIP_TYPES = [
+        'section', 'color', 'hidden', 'spacer', 'html', 'revealer',
+        'replicator', 'components', 'assets', 'section_break',
+    ];
+
     /** @var array<string, array{ai_description: string, when_to_use: array<int, string>}>|null */
     private ?array $cache = null;
+
+    /** @var array<string, array{ai_description: string, when_to_use: array<int, string>}>|null */
+    private ?array $fieldCache = null;
 
     /**
      * Absolute path to the YAML file storing hints.
@@ -121,27 +140,46 @@ class SetHintsService
             return $this->cache;
         }
 
-        $this->migrateLegacyIfNeeded();
+        return $this->cache = $this->parseSection('hints');
+    }
 
-        $path = $this->storagePath();
-
-        if (! is_file($path)) {
-            return $this->cache = [];
+    /**
+     * All saved field hints, keyed by field handle.
+     *
+     * @return array<string, array{ai_description: string, when_to_use: array<int, string>}>
+     */
+    public function allFieldHints(): array
+    {
+        if ($this->fieldCache !== null) {
+            return $this->fieldCache;
         }
 
-        try {
-            $raw = (string) file_get_contents($path);
-            $parsed = $raw !== '' ? YAML::parse($raw) : [];
-        } catch (\Throwable $e) {
-            Log::warning('Failed to parse set-hints.yaml', ['error' => $e->getMessage()]);
+        return $this->fieldCache = $this->parseSection('field_hints');
+    }
 
-            return $this->cache = [];
-        }
+    /**
+     * Return the hint structure for a single field handle (or null when none set).
+     *
+     * @return array{ai_description: string, when_to_use: array<int, string>}|null
+     */
+    public function forField(string $fieldHandle): ?array
+    {
+        return $this->allFieldHints()[$fieldHandle] ?? null;
+    }
+
+    /**
+     * Parse one root key of the storage file into normalized hint entries.
+     *
+     * @return array<string, array{ai_description: string, when_to_use: array<int, string>}>
+     */
+    private function parseSection(string $rootKey): array
+    {
+        $parsed = $this->readFile();
 
         $hints = [];
 
-        if (is_array($parsed) && isset($parsed['hints']) && is_array($parsed['hints'])) {
-            foreach ($parsed['hints'] as $handle => $value) {
+        if (isset($parsed[$rootKey]) && is_array($parsed[$rootKey])) {
+            foreach ($parsed[$rootKey] as $handle => $value) {
                 if (! is_string($handle) || $handle === '') {
                     continue;
                 }
@@ -154,7 +192,32 @@ class SetHintsService
             }
         }
 
-        return $this->cache = $hints;
+        return $hints;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function readFile(): array
+    {
+        $this->migrateLegacyIfNeeded();
+
+        $path = $this->storagePath();
+
+        if (! is_file($path)) {
+            return [];
+        }
+
+        try {
+            $raw = (string) file_get_contents($path);
+            $parsed = $raw !== '' ? YAML::parse($raw) : [];
+        } catch (\Throwable $e) {
+            Log::warning('Failed to parse set-hints.yaml', ['error' => $e->getMessage()]);
+
+            return [];
+        }
+
+        return is_array($parsed) ? $parsed : [];
     }
 
     /**
@@ -178,6 +241,27 @@ class SetHintsService
      */
     public function save(array $hints): void
     {
+        $this->cache = $this->writeSection('hints', $hints);
+    }
+
+    /**
+     * Persist the full field-hint map (same normalization as set hints).
+     *
+     * @param  array<string, mixed>  $hints
+     */
+    public function saveFieldHints(array $hints): void
+    {
+        $this->fieldCache = $this->writeSection('field_hints', $hints);
+    }
+
+    /**
+     * Normalize + write one root key while preserving the other sections of the file.
+     *
+     * @param  array<string, mixed>  $hints
+     * @return array<string, array{ai_description: string, when_to_use: array<int, string>}>
+     */
+    private function writeSection(string $rootKey, array $hints): array
+    {
         $clean = [];
 
         foreach ($hints as $handle => $value) {
@@ -194,7 +278,12 @@ class SetHintsService
 
         ksort($clean);
 
-        $this->migrateLegacyIfNeeded();
+        $document = $this->readFile();
+        $document[$rootKey] = $clean;
+
+        if ($clean === []) {
+            unset($document[$rootKey]);
+        }
 
         $path = $this->storagePath();
         $dir = dirname($path);
@@ -203,9 +292,9 @@ class SetHintsService
             mkdir($dir, 0775, true);
         }
 
-        file_put_contents($path, YAML::dump(['hints' => $clean]));
+        file_put_contents($path, YAML::dump($document));
 
-        $this->cache = $clean;
+        return $clean;
     }
 
     /**
@@ -263,6 +352,201 @@ class SetHintsService
         usort($rows, fn ($a, $b) => strcasecmp($a['handle'], $b['handle']));
 
         return $rows;
+    }
+
+    /**
+     * Enumerate every hintable blueprint field (top level + inside groups and
+     * grids — not inside replicator/components sets, those are covered by
+     * block hints) across all collection blueprints, grouped by field handle,
+     * and attach any saved field hint.
+     *
+     * @return array<int, array{
+     *   handle: string,
+     *   title: string,
+     *   type: string,
+     *   ai_description: string,
+     *   when_to_use: array<int, string>,
+     *   locations: array<int, array{collection: string, blueprint: string, field: string}>
+     * }>
+     */
+    public function discoverFields(): array
+    {
+        $hints = $this->allFieldHints();
+        $fields = [];
+
+        foreach (Collection::all() as $collection) {
+            $collectionHandle = (string) $collection->handle();
+            $collectionTitle = (string) $collection->title();
+
+            foreach ($collection->entryBlueprints()->reject->hidden() as $blueprint) {
+                $blueprintHandle = (string) $blueprint->handle();
+                $blueprintTitle = (string) $blueprint->title();
+
+                foreach ($blueprint->fields()->all() as $field) {
+                    $this->collectHintableField(
+                        $field,
+                        $collectionHandle,
+                        $collectionTitle,
+                        $blueprintHandle,
+                        $blueprintTitle,
+                        '',
+                        $fields
+                    );
+                }
+            }
+        }
+
+        $rows = [];
+
+        foreach ($fields as $handle => $meta) {
+            $existing = $hints[$handle] ?? ['ai_description' => '', 'when_to_use' => []];
+
+            $rows[] = [
+                'handle' => $handle,
+                'title' => $meta['title'],
+                'type' => $meta['type'],
+                'ai_description' => $existing['ai_description'],
+                'when_to_use' => $existing['when_to_use'],
+                'locations' => array_values($meta['locations']),
+            ];
+        }
+
+        usort($rows, fn ($a, $b) => strcasecmp($a['handle'], $b['handle']));
+
+        return $rows;
+    }
+
+    /**
+     * Recursive helper for discoverFields — records hintable fields and walks
+     * into group/grid children (skipping replicator/components sets).
+     *
+     * @param  array<string, array{title: string, type: string, locations: array<string, array{collection: string, blueprint: string, field: string}>}>  $fields
+     */
+    private function collectHintableField(
+        \Statamic\Fields\Field $field,
+        string $collectionHandle,
+        string $collectionTitle,
+        string $blueprintHandle,
+        string $blueprintTitle,
+        string $parentLabel,
+        array &$fields,
+    ): void {
+        $type = $field->type();
+
+        if (in_array($type, self::FIELD_HINT_SKIP_TYPES, true)) {
+            return;
+        }
+
+        $handle = (string) $field->handle();
+
+        if ($handle === '') {
+            return;
+        }
+
+        $display = (string) ($field->display() ?: \Illuminate\Support\Str::headline(str_replace('_', ' ', $handle)));
+        $fieldLabel = $parentLabel !== '' ? $parentLabel.' › '.$display : $display;
+
+        if (! isset($fields[$handle])) {
+            $fields[$handle] = [
+                'title' => $display,
+                'type' => $type,
+                'locations' => [],
+            ];
+        }
+
+        $locationKey = $collectionHandle.'::'.$blueprintHandle.'::'.$fieldLabel;
+        $fields[$handle]['locations'][$locationKey] = [
+            'collection' => $collectionTitle !== '' ? $collectionTitle : $collectionHandle,
+            'blueprint' => $blueprintTitle !== '' ? $blueprintTitle : $blueprintHandle,
+            'field' => $fieldLabel,
+        ];
+
+        if (in_array($type, ['group', 'grid'], true)) {
+            try {
+                $children = $field->fieldtype()->fields();
+            } catch (\Throwable) {
+                return;
+            }
+
+            foreach ($children->all() as $child) {
+                $this->collectHintableField(
+                    $child,
+                    $collectionHandle,
+                    $collectionTitle,
+                    $blueprintHandle,
+                    $blueprintTitle,
+                    $fieldLabel,
+                    $fields
+                );
+            }
+        }
+    }
+
+    /**
+     * Inspect a single field handle across all blueprints and gather what the
+     * LLM needs to suggest a description and writing guidelines for it.
+     *
+     * @return array{
+     *   handle: string,
+     *   title: string,
+     *   type: string,
+     *   instructions: string,
+     *   options: array<int, string>,
+     *   character_limit: ?int,
+     *   locations: array<int, array{collection: string, blueprint: string, field: string}>
+     * }|null
+     */
+    public function collectFieldContext(string $fieldHandle): ?array
+    {
+        if ($fieldHandle === '') {
+            return null;
+        }
+
+        $found = null;
+
+        foreach ($this->discoverFields() as $row) {
+            if ($row['handle'] === $fieldHandle) {
+                $found = $row;
+                break;
+            }
+        }
+
+        if ($found === null) {
+            return null;
+        }
+
+        // Sample config details (instructions, options, character limit) from
+        // the first blueprint that carries the field.
+        $instructions = '';
+        $options = [];
+        $characterLimit = null;
+
+        foreach (Collection::all() as $collection) {
+            foreach ($collection->entryBlueprints()->reject->hidden() as $blueprint) {
+                $field = $blueprint->fields()->all()->get($fieldHandle);
+
+                if ($field === null) {
+                    continue;
+                }
+
+                $instructions = trim((string) ($field->instructions() ?? ''));
+                $options = $this->extractFieldOptions($field);
+                $limit = $field->get('character_limit');
+                $characterLimit = is_numeric($limit) ? (int) $limit : null;
+
+                break 2;
+            }
+        }
+
+        return [
+            'handle' => $found['handle'],
+            'title' => $found['title'],
+            'type' => $found['type'],
+            'instructions' => $instructions,
+            'options' => $options,
+            'character_limit' => $characterLimit,
+            'locations' => $found['locations'],
+        ];
     }
 
     /**

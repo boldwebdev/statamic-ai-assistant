@@ -6,7 +6,8 @@ use BoldWeb\StatamicAiAssistant\Jobs\PlanEntriesJob;
 use BoldWeb\StatamicAiAssistant\Services\AbstractAiService;
 use BoldWeb\StatamicAiAssistant\Services\EntryGenerationBatchService;
 use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorService;
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -183,7 +184,12 @@ class EntryGeneratorController
         $collectionHandle = $autoResolve ? null : (string) $request->input('collection');
         $blueprintHandle = $autoResolve ? null : (string) ($request->input('blueprint') ?? '');
 
-        return response()->stream(function () use ($data, $attachmentContent, $autoResolve, $locale, $collectionHandle, $blueprintHandle) {
+        // Resolve the per-request entry cap HERE, while the CP user is known —
+        // the planner runs in a queued job with no authenticated user, so it
+        // reads this value off the session instead of re-checking permissions.
+        $maxPlanEntries = EntryCreationPolicy::maxPlanEntries();
+
+        return response()->stream(function () use ($data, $attachmentContent, $autoResolve, $locale, $collectionHandle, $blueprintHandle, $maxPlanEntries) {
             $emit = static function (array $payload): void {
                 echo json_encode($payload, JSON_UNESCAPED_UNICODE)."\n";
                 if (ob_get_level() > 0) {
@@ -214,6 +220,7 @@ class EntryGeneratorController
                     ],
                     $collectionHandle,
                     $blueprintHandle,
+                    $maxPlanEntries,
                 );
 
                 PlanEntriesJob::dispatch($sessionId);

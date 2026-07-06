@@ -3,7 +3,7 @@
 namespace BoldWeb\StatamicAiAssistant\Tests\Services;
 
 use BoldWeb\StatamicAiAssistant\Services\EntryGenerationBatchService;
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
 use BoldWeb\StatamicAiAssistant\Tests\TestCase;
 use Illuminate\Support\Facades\Cache;
 
@@ -75,6 +75,29 @@ class EntryGenerationBatchServiceTest extends TestCase
         $this->assertSame(0, $snap['entries'][0]['index']);
         $this->assertSame(1, $snap['entries'][1]['index']);
         $this->assertSame('Brief for e1', $snap['entries'][0]['prompt']);
+    }
+
+    public function test_init_planning_session_persists_resolved_entry_cap(): void
+    {
+        $sid = $this->batch->initPlanningSession(
+            'default', null, 'p', true,
+            ['appendix' => '', 'warnings' => [], 'preferred' => new PreferredAssetPaths, 'appended_to_prompts' => false],
+            null,
+            null,
+            1,
+        );
+
+        $this->assertSame(1, $this->batch->getSession($sid)['max_plan_entries']);
+    }
+
+    public function test_init_planning_session_defaults_entry_cap_to_null(): void
+    {
+        $sid = $this->batch->initPlanningSession(
+            'default', null, 'p', true,
+            ['appendix' => '', 'warnings' => [], 'preferred' => new PreferredAssetPaths, 'appended_to_prompts' => false],
+        );
+
+        $this->assertNull($this->batch->getSession($sid)['max_plan_entries']);
     }
 
     public function test_add_planned_entry_rejected_after_cancel(): void

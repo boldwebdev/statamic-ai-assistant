@@ -90,7 +90,7 @@ class EntryGeneratorService
      * Generate content for an entry from a prompt (does NOT save).
      *
      * @param  callable(string): void|null  $onStreamToken  Optional callback for each streamed assistant text delta (NDJSON / CP drawer)
-     * @param  array{appendix: string, warnings: array<int, string>, preferred: \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths, appended_to_prompts?: bool}|null  $prefetchedUrlAug  When set (multi-entry stream), reuses one Jina text fetch and appendix so each entry does not re-fetch URLs.
+     * @param  array{appendix: string, warnings: array<int, string>, preferred: \BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths, appended_to_prompts?: bool}|null  $prefetchedUrlAug  When set (multi-entry stream), reuses one Jina text fetch and appendix so each entry does not re-fetch URLs.
      * @param  callable(): void|null  $streamHeartbeat  Optional NDJSON keepalive between tool rounds (same as planner stream).
      * @return array{data: array<string, mixed>, displayData: array<string, mixed>, warnings: string[]}
      */
@@ -101,7 +101,7 @@ class EntryGeneratorService
         string $locale,
         ?string $attachmentContent = null,
         ?callable $onStreamToken = null,
-        ?\BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths $preferredAssets = null,
+        ?\BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths $preferredAssets = null,
         ?array $prefetchedUrlAug = null,
         ?callable $streamHeartbeat = null,
     ): array {
@@ -152,7 +152,7 @@ class EntryGeneratorService
             $urlAug = [
                 'appendix' => '',
                 'warnings' => [],
-                'preferred' => new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths,
+                'preferred' => new \BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths,
             ];
             $figmaAug = $this->figma ? $this->figma->buildAugmentation($prompt) : ['appendix' => '', 'warnings' => []];
             $combinedAppendix = $figmaAug['appendix'];
@@ -175,7 +175,7 @@ class EntryGeneratorService
         // Images the LLM copies from the source via save_remote_image land here;
         // merged into the preferred-asset queue below so the resolver assigns
         // them to this entry's image fields (matched by container).
-        $fetchedImages = new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+        $fetchedImages = new \BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
         $imageContainerHint = $this->assetResolver->primaryAssetContainer($blueprint);
 
         if ($useUrlTool) {
@@ -208,12 +208,12 @@ class EntryGeneratorService
         $parsedData = $this->parseResponse($rawResponse);
 
         // Merge any preferred assets surfaced by the URL augmentation step
-        // (single-prompt path) with the explicit ones passed in (migration
-        // path). Either or both can be empty.
-        $aggregatedPreferred = \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths::merge(
+        // (single-prompt path) with the explicit ones passed in by the caller.
+        // Either or both can be empty.
+        $aggregatedPreferred = \BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths::merge(
             $fetchedImages,
-            $preferredAssets ?? new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths,
-            $urlAug['preferred'] ?? new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths,
+            $preferredAssets ?? new \BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths,
+            $urlAug['preferred'] ?? new \BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths,
         );
 
         $result = $this->mapToFieldData($parsedData, $blueprint, $locale, $prompt, $aggregatedPreferred);
@@ -247,7 +247,7 @@ class EntryGeneratorService
         int $maxTokens,
         ?callable $onStreamToken,
         array &$toolWarningsOut,
-        \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths $imageSink,
+        \BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths $imageSink,
         ?string $imageContainerHint,
         bool $allowImageTool,
         ?callable $streamHeartbeat = null,
@@ -274,6 +274,7 @@ class EntryGeneratorService
             ."4. You may call the tool multiple times. Pass **url** (full link, https preferred) and **reason** (short: which item or which blueprint field this supports).\n"
             ."5. ONLY after you have the full source text you need, respond with the JSON object for the entry fields — no markdown fences, no commentary — exactly as required by the rules below.\n"
             .$imageRule
+            ."- TITLE FROM SOURCE: when you copy a page's content, set the entry's title field to that page's main heading VERBATIM. Use the fetched result's **h1** value (or the \"Page title (H1)\" line / the first top-level \"# \" heading in the fetched content). Do NOT paraphrase, translate, shorten, or invent a new title. Only deviate when the user's prompt explicitly dictates a different title, or when the source page genuinely has no H1 (then derive a concise, faithful title from the content).\n"
             ."- If the user asks to base this entry on the layout/components of an existing entry, call **read_entry_structure** (pass its **entry_id**, or a title/slug **query**) to read that entry's sections in order, then reproduce the same structure. The reference entry may use a different blueprint: map each section onto a set/field that exists in THIS entry's schema below — never copy set handles that are not in this schema.\n"
             ."---\n";
 
@@ -743,6 +744,21 @@ class EntryGeneratorService
     {
         if ($field->isRequired()) {
             $entry['required'] = true;
+        }
+
+        // Field hints (BOLD agent settings): editors can describe what a field
+        // like `hero_title` or `lead` is for and add writing guidelines. Hints
+        // match by handle wherever the field appears (top level, groups, sets).
+        $hint = $this->setHints->forField((string) $field->handle());
+
+        if ($hint !== null) {
+            if ($hint['ai_description'] !== '') {
+                $entry['ai_description'] = $hint['ai_description'];
+            }
+
+            if ($hint['when_to_use'] !== []) {
+                $entry['writing_guidelines'] = $hint['when_to_use'];
+            }
         }
 
         return $entry;
@@ -1621,6 +1637,7 @@ class EntryGeneratorService
             ."- For fields with type \"video_url\": provide a YouTube or video page URL, or an empty string.\n"
             ."- For fields with type \"taxonomy_terms\": use only slugs from the schema \"taxonomies\" lists (exact slug when \"single_taxonomy\" is true; otherwise taxonomy_handle::term_slug).\n"
             .$structuredRules
+            ."- Field-level editorial guidance: when a field in the schema carries \"ai_description\" (what the field is and how it renders on the page) and/or \"writing_guidelines\" (concrete authoring rules such as length, tone, or structure), treat them as binding editorial instructions for THAT field's content — they override generic assumptions you would otherwise make from the handle alone.\n"
             ."- Every field in the schema that includes \"required\": true must have a non-empty, valid value for its type. Never omit those keys, never use empty strings for them, and never use HTML with no visible text. If the user is vague, says to do nothing, or gives minimal instructions, you must still invent sensible placeholder content so the entry would pass blueprint validation.\n"
             ."- For fields without \"required\": true, if you cannot determine content, use an empty string when appropriate.\n"
             ."- Generate meaningful, high-quality content that is relevant to the user's request.";
@@ -1743,7 +1760,7 @@ class EntryGeneratorService
      *
      * @return array{data: array<string, mixed>, displayData: array<string, mixed>, warnings: string[]}
      */
-    private function mapToFieldData(array $parsedData, Blueprint $blueprint, string $locale, string $prompt = '', ?\BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths $preferredAssets = null, bool $partial = false): array
+    private function mapToFieldData(array $parsedData, Blueprint $blueprint, string $locale, string $prompt = '', ?\BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths $preferredAssets = null, bool $partial = false): array
     {
         $data = [];
         $displayData = [];
@@ -1926,6 +1943,27 @@ class EntryGeneratorService
     }
 
     /**
+     * When the LLM echoes an existing block/row `id` (the update-mode snapshot
+     * shows current blocks as raw JSON including ids), keep it instead of
+     * generating a fresh UUID. Stable ids keep Statamic revision diffs and the
+     * CP UI honest about which blocks actually changed during an update.
+     *
+     * @param  array<string, mixed>  $set
+     */
+    private function reusableBlockId(array $set): ?string
+    {
+        $id = $set['id'] ?? null;
+
+        if (! is_string($id)) {
+            return null;
+        }
+
+        $id = trim($id);
+
+        return preg_match('/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/', $id) === 1 ? $id : null;
+    }
+
+    /**
      * @return array<mixed>
      */
     private function mapReplicatorData(array $sets, \Statamic\Fields\Field $field, array &$warnings, string $siteHandle): array
@@ -1941,7 +1979,7 @@ class EntryGeneratorService
             if ($field->type() === 'grid') {
                 // Grid rows don't have a "type" key
                 $gridFields = $fieldtype->fields();
-                $row = ['id' => Str::uuid()->toString()];
+                $row = ['id' => $this->reusableBlockId($set) ?? Str::uuid()->toString()];
 
                 foreach ($gridFields->all() as $subField) {
                     $subHandle = $subField->handle();
@@ -1978,7 +2016,7 @@ class EntryGeneratorService
                 }
 
                 $mappedSet = [
-                    'id' => Str::uuid()->toString(),
+                    'id' => $this->reusableBlockId($set) ?? Str::uuid()->toString(),
                     'type' => $setType,
                     'enabled' => true,
                 ];
@@ -2350,7 +2388,7 @@ class EntryGeneratorService
      * values so the model can decide what to keep, what to rewrite, and what to leave alone.
      *
      * @param  callable(string): void|null  $onStreamToken
-     * @param  array{appendix: string, warnings: array<int, string>, preferred: \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths, appended_to_prompts?: bool}|null  $prefetchedUrlAug
+     * @param  array{appendix: string, warnings: array<int, string>, preferred: \BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths, appended_to_prompts?: bool}|null  $prefetchedUrlAug
      * @param  callable(): void|null  $streamHeartbeat
      * @return array{data: array<string, mixed>, displayData: array<string, mixed>, warnings: string[], collection: string, blueprint: string}
      */
@@ -2384,7 +2422,8 @@ class EntryGeneratorService
         // Returns a list of {field, path} pairs the resolver step uses below.
         $assetFields = $this->augmentSchemaWithAssetFields($fieldSchema, $blueprint);
 
-        $currentSnapshot = $this->buildCurrentEntrySnapshot($entry, $blueprint);
+        $snapshotIncompleteFields = [];
+        $currentSnapshot = $this->buildCurrentEntrySnapshot($entry, $blueprint, $snapshotIncompleteFields);
         $systemMessage = $this->buildUpdateSystemMessage($fieldSchema, $locale, $currentSnapshot);
 
         $useUrlTool = (bool) config('statamic-ai-assistant.entry_generator_fetch_url_tool', true)
@@ -2424,7 +2463,7 @@ class EntryGeneratorService
                     $maxTokens,
                     $onStreamToken,
                     $toolWarnings,
-                    new \BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths,
+                    new \BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths,
                     null,
                     false,
                     $streamHeartbeat,
@@ -2450,6 +2489,19 @@ class EntryGeneratorService
         // replace. Fields the LLM did NOT mention stay absent from $data, so
         // the merge in updateEntryFromData preserves the existing image.
         $this->resolveUpdateAssetReplacements($result, $entry, $assetFields, $parsedData);
+
+        // Data-loss guard: list fields (replicator/grid) are replaced wholesale on
+        // update. When the snapshot had to truncate or omit such a field, the LLM
+        // never saw its full content — a returned replacement may silently drop
+        // blocks. Surface that as a review warning instead of failing the update.
+        foreach ($snapshotIncompleteFields as $incompleteHandle) {
+            if (array_key_exists($incompleteHandle, $result['data'] ?? [])) {
+                $result['warnings'][] = __(
+                    'The field ":field" was too large to show the AI in full, but the AI returned a replacement for it. Review that field carefully before publishing — blocks the AI never saw may be missing.',
+                    ['field' => $incompleteHandle]
+                );
+            }
+        }
 
         foreach ($urlAug['warnings'] as $w) {
             $result['warnings'][] = $w;
@@ -2502,11 +2554,11 @@ class EntryGeneratorService
     }
 
     /**
-     * @param  array<int, \Statamic\Fields\Field>  $fields
+     * @param  iterable<int, \Statamic\Fields\Field>  $fields  Array or Statamic Fields collection
      * @param  array<int, string>  $path
      * @param  array<int, array{field: \Statamic\Fields\Field, path: array<int, string>}>  $assetFields
      */
-    private function walkAndInjectAssets(array $fields, array &$schemaSlice, array $path, int $listingCap, array &$assetFields): void
+    private function walkAndInjectAssets(iterable $fields, array &$schemaSlice, array $path, int $listingCap, array &$assetFields): void
     {
         foreach ($fields as $field) {
             $handle = $field->handle();
@@ -2777,9 +2829,12 @@ class EntryGeneratorService
      * strings; assets show their stored path(s). Total size is capped so
      * token usage stays predictable on entries with deep replicator trees.
      */
-    private function buildCurrentEntrySnapshot(StatamicEntry $entry, Blueprint $blueprint): string
+    /**
+     * @param  array<int, string>|null  $incompleteFields  Out-list of handles the snapshot truncated/omitted.
+     */
+    private function buildCurrentEntrySnapshot(StatamicEntry $entry, Blueprint $blueprint, ?array &$incompleteFields = null): string
     {
-        return $this->structureSerializer->serialize($entry, $blueprint);
+        return $this->structureSerializer->serialize($entry, $blueprint, $incompleteFields);
     }
 
     /**

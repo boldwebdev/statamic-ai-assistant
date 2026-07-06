@@ -8,7 +8,7 @@ use BoldWeb\StatamicAiAssistant\Services\AbstractAiService;
 use BoldWeb\StatamicAiAssistant\Services\EntryGenerationBatchService;
 use BoldWeb\StatamicAiAssistant\Services\EntryGenerationPlanner;
 use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorService;
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
 use BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher;
 use BoldWeb\StatamicAiAssistant\Support\PlanEntryDecorator;
 use BoldWeb\StatamicAiAssistant\Tests\TestCase;

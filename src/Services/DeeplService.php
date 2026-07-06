@@ -5,11 +5,14 @@ namespace BoldWeb\StatamicAiAssistant\Services;
 use DeepL\DeepLClient;
 use DeepL\DeepLException;
 use DeepL\LanguageCode;
+use DeepL\MultilingualGlossaryDictionaryEntries;
+use DeepL\TranslateTextOptions;
 use DeepL\Translator;
 use DeepL\TranslatorOptions;
 use DeepL\Usage;
 use DeepL\UsageDetail;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Statamic\Facades\Site;
 
 class DeeplService
@@ -76,32 +79,225 @@ class DeeplService
             return $texts;
         }
 
-        try {
-            $results = $this->client()->translateText(
-                $nonEmptyTexts,
+        // Glossary + style rules configured via the CP apply to EVERY translation
+        // path (entry, bulk, field, Bard, navigation sync) because they all funnel
+        // through this method. Explicit caller options always win. When a glossary
+        // term and a style rule both apply, the batch is split so the term is
+        // enforced on the classic model while the rest keeps the style rule.
+        $segments = $this->planTranslationSegments($nonEmptyTexts, $options, $mappedSource, $mappedTarget);
+
+        $translated = $texts;
+
+        foreach ($segments as $segment) {
+            $segmentTexts = array_map(fn ($pos) => $nonEmptyTexts[$pos], $segment['positions']);
+
+            $results = $this->runTranslateSegment(
+                $segmentTexts,
                 $mappedSource,
                 $mappedTarget,
+                $segment['options'],
                 $options,
             );
-        } catch (DeepLException $e) {
-            if ($mappedSource !== null && $this->shouldRetryTranslationWithAutoDetectedSource($e)) {
-                $results = $this->client()->translateText(
-                    $nonEmptyTexts,
-                    null,
-                    $mappedTarget,
-                    $options,
-                );
-            } else {
-                throw $e;
+
+            foreach ($results as $i => $result) {
+                $originalIndex = $indexMap[$segment['positions'][$i]];
+                $translated[$originalIndex] = $result->text;
             }
         }
 
-        $translated = $texts;
-        foreach ($results as $i => $result) {
-            $translated[$indexMap[$i]] = $result->text;
+        return $translated;
+    }
+
+    /**
+     * Translate one planned segment, with the existing glossary/style downgrade
+     * and source-language auto-detect retries.
+     *
+     * @param  array<int, string>  $segmentTexts
+     * @param  array<string, mixed>  $segmentOptions  enhanced options for this segment
+     * @param  array<string, mixed>  $callerOptions  original caller options (retry fallback)
+     * @return array<int, \DeepL\TextResult>
+     */
+    private function runTranslateSegment(array $segmentTexts, ?string $mappedSource, string $mappedTarget, array $segmentOptions, array $callerOptions): array
+    {
+        try {
+            return $this->client()->translateText($segmentTexts, $mappedSource, $mappedTarget, $segmentOptions);
+        } catch (DeepLException $e) {
+            if ($segmentOptions !== $callerOptions && $this->shouldRetryWithoutEnhancements($e)) {
+                // The account/model may not support glossaries or style rules for
+                // this language pair — retry plain rather than failing the translation.
+                Log::warning('[deepl] glossary/style options rejected; retrying without them', [
+                    'message' => $e->getMessage(),
+                ]);
+
+                return $this->client()->translateText($segmentTexts, $mappedSource, $mappedTarget, $callerOptions);
+            }
+
+            if ($mappedSource !== null && $this->shouldRetryTranslationWithAutoDetectedSource($e)) {
+                return $this->client()->translateText($segmentTexts, null, $mappedTarget, $callerOptions);
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * Decide how to split the batch across glossary/style translation profiles.
+     *
+     * Returns one or more segments, each with its own DeepL options and the list
+     * of positions (into $nonEmptyTexts) it covers. The common case is a single
+     * segment; the batch is only split when a glossary term AND a style rule both
+     * apply, because DeepL cannot enforce a glossary ("hard", classic model) while
+     * also applying a style rule (next-gen model, soft glossary) in one request.
+     *
+     * @param  array<int, string>  $nonEmptyTexts
+     * @param  array<string, mixed>  $options
+     * @return array<int, array{options: array<string, mixed>, positions: array<int, int>}>
+     */
+    private function planTranslationSegments(array $nonEmptyTexts, array $options, ?string $mappedSource, string $mappedTarget): array
+    {
+        $sourceBase = $mappedSource !== null
+            ? $this->primaryLanguageSubtag(strtolower(str_replace('_', '-', $mappedSource)))
+            : null;
+        $targetBase = $this->primaryLanguageSubtag(strtolower(str_replace('_', '-', $mappedTarget)));
+
+        $glossaryId = null;
+        $styleId = null;
+
+        if ($targetBase !== null) {
+            try {
+                if (! array_key_exists('glossary', $options) && $sourceBase !== null) {
+                    $glossaryId = app(TranslationGlossaryService::class)->glossaryIdFor($sourceBase, $targetBase);
+                }
+                if (! array_key_exists('style_id', $options)) {
+                    $styleId = app(TranslationStyleRulesService::class)->styleIdFor($targetBase);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('[deepl] could not resolve glossary/style options', ['message' => $e->getMessage()]);
+            }
         }
 
-        return $translated;
+        $allPositions = array_keys($nonEmptyTexts);
+
+        // No auto glossary+style conflict to resolve → one segment with whatever
+        // single-request enhancements apply (glossary hard, or style, or neither).
+        if ($glossaryId === null || $styleId === null || ! config('statamic-ai-assistant.prefer_glossary_over_style', true)) {
+            return [[
+                'options' => $this->buildSingleRequestOptions($options, $glossaryId, $styleId),
+                'positions' => $allPositions,
+            ]];
+        }
+
+        // Both a glossary and a style rule apply. Split by whether each text
+        // actually carries a glossary term.
+        $terms = app(TranslationGlossaryService::class)->sourceTermsFor((string) $sourceBase, $targetBase);
+
+        $termPositions = [];
+        $stylePositions = [];
+
+        foreach ($nonEmptyTexts as $pos => $text) {
+            if ($this->textContainsGlossaryTerm($text, $terms)) {
+                $termPositions[] = $pos;
+            } else {
+                $stylePositions[] = $pos;
+            }
+        }
+
+        if ($termPositions === []) {
+            // Nothing to enforce — keep everything on the style rule.
+            return [[
+                'options' => $this->withStyle($options, $styleId, $glossaryId),
+                'positions' => $allPositions,
+            ]];
+        }
+
+        $segments = [[
+            'options' => $this->withHardGlossary($options, $glossaryId),
+            'positions' => $termPositions,
+        ]];
+
+        if ($stylePositions !== []) {
+            $segments[] = [
+                'options' => $this->withStyle($options, $styleId, $glossaryId),
+                'positions' => $stylePositions,
+            ];
+        }
+
+        return $segments;
+    }
+
+    /**
+     * @param  array<int, string>  $terms
+     */
+    private function textContainsGlossaryTerm(string $text, array $terms): bool
+    {
+        foreach ($terms as $term) {
+            if ($term !== '' && mb_stripos($text, $term) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Options for a single request (no split): a glossary is enforced on the
+     * classic model; a lone style rule is applied on the next-gen model.
+     *
+     * @param  array<string, mixed>  $options
+     * @return array<string, mixed>
+     */
+    private function buildSingleRequestOptions(array $options, ?string $glossaryId, ?string $styleId): array
+    {
+        if ($glossaryId !== null) {
+            $options = $this->withHardGlossary($options, $glossaryId);
+        }
+
+        if ($styleId !== null && ! array_key_exists('style_id', $options)) {
+            $options[TranslateTextOptions::STYLE_ID] = $styleId;
+        }
+
+        return $options;
+    }
+
+    /**
+     * Attach the glossary and pin the classic model so DeepL enforces the terms
+     * ("hard" glossary). Removes any auto style_id — style forces the next-gen
+     * model, which downgrades glossaries to soft hints.
+     *
+     * @param  array<string, mixed>  $options
+     * @return array<string, mixed>
+     */
+    private function withHardGlossary(array $options, string $glossaryId): array
+    {
+        if (! array_key_exists('glossary', $options)) {
+            $options[TranslateTextOptions::GLOSSARY] = $glossaryId;
+        }
+
+        if (! array_key_exists('model_type', $options)) {
+            $options[TranslateTextOptions::MODEL_TYPE] = 'latency_optimized';
+        }
+
+        return $options;
+    }
+
+    /**
+     * Attach the style rule (next-gen model). A glossary can ride along but only
+     * as a soft hint on this model.
+     *
+     * @param  array<string, mixed>  $options
+     * @return array<string, mixed>
+     */
+    private function withStyle(array $options, string $styleId, ?string $glossaryId): array
+    {
+        if (! array_key_exists('style_id', $options)) {
+            $options[TranslateTextOptions::STYLE_ID] = $styleId;
+        }
+
+        if ($glossaryId !== null && ! array_key_exists('glossary', $options)) {
+            $options[TranslateTextOptions::GLOSSARY] = $glossaryId;
+        }
+
+        return $options;
     }
 
     /**
@@ -401,6 +597,116 @@ class DeeplService
 
         return str_contains($msg, 'source_lang')
             || str_contains($msg, 'source language');
+    }
+
+    /**
+     * Glossary/style errors that should downgrade to a plain translation instead of failing.
+     */
+    protected function shouldRetryWithoutEnhancements(DeepLException $e): bool
+    {
+        $msg = strtolower($e->getMessage());
+
+        return str_contains($msg, 'glossary')
+            || str_contains($msg, 'style')
+            || str_contains($msg, 'not supported')
+            || str_contains($msg, 'bad request');
+    }
+
+    // -----------------------------------------------------------------
+    //  DeepL v3 glossary + style-rule API wrappers. Kept here so the
+    //  storage services (TranslationGlossaryService / TranslationStyleRulesService)
+    //  never touch the SDK client directly and stay trivially fakeable in tests.
+    // -----------------------------------------------------------------
+
+    /**
+     * Create a fresh multilingual glossary and return its id. When $previousId is
+     * given, the old glossary is deleted first (recreate-on-save keeps sync trivial;
+     * CP glossaries are small).
+     *
+     * @param  array<int, array{source_lang: string, target_lang: string, entries: array<string, string>}>  $dictionaries
+     */
+    public function createGlossaryOnDeepL(string $name, array $dictionaries, ?string $previousId = null): string
+    {
+        if ($previousId !== null) {
+            $this->deleteGlossaryOnDeepL($previousId);
+        }
+
+        $sdkDictionaries = array_map(
+            fn (array $d) => new MultilingualGlossaryDictionaryEntries($d['source_lang'], $d['target_lang'], $d['entries']),
+            $dictionaries,
+        );
+
+        return (string) $this->client()->createMultilingualGlossary($name, $sdkDictionaries)->glossaryId;
+    }
+
+    /**
+     * Delete a glossary; a glossary that no longer exists on DeepL is not an error.
+     */
+    public function deleteGlossaryOnDeepL(string $glossaryId): void
+    {
+        try {
+            $this->client()->deleteMultilingualGlossary($glossaryId);
+        } catch (DeepLException $e) {
+            Log::info('[deepl] delete glossary skipped', ['id' => $glossaryId, 'message' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Create a style rule with one or more custom instructions for a target
+     * language and return its id. Deletion of superseded/duplicate rules is
+     * orchestrated by TranslationStyleRulesService (reconcile-by-name), so this
+     * method only creates.
+     *
+     * @param  array<int, string>  $instructions  one DeepL custom instruction per entry
+     */
+    public function createStyleRuleOnDeepL(string $name, string $language, array $instructions): string
+    {
+        $customInstructions = [];
+
+        foreach (array_values($instructions) as $i => $prompt) {
+            $prompt = trim((string) $prompt);
+
+            if ($prompt !== '') {
+                $customInstructions[] = ['label' => 'CMS style '.($i + 1), 'prompt' => $prompt];
+            }
+        }
+
+        $styleRule = $this->client()->createStyleRule($name, $language, null, $customInstructions);
+
+        return (string) $styleRule->styleId;
+    }
+
+    /**
+     * List all style rules on the DeepL account, so the storage service can
+     * reconcile duplicates/orphans it created in earlier recreate-on-save runs.
+     *
+     * @return array<int, array{style_id: string, name: string, language: string}>
+     */
+    public function listStyleRulesOnDeepL(): array
+    {
+        $out = [];
+
+        foreach ($this->client()->getAllStyleRules() as $rule) {
+            $out[] = [
+                'style_id' => (string) $rule->styleId,
+                'name' => (string) $rule->name,
+                'language' => strtolower((string) $rule->language),
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Delete a style rule; a rule that no longer exists on DeepL is not an error.
+     */
+    public function deleteStyleRuleOnDeepL(string $styleRuleId): void
+    {
+        try {
+            $this->client()->deleteStyleRule($styleRuleId);
+        } catch (DeepLException $e) {
+            Log::info('[deepl] delete style rule skipped', ['id' => $styleRuleId, 'message' => $e->getMessage()]);
+        }
     }
 
     protected function primaryLanguageSubtag(string $normalized): ?string

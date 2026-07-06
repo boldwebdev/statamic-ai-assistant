@@ -23,22 +23,17 @@ use BoldWeb\StatamicAiAssistant\Services\FigmaOAuthService;
 use BoldWeb\StatamicAiAssistant\Services\FigmaTokenStore;
 use BoldWeb\StatamicAiAssistant\Services\GroqService;
 use BoldWeb\StatamicAiAssistant\Services\InfomaniakService;
-use BoldWeb\StatamicAiAssistant\Services\Migration\CollectionMatcher;
-use BoldWeb\StatamicAiAssistant\Services\Migration\MigrationAssetDownloader;
-use BoldWeb\StatamicAiAssistant\Services\Migration\SitemapDiscoveryService;
-use BoldWeb\StatamicAiAssistant\Services\Migration\UrlClusterer;
-use BoldWeb\StatamicAiAssistant\Services\Migration\MigrationStructureReconciler;
-use BoldWeb\StatamicAiAssistant\Services\Migration\WebsiteMigrationService;
 use BoldWeb\StatamicAiAssistant\Services\NavigationTreeSyncService;
 use BoldWeb\StatamicAiAssistant\Services\AssetImageDownloader;
 use BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher;
 use BoldWeb\StatamicAiAssistant\Services\RemoteImageFetcher;
 use BoldWeb\StatamicAiAssistant\Services\SetHintsService;
+use BoldWeb\StatamicAiAssistant\Services\TranslationGlossaryService;
 use BoldWeb\StatamicAiAssistant\Services\TranslationService;
-use Illuminate\Cache\RateLimiting\Limit;
-use Illuminate\Support\Facades\RateLimiter;
+use BoldWeb\StatamicAiAssistant\Services\TranslationStyleRulesService;
 use Illuminate\Support\Facades\Route;
 use Statamic\Facades\CP\Nav;
+use Statamic\Facades\User;
 use Statamic\Providers\AddonServiceProvider;
 use Statamic\Statamic;
 
@@ -96,6 +91,14 @@ class ServiceProvider extends AddonServiceProvider
 
         $this->app->singleton(TranslationService::class, function ($app) {
             return new TranslationService($app->make(EntryTranslator::class));
+        });
+
+        $this->app->singleton(TranslationGlossaryService::class, function ($app) {
+            return new TranslationGlossaryService($app->make(DeeplService::class));
+        });
+
+        $this->app->singleton(TranslationStyleRulesService::class, function ($app) {
+            return new TranslationStyleRulesService($app->make(DeeplService::class));
         });
 
         $this->app->singleton(EntryGeneratorAssetResolver::class, function () {
@@ -169,33 +172,6 @@ class ServiceProvider extends AddonServiceProvider
             );
         });
 
-        $this->app->singleton(SitemapDiscoveryService::class, function () {
-            return new SitemapDiscoveryService;
-        });
-
-        $this->app->singleton(UrlClusterer::class, function () {
-            return new UrlClusterer;
-        });
-
-        $this->app->singleton(WebsiteMigrationService::class, function () {
-            return new WebsiteMigrationService;
-        });
-
-        $this->app->singleton(MigrationStructureReconciler::class, function ($app) {
-            return new MigrationStructureReconciler(
-                $app->make(WebsiteMigrationService::class),
-            );
-        });
-
-        $this->app->singleton(MigrationAssetDownloader::class, function ($app) {
-            return new MigrationAssetDownloader(
-                $app->make(AssetImageDownloader::class),
-            );
-        });
-
-        $this->app->singleton(CollectionMatcher::class, function ($app) {
-            return new CollectionMatcher($app->make(AbstractAiService::class));
-        });
     }
 
     public function bootAddon()
@@ -238,38 +214,47 @@ class ServiceProvider extends AddonServiceProvider
         if (config('statamic-ai-assistant.translations', true)
             && config('statamic-ai-assistant.bulk_translations', true)) {
             Nav::extend(function ($nav) {
+                if (! User::current()?->isSuper()) {
+                    return;
+                }
+
                 $nav->tools(__('Bulk translations'))
                     ->route('statamic-ai-assistant.translations')
                     ->icon('globe-world-wide-web');
             });
         }
 
+        // Glossary & style rules: visible to EVERY CP user — editors own the
+        // terminology and tone that DeepL applies across all translation paths.
+        if (config('statamic-ai-assistant.translations', true)) {
+            Nav::extend(function ($nav) {
+                $nav->tools(__('Glossary & style rules'))
+                    ->route('statamic-ai-assistant.glossary.page')
+                    ->icon('dictionary-language-book');
+            });
+        }
+
         if (config('statamic-ai-assistant.entry_generator', true)
             && config('statamic-ai-assistant.bold_agent_settings_nav', true)) {
             Nav::extend(function ($nav) {
+                if (! User::current()?->isSuper()) {
+                    return;
+                }
+
                 $nav->settings(__('BOLD agent settings'))
                     ->route('statamic-ai-assistant.block-hints.page')
                     ->icon('layers-stacks');
             });
         }
 
-        if (config('statamic-ai-assistant.migration.enabled', true)) {
-            // Per-host rate limit used by MigratePageJob via Laravel's RateLimited middleware.
-            RateLimiter::for('ai-migration-host', function ($job) {
-                $host = 'unknown';
-                if (is_object($job) && property_exists($job, 'url')) {
-                    $host = (string) parse_url((string) $job->url, PHP_URL_HOST) ?: 'unknown';
-                }
-                $rps = max(1, (int) config('statamic-ai-assistant.migration.crawl_per_host_rps', 3));
-
-                return Limit::perSecond($rps)->by($host);
-            });
-        }
-
         Statamic::provideToScript([
             'translationsActiv' => config('statamic-ai-assistant.translations'),
             'entryGeneratorEnabled' => config('statamic-ai-assistant.entry_generator', true),
-            'websiteMigrationEnabled' => config('statamic-ai-assistant.migration.enabled', true),
+            // Effective per-request entry cap for the current user, so the drawer
+            // can message the single-entry limit to non-super users. Server-side
+            // enforcement lives in EntryCreationPolicy / the planner regardless.
+            'entryCreationMax' => \BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy::maxPlanEntries(),
+            'entryCreationLimited' => \BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy::appliesTo(),
         ]);
     }
 }

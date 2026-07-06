@@ -2,7 +2,7 @@
 
 namespace BoldWeb\StatamicAiAssistant\Tools;
 
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
 
 /**
  * Per-run side-channels a ChatTool may need. Bundling them here means tools with

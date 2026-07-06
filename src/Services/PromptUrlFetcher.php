@@ -2,7 +2,7 @@
 
 namespace BoldWeb\StatamicAiAssistant\Services;
 
-use BoldWeb\StatamicAiAssistant\Services\Migration\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -23,8 +23,8 @@ class PromptUrlFetcher
      * content gets truncated away before the LLM ever sees it.
      *
      * This is the single source of truth: config/statamic-ai-assistant.php
-     * references it as the default for `migration.remove_selector`, and both
-     * fetch paths read that config value via readerRemoveHeaders().
+     * references it as the default for `prompt_url_fetch.remove_selector`, and
+     * all fetch paths read that config value via readerRemoveHeaders().
      */
     public const DEFAULT_REMOVE_SELECTOR =
         'nav, header, footer, aside, '
@@ -52,15 +52,15 @@ class PromptUrlFetcher
 
     /**
      * Reader chrome-stripping header, shared by every fetch path so the inline
-     * prompt augmentation, the entry-generator tool, and the migration flow all
-     * remove the same site furniture. Returns [] when stripping is disabled.
+     * prompt augmentation and the entry-generator tool remove the same site
+     * furniture. Returns [] when stripping is disabled.
      *
      * @return array<string, string>
      */
     private function readerRemoveHeaders(): array
     {
         $selector = trim((string) config(
-            'statamic-ai-assistant.migration.remove_selector',
+            'statamic-ai-assistant.prompt_url_fetch.remove_selector',
             self::DEFAULT_REMOVE_SELECTOR,
         ));
 
@@ -125,7 +125,14 @@ class PromptUrlFetcher
             }
 
             $totalUsed += strlen($chunk);
-            $blocks[] = '### '.$url."\n\n".$chunk;
+
+            // Surface the source page's H1 explicitly so the model can pin the
+            // entry title to it verbatim instead of paraphrasing the body.
+            $headlineLine = ! empty($result['headline'])
+                ? 'Page title (H1): '.$result['headline']."\n\n"
+                : '';
+
+            $blocks[] = '### '.$url."\n\n".$headlineLine.$chunk;
         }
 
         if ($blocks !== []) {
@@ -235,7 +242,9 @@ class PromptUrlFetcher
                 'name' => 'fetch_page_content',
                 'description' => 'Fetches readable full-page text from a public http(s) URL via the server reader. '
                     .'Use to inspect a URL the user referenced — for example, to count items on a listing page, '
-                    .'discover linked detail pages, or read article bodies. Always pass a concrete reason so the tool result is traceable.',
+                    .'discover linked detail pages, or read article bodies. The result includes an "h1" field with the '
+                    .'page\'s main heading — use it verbatim as the entry title when copying that page. '
+                    .'Always pass a concrete reason so the tool result is traceable.',
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
@@ -334,31 +343,36 @@ class PromptUrlFetcher
 
         $maxChars = max(500, (int) config('statamic-ai-assistant.prompt_url_fetch.max_chars_per_url', 12000));
         $body = Str::limit($result['body'], $maxChars);
+        $headline = ! empty($result['headline']) ? (string) $result['headline'] : null;
 
         Log::info('[entry-gen-tool] fetched', [
             'url' => $url,
             'reason' => $reason,
             'chars' => strlen($body),
+            'h1' => $headline,
         ]);
 
-        return json_encode([
+        return json_encode(array_filter([
             'ok' => true,
             'url' => $url,
             'reason_echo' => $reason,
+            // The source page's H1. Use this verbatim as the entry title when
+            // copying this page, unless the user explicitly asked for another.
+            'h1' => $headline,
             'content' => $body,
-        ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        ], fn ($v) => $v !== null), JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     }
 
     /**
      * Fetch a single URL via the configured reader.
      *
-     * Used by the website migration flow, where each page URL is processed in its
-     * own queue job and the Jina response needs to surface verbatim on failure.
-     * Strips site chrome (nav/header/footer/sidebar/consent dialogs) at fetch
-     * time via Jina's X-Remove-Selector so it doesn't leak into the migrated
-     * entry. Uses the same selector as every other fetch path.
+     * Used when a single page URL needs to be processed on its own and the Jina
+     * response needs to surface verbatim on failure. Strips site chrome
+     * (nav/header/footer/sidebar/consent dialogs) at fetch time via Jina's
+     * X-Remove-Selector so it doesn't leak into the generated entry. Uses the
+     * same selector as every other fetch path.
      *
-     * @return array{ok: bool, body: string, error: ?string}
+     * @return array{ok: bool, body: string, error: ?string, headline?: ?string}
      */
     public function fetchSingle(string $url, string $scope = HtmlReadableExtractor::SCOPE_MAIN): array
     {
@@ -388,7 +402,7 @@ class PromptUrlFetcher
      * fall back to Jina's own markdown so a page never comes back empty.
      *
      * @param  array<string, string>  $extraHeaders
-     * @return array{ok: bool, body: string, error: ?string}
+     * @return array{ok: bool, body: string, error: ?string, headline?: ?string}
      */
     private function fetchViaJina(string $targetUrl, string $readerBase, int $timeout, ?string $apiKey, array $extraHeaders = [], string $extractScope = HtmlReadableExtractor::SCOPE_MAIN): array
     {
@@ -408,15 +422,45 @@ class PromptUrlFetcher
                 return $raw;
             }
 
-            $markdown = $this->htmlExtractor()->extract($raw['body'], $extractScope);
-            if ($markdown !== '') {
-                return ['ok' => true, 'body' => $markdown, 'error' => null];
+            $readable = $this->htmlExtractor()->extractReadable($raw['body'], $extractScope);
+            if ($readable['markdown'] !== '') {
+                return [
+                    'ok' => true,
+                    'body' => $readable['markdown'],
+                    'error' => null,
+                    'headline' => $readable['headline'],
+                ];
             }
 
             Log::notice('HTML extraction empty, falling back to markdown reader', ['url' => $targetUrl]);
         }
 
-        return $this->fetchRaw($targetUrl, $readerBase, $timeout, $apiKey, $extraHeaders);
+        $raw = $this->fetchRaw($targetUrl, $readerBase, $timeout, $apiKey, $extraHeaders);
+
+        // Markdown reader mode (or the empty-HTML fallback): recover the H1 from
+        // the leading markdown heading so title-pinning still works.
+        if ($raw['ok']) {
+            $raw['headline'] = $this->headlineFromMarkdown($raw['body']);
+        }
+
+        return $raw;
+    }
+
+    /**
+     * First level-1 markdown heading ("# Title") in reader output, used when we
+     * don't have raw HTML to pull an <h1> from.
+     */
+    private function headlineFromMarkdown(string $markdown): ?string
+    {
+        foreach (preg_split('/\r\n|\r|\n/', $markdown) ?: [] as $line) {
+            if (preg_match('/^\s*#\s+(.+?)\s*#*\s*$/', $line, $m)) {
+                $title = trim($m[1]);
+
+                return $title !== '' ? $title : null;
+            }
+        }
+
+        return null;
     }
 
     /**

@@ -9,6 +9,7 @@ import TranslationProgress from "./components/TranslationProgress.vue";
 import EntryGeneratorPage from "./components/EntryGeneratorPage.vue";
 import EntryGeneratorCpLauncher from "./components/EntryGeneratorCpLauncher.vue";
 import SetHintsSettingsPage from "./components/SetHintsSettingsPage.vue";
+import TranslationGlossaryPage from "./components/TranslationGlossaryPage.vue";
 import { AiTextLegacyBardNode } from "./AiTextLegacyBardNode";
 import { BoldAiBardService } from "./BoldAiBardService";
 import { TranslationInfoDisplay } from "./utils/TranslationInfoDisplay";
@@ -47,6 +48,8 @@ Statamic.booting((statamic) => {
   Statamic.$components.register("entry-generator-cp-launcher", EntryGeneratorCpLauncher);
 
   Statamic.$components.register("set-hints-settings-page", SetHintsSettingsPage);
+
+  Statamic.$components.register("translation-glossary-page", TranslationGlossaryPage);
 
   Statamic.$components.register(
     "translation_action_preflight-fieldtype",
