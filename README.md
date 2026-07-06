@@ -7,6 +7,7 @@
 - **Statamic `^6.5`** (`statamic/cms` is declared in Composer; installs on Statamic 5 will not resolve).
 - A compatible **Laravel** version for your Statamic release (follow [Statamic’s requirements](https://statamic.dev/installation#requirements)).
 - **Statamic 5:** use the **`1.x`** release line / branch, not current `main`.
+- **Current release line:** **`3.x`** (see [CHANGELOG.md](./CHANGELOG.md) for breaking changes from 2.x).
 
 ## Supported API
 
@@ -24,16 +25,23 @@
 
 ## How to Install
 
-Install with Composer. Current releases target **Statamic 6.5+**. If you are on **Statamic 5**, require **`^1`** so Composer stays on the compatible major:
+Install with Composer. Current releases target **Statamic 6.5+** on the **`3.x`** line:
 
 ```bash
-composer require bold-web/statamic-ai-assistant
+composer require bold-web/statamic-ai-assistant:^3.0
 ```
 
 ```bash
 # Statamic 5 projects only — pin the 1.x line
 composer require bold-web/statamic-ai-assistant:^1
 ```
+
+### Upgrading from 2.x → 3.0
+
+1. `composer require bold-web/statamic-ai-assistant:^3.0`
+2. `php artisan vendor:publish --tag=statamic-ai-assistant-config --force`
+3. `php artisan vendor:publish --tag=statamic-ai-assistant --force`
+4. Review [CHANGELOG.md](./CHANGELOG.md) — migration mode is removed; new DeepL glossary/style YAML; `ENABLE_AGENT_FOR_EDITORS` gates editors only (super admins always keep the BOLD agent).
 
 ## How to Use
 The plugin use per default Infomaniak API, a  Swiss solution🇨🇭 respecting the data of your users and the planet. However if you want to switch to a faster generation with a US based company this plugin also comes with Groq API support.
@@ -106,7 +114,7 @@ Higher values increase DeepL usage and runtime (more entries may be created in o
   > default refactor preface of the addon: 'You are a professional text refactoring expert. Your only task is to transform the provided HTML text according to the specific instructions given by the user. Output solely the final refactored HTML! DO NOT INCLUDE the user instructions, any commentary, or any additional text. ALWAYS RENDER the output as valid HTML. Keep all links intact unless the user specifically instructs you to modify them, and always strive to preserve the original HTML structure unless instructed otherwise.ALWAYS update lorem ipsum. Preserve the original language and maintain a similar length to the input text unless otherwise specified.'
 - You can override TEMPERATURE
 - You can override MAX_TOKENS
-- You can disable the translation functionality with `STATAMIC_AI_ASSISTANT_TRANSLATIONS=false`
+- You can disable the BOLD agent for **editors only** with `ENABLE_AGENT_FOR_EDITORS=false` (super admins always keep access). The master switch `STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR=false` disables the agent for everyone.
 - DeepL translation requires `DEEPL_API_KEY` in `.env` (see **Translations (DeepL)** above)
 
 ## Upgrade Request

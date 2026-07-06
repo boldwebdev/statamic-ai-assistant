@@ -30,7 +30,7 @@
     },
     "extra": {
         "branch-alias": {
-            "dev-main": "2.1.x-dev"
+            "dev-main": "3.x-dev"
         },
         "statamic": {
             "name": "Statamic AI Assistant",
