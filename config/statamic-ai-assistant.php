@@ -285,13 +285,17 @@ return [
     |
     | Enable or disable the AI entry generator feature.
     | The generator creates new collection entries from a natural language prompt.
+    | This also controls the floating "BOLD agent" assistant button in the CP:
+    | set ENABLE_AGENT=false in your .env to hide the button (and disable the
+    | generator) entirely. The legacy STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR var
+    | is still honoured as a fallback for existing installs.
     |
     | generator_max_tokens: Higher than the default max_tokens because the
     | generator produces content for all fields in a single LLM call.
     |
     */
 
-    'entry_generator' => env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR', true),
+    'entry_generator' => (bool) env('ENABLE_AGENT', env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR', true)),
 
     /*
     | Show the "BOLD agent settings" entry in the CP Settings sidebar

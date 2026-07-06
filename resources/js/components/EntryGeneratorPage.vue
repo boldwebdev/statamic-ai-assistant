@@ -19,7 +19,7 @@
         <p>{{ __('Tell me what you want. Examples:') }}</p>
         <ul class="eg-chat__examples">
           <li>{{ __('“Create a page about our new pilot program”') }}</li>
-          <li>{{ __('“Create 2 pages: one about us, one about our pilot program”') }}</li>
+          <li>{{ __('“Create an entry that takes exactly the same content as https://www.example.com/about-us”') }}</li>
         </ul>
 
         <div class="eg-chat__card">
