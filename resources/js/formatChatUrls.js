@@ -15,8 +15,15 @@ function trimUrlTrailingPunct(raw) {
   return raw.replace(/[.,;:!?)\]}'"]+$/u, '');
 }
 
+const BOLD_MARKDOWN_RE = /\*\*([^*\n]+?)\*\*/gu;
+
+function formatBoldMarkdown(escapedText) {
+  return escapedText.replace(BOLD_MARKDOWN_RE, '<strong class="eg-chat__bold">$1</strong>');
+}
+
 /**
- * Escape HTML and wrap detected URLs in <strong class="eg-chat__url"> for safe v-html.
+ * Escape HTML, render **bold** markdown, and wrap detected URLs in
+ * <strong class="eg-chat__url"> for safe v-html.
  *
  * @param {string|null|undefined} text
  * @returns {string}
@@ -31,14 +38,14 @@ export function formatChatTextWithBoldUrls(text) {
   const re = new RegExp(HTTP_URL_RE.source, 'giu');
   let m;
   while ((m = re.exec(s)) !== null) {
-    out += escapeHtml(s.slice(last, m.index));
+    out += formatBoldMarkdown(escapeHtml(s.slice(last, m.index)));
     const raw = m[0];
     const trimmed = trimUrlTrailingPunct(raw);
     const trailing = raw.slice(trimmed.length);
     out += `<strong class="eg-chat__url">${escapeHtml(trimmed)}</strong>`;
-    out += escapeHtml(trailing);
+    out += formatBoldMarkdown(escapeHtml(trailing));
     last = m.index + raw.length;
   }
-  out += escapeHtml(s.slice(last));
+  out += formatBoldMarkdown(escapeHtml(s.slice(last)));
   return out;
 }

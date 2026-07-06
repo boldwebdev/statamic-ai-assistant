@@ -35,7 +35,10 @@ export const state = reactive({
   planning: false,          // true between request start and plan event
   plan: null,               // { entries:[…], warnings:[…] } from server
   entries: [],              // list of card states
-  generationError: null,    // fatal pre-plan error
+  generationError: null,    // fatal pre-plan error (current turn only)
+  plannerAnswer: null,      // read-only answer to a question (current turn only)
+  transcript: [],           // full chat history from the server: [{role,text,entry_ids,kind}]
+  chatSessionId: null,      // durable session id across turns (NOT cleared at poll-terminal)
   bulkSaving: false,
 
   /**
@@ -221,6 +224,23 @@ function applyBatchProgressSnapshot(data) {
     }
   }
 
+  // Full conversation history — server is the source of truth. Overwrite each poll.
+  if (Array.isArray(data.transcript)) {
+    state.transcript = data.transcript;
+    // Errors are rendered from the transcript turn — don't also show the live banner.
+    const last = data.transcript[data.transcript.length - 1];
+    if (last?.role === 'assistant' && last?.kind === 'error') {
+      state.generationError = null;
+    }
+  }
+
+  // Read-only answer (e.g. "which entry contains X?"). A success, shown as a
+  // normal agent reply — never the "Something went wrong" error panel.
+  if (data.planner_answer && !state.plannerAnswer) {
+    state.plannerAnswer = data.planner_answer;
+    state.planning = false;
+  }
+
   // Live planner step feed (fetching URLs, reading layouts, deciding). The buffer
   // is drained server-side on each poll, so every line here is new — just append.
   for (const line of (data.planner_activity || [])) {
@@ -386,6 +406,9 @@ export async function startGeneration({ prompt, attachedFile, useAutoTarget, col
   resetGenerationOnly();
   state.generating = true;
   state.planning = true;
+  state.pendingPrompt = '';
+  // Optimistic first user turn so the chat shows the message before the first poll.
+  state.transcript = [{ role: 'user', text, entry_ids: [], kind: null }];
 
   const formData = new FormData();
   if (useAutoTarget) {
@@ -496,6 +519,7 @@ function handleStreamEvent(msg) {
     case 'batch':
       if (msg.session_id) {
         state.generationBatchSessionId = msg.session_id;
+        state.chatSessionId = msg.session_id; // durable across follow-up turns
         // Reset card list — the agentic planner will push entries one at a time
         // through the polling snapshot as it discovers them.
         state.plan = { entries: [], warnings: [] };
@@ -566,6 +590,76 @@ export function stopGeneration({ keepReady = false } = {}) {
   state._backgroundedAt = null;
 }
 
+/**
+ * Send a follow-up message in the current chat. Reuses the live chatSessionId,
+ * keeps all prior turns + entry cards, and restarts the progress poll. The
+ * server appends the user turn and re-runs the planner with full context.
+ */
+export async function continueGeneration(prompt) {
+  const text = (prompt || '').trim();
+  if (state.generating || text.length < 10 || !state.chatSessionId) return;
+
+  // Clear only the CURRENT-turn scratch — history + prior cards stay.
+  state.generationError = null;
+  state.plannerAnswer = null;
+  state.generating = true;
+  state.planning = true;
+  state.generationPlanningStatus = 'planning';
+  state.pendingPrompt = '';
+  state.activityLog = [];
+  // Optimistically show the user's message; the next poll's server transcript
+  // (which also contains it) overwrites this idempotently.
+  state.transcript = [...state.transcript, { role: 'user', text, entry_ids: [], kind: null }];
+
+  const headers = { 'X-Requested-With': 'XMLHttpRequest' };
+  const xsrf = getCpXsrfToken();
+  if (xsrf) headers['X-XSRF-TOKEN'] = xsrf;
+
+  try {
+    const { data } = await axios.post(
+      `/cp/ai-generate/generate-continue/${state.chatSessionId}`,
+      { prompt: text },
+      { headers, withCredentials: true },
+    );
+    state.generationBatchSessionId = data.session_id || state.chatSessionId;
+    scheduleGenerationBatchPoll();
+  } catch (e) {
+    state.generating = false;
+    state.planning = false;
+    const msg = e?.response?.data?.error || _trans('Generation failed.');
+    if (e?.response?.status === 404) {
+      // Chat expired: back to a fresh composer, notify via toast.
+      reset();
+      if (_toast) _toast.error(msg);
+    } else {
+      state.generationError = msg;
+    }
+  }
+}
+
+/**
+ * Chat-aware stop: abort the in-flight turn but KEEP the conversation history
+ * and all prior entry cards (unlike stopGeneration, used by the full-page wizard).
+ */
+export function stopChatTurn() {
+  state._userStopped = true;
+  cancelGeneration();
+
+  const sid = state.chatSessionId || state.generationBatchSessionId;
+  if (sid) {
+    clearGenerationBatchPoll();
+    axios.post(`/cp/ai-generate/generate-cancel/${sid}`, {}, {
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    }).catch(() => {});
+    state.generationBatchSessionId = null;
+  }
+
+  state.generating = false;
+  state.planning = false;
+  state.generationError = null;
+  state._backgroundedAt = null;
+}
+
 // ─── Field schema cache ──────────────────────────────────────────────────
 
 export async function fetchFieldPreview(collection, blueprint) {
@@ -583,6 +677,56 @@ export async function fetchFieldPreview(collection, blueprint) {
 }
 
 // ─── Saving ──────────────────────────────────────────────────────────────
+
+/**
+ * True when any entry OTHER than `exceptId` still holds generated content that
+ * would be lost by a full-page navigation — i.e. a drafted-but-unsaved card
+ * (READY) or one still being produced/saved (QUEUED / DRAFTING / SAVING).
+ */
+export function hasOtherPendingEntries(exceptId = null) {
+  return state.entries.some(
+    (e) => e.id !== exceptId
+      && [STATUS.READY, STATUS.QUEUED, STATUS.DRAFTING, STATUS.SAVING].includes(e.status),
+  );
+}
+
+/**
+ * Open a saved entry's CP editor without destroying the rest of the batch.
+ *
+ * The batch lives in module-scoped memory, so navigating the current tab away
+ * (window.location) wipes every other generated-but-unsaved entry. When other
+ * entries are still pending we therefore open the editor in a NEW TAB and keep
+ * the panel intact; only when nothing else would be lost do we navigate in place.
+ */
+function openEntryEditor(editUrl, cardId, isUpdate) {
+  if (!editUrl) return;
+
+  if (hasOtherPendingEntries(cardId)) {
+    // NB: don't pass 'noopener' in the features string — that forces the return
+    // value to null and defeats the pop-up-blocked check. Sever opener manually.
+    const win = window.open(editUrl, '_blank');
+    if (win) {
+      try { win.opener = null; } catch { /* ignore */ }
+    }
+    if (_toast) {
+      if (win) {
+        _toast.success(isUpdate
+          ? _trans('Entry updated — opened in a new tab. Your other entries are kept here.')
+          : _trans('Entry created — opened in a new tab. Your other entries are kept here.'));
+      } else {
+        // Pop-up blocked: don't navigate (that would drop the batch). Point the
+        // user at the card's Edit link, which also opens in a new tab.
+        _toast.error(_trans('Pop-up blocked — use the “Edit” link on the card to open this entry.'));
+      }
+    }
+    return;
+  }
+
+  if (_toast) {
+    _toast.success(isUpdate ? _trans('Entry updated — opening editor.') : _trans('Entry created — opening editor.'));
+  }
+  setTimeout(() => { window.location.href = editUrl; }, 600);
+}
 
 export async function saveCard(id, mode) {
   const card = state.entries.find((e) => e.id === id);
@@ -616,8 +760,7 @@ export async function saveCard(id, mode) {
       card.savedEntry = { entry_id: data.entry_id, edit_url: data.edit_url, title: data.title };
       if (_toast) {
         if (mode === 'edit') {
-          _toast.success(isUpdate ? _trans('Entry updated — opening editor.') : _trans('Entry created — opening editor.'));
-          setTimeout(() => { window.location.href = data.edit_url; }, 600);
+          openEntryEditor(data.edit_url, card.id, isUpdate);
         } else {
           _toast.success(isUpdate ? _trans('Entry updated.') : _trans('Entry saved as draft.'));
         }
@@ -747,6 +890,9 @@ function resetGenerationOnly() {
   state.plan = null;
   state.entries = [];
   state.generationError = null;
+  state.plannerAnswer = null;
+  state.transcript = [];
+  state.chatSessionId = null;
   state.planning = false;
   state.generating = false;
   state.bulkSaving = false;

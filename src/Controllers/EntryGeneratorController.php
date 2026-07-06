@@ -350,6 +350,44 @@ class EntryGeneratorController
     }
 
     /**
+     * Continue an existing chat session with a follow-up message. Re-opens the
+     * session, appends the user turn, and re-runs the planner with the full
+     * transcript as context. Returns immediately; the browser keeps polling
+     * generate-progress. Plain JSON (no NDJSON) — the job does the async work.
+     */
+    public function generateContinue(Request $request, string $sessionId): JsonResponse
+    {
+        $data = $request->validate([
+            'prompt' => 'required|string|min:10',
+        ]);
+
+        $session = $this->entryBatch->getSession($sessionId);
+        if (! is_array($session)) {
+            return response()->json(['error' => __('This chat has expired. Start a new request.')], 404);
+        }
+
+        if (($session['planning_status'] ?? '') === 'planning') {
+            return response()->json(['error' => __('The agent is still working on the previous message.')], 409);
+        }
+
+        if ($err = $this->entryBatchQueueSetupError()) {
+            return response()->json(['error' => $err], 422);
+        }
+
+        // Re-resolve the per-request cap here, where the CP user is known (the
+        // queued planner has no authenticated user).
+        $maxPlanEntries = EntryCreationPolicy::maxPlanEntries();
+
+        if (! $this->entryBatch->reopenForFollowUp($sessionId, (string) $data['prompt'], $maxPlanEntries)) {
+            return response()->json(['error' => __('This chat has expired. Start a new request.')], 404);
+        }
+
+        PlanEntriesJob::dispatch($sessionId);
+
+        return response()->json(['ok' => true, 'session_id' => $sessionId]);
+    }
+
+    /**
      * Cancel a running batch (jobs still in chain will mark entries cancelled when they start).
      */
     public function generateBatchCancel(string $sessionId): JsonResponse

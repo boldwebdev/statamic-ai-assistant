@@ -177,6 +177,27 @@ class PromptUrlFetcher
         return $out;
     }
 
+    /**
+     * Hosts (lowercased, deduplicated) of the public http(s) URLs a user typed
+     * into a prompt/conversation. Used to build the fetch allowlist so the agent
+     * can only open links the user actually gave it — never URLs it invented.
+     *
+     * @return array<int, string>
+     */
+    public function allowedHostsIn(string $text): array
+    {
+        $hosts = [];
+
+        foreach ($this->extractPublicHttpUrls($text) as $url) {
+            $host = parse_url($url, PHP_URL_HOST);
+            if (is_string($host) && $host !== '') {
+                $hosts[strtolower($host)] = true;
+            }
+        }
+
+        return array_keys($hosts);
+    }
+
     private function normalizeUrlCandidate(string $raw): ?string
     {
         $url = rtrim($raw, '.,;:!?)]}\'"');

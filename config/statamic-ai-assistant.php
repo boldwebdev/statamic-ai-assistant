@@ -354,6 +354,14 @@ return [
     |
     */
     'entry_generator_fetch_url_tool' => (bool) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_FETCH_URL_TOOL', true),
+
+    // When true (default), the agent may only fetch URLs the user actually
+    // provided in their request (plus same-site links within those pages) — it
+    // will never open URLs it invents. This stops it from spidering the open web
+    // and, in particular, from wasting the fetch budget / time on guessed URLs
+    // that don't exist. Set to false to let the model fetch any public URL.
+    'entry_generator_restrict_fetch_to_prompt_urls' => (bool) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_RESTRICT_FETCH_TO_PROMPT_URLS', true),
+
     'entry_generator_tool_max_rounds' => max(1, min(24, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_ROUNDS', 120))),
     'entry_generator_tool_max_fetches' => max(1, min(40, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_FETCHES', 100))),
     // Max read_entry_structure calls per request (the agent reads existing entries
@@ -431,7 +439,7 @@ return [
         // built-in markdown mode, which drops the real article on listing-heavy
         // pages. Set to 'markdown' to use Jina's own extraction as a kill-switch.
         'reader_format' => env('STATAMIC_AI_ASSISTANT_JINA_READER_FORMAT', 'html'),
-        'timeout' => max(5, (int) env('STATAMIC_AI_ASSISTANT_JINA_TIMEOUT', 120)),
+        'timeout' => max(5, (int) env('STATAMIC_AI_ASSISTANT_JINA_TIMEOUT', 25)),
         'max_urls' => max(1, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_URLS', 5)),
         'max_chars_per_url' => max(1000, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_CHARS', 12000)),
         'max_total_chars' => max(5000, (int) env('STATAMIC_AI_ASSISTANT_JINA_MAX_TOTAL_CHARS', 40000)),

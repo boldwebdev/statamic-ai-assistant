@@ -54,8 +54,10 @@ class PlanEntriesJob implements ShouldQueue
             return;
         }
 
+        $cancelMessage = (string) __('Cancelled.');
+
         if ($batch->isCancelled($this->sessionId)) {
-            $batch->markPlanningFailed($this->sessionId, (string) __('Cancelled.'));
+            $batch->markPlanningFailed($this->sessionId, $cancelMessage);
 
             return;
         }
@@ -82,6 +84,13 @@ class PlanEntriesJob implements ShouldQueue
                 : (string) __('BOLD agent planning failed. Please try again.');
 
             $batch->markPlanningFailed($this->sessionId, $message);
+
+            // Record the failure as an assistant turn so the chat history is
+            // coherent for follow-ups — except a plain cancellation, which is
+            // user-driven and not worth surfacing as an agent message.
+            if ($message !== $cancelMessage) {
+                $batch->appendAssistantTurn($this->sessionId, $message, [], 'error');
+            }
         }
     }
 

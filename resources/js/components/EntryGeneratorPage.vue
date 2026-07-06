@@ -51,17 +51,42 @@
         </div>
       </div>
 
-      <!-- User echo: prompt recap -->
-      <div v-if="renderedStep === 3 && promptRecap" class="eg-chat__msg eg-chat__msg--user">
-        <div class="eg-chat__user-wrap">
-          <span class="eg-chat__sender">{{ __('You') }}</span>
-          <div class="eg-chat__bubble eg-chat__bubble--user">
-            <p v-html="chatHtml(promptRecap)"></p>
+      <!-- Conversation history: one block per turn. Assistant turns render their
+           entry cards inline beneath the reply. -->
+      <template v-for="turn in chatTurns" :key="turn.key">
+        <div v-if="turn.role === 'user'" class="eg-chat__msg eg-chat__msg--user">
+          <div class="eg-chat__user-wrap">
+            <span class="eg-chat__sender">{{ __('You') }}</span>
+            <div class="eg-chat__bubble eg-chat__bubble--user">
+              <p v-html="chatHtml(turn.text)"></p>
+            </div>
           </div>
         </div>
-      </div>
+        <div v-else class="eg-chat__msg eg-chat__msg--agent">
+          <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
+          <div v-if="turn.kind === 'error'" class="eg-chat__notice eg-chat__notice--error">
+            <p><strong>{{ __('Something went wrong') }}</strong></p>
+            <p v-html="chatHtml(turn.text)"></p>
+          </div>
+          <p v-else v-html="chatHtml(turn.text)"></p>
 
-      <!-- Step 3: planning indicator -->
+          <div v-if="turn.cards.length" class="eg-chat__cards">
+            <EntryGeneratorEntryCard
+              v-for="(entry, idx) in turn.cards"
+              :key="entry.id"
+              :entry="entry"
+              :index="idx"
+              :auto-expand="turn.cards.length === 1"
+              @save="(mode) => handleCardSave(entry.id, mode)"
+              @retry="handleCardRetry(entry.id)"
+              @discard="handleCardDiscard(entry.id)"
+            />
+          </div>
+        </div>
+      </template>
+
+      <!-- Live turn in progress: planning indicator, not-yet-summarised cards,
+           and the current-turn error (if any). -->
       <div v-if="renderedStep === 3 && store.planning" class="eg-chat__msg eg-chat__msg--agent">
         <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
         <div class="eg-chat__stream-panel" aria-live="polite" aria-busy="true">
@@ -87,37 +112,15 @@
         </div>
       </div>
 
-      <!-- Step 3: plan summary + cards -->
-      <div v-if="renderedStep === 3 && store.plan" class="eg-chat__msg eg-chat__msg--agent">
+      <div v-if="renderedStep === 3 && liveCards.length" class="eg-chat__msg eg-chat__msg--agent">
         <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
-        <p v-if="store.plan.entries.length === 1">{{ __('Drafting one entry for you.') }}</p>
-        <!-- Only announce a count once at least one entry is planned; while the count
-             is still 0 the planning panel + activity feed carry the UX (no "0 entries"). -->
-        <p v-else-if="store.plan.entries.length > 1">{{ __('I will create :n entries:', { n: store.plan.entries.length }) }}</p>
-
-        <div v-if="store.plan.entries.length > 1" class="eg-chat__plan-summary">
-          <span
-            v-for="(e, i) in store.plan.entries"
-            :key="e.id"
-            class="eg-chat__plan-pill"
-            :class="`eg-chat__plan-pill--${cardStatusOf(e.id)}`"
-          >
-            <span class="eg-chat__plan-pill-num">{{ i + 1 }}</span>
-            <span class="eg-chat__plan-pill-text">{{ e.label || e.collection_title }}</span>
-          </span>
-        </div>
-
-        <div v-if="store.plan.warnings && store.plan.warnings.length" class="eg-chat__notice eg-chat__notice--warn">
-          <ul><li v-for="(w, i) in store.plan.warnings" :key="i" v-html="chatHtml(w)"></li></ul>
-        </div>
-
         <div class="eg-chat__cards">
           <EntryGeneratorEntryCard
-            v-for="(entry, idx) in store.entries"
+            v-for="(entry, idx) in liveCards"
             :key="entry.id"
             :entry="entry"
             :index="idx"
-            :auto-expand="store.entries.length === 1"
+            :auto-expand="liveCards.length === 1"
             @save="(mode) => handleCardSave(entry.id, mode)"
             @retry="handleCardRetry(entry.id)"
             @discard="handleCardDiscard(entry.id)"
@@ -125,7 +128,16 @@
         </div>
       </div>
 
-      <!-- Step 3: stop confirmation (inline, above error/footer) -->
+      <!-- Current-turn error not yet folded into the transcript. -->
+      <div v-if="renderedStep === 3 && showLiveGenerationError" class="eg-chat__msg eg-chat__msg--agent">
+        <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
+        <div class="eg-chat__notice eg-chat__notice--error">
+          <p><strong>{{ __('Something went wrong') }}</strong></p>
+          <p v-html="chatHtml(store.generationError)"></p>
+        </div>
+      </div>
+
+      <!-- Stop confirmation (inline, above the composer) -->
       <div v-if="renderedStep === 3 && stopConfirmOpen" class="eg-chat__msg eg-chat__msg--agent">
         <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
         <div class="eg-chat__notice eg-chat__notice--warn eg-stop-confirm">
@@ -148,37 +160,28 @@
         </div>
       </div>
 
-      <!-- Step 3: fatal error -->
-      <div v-if="renderedStep === 3 && store.generationError" class="eg-chat__msg eg-chat__msg--agent">
-        <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
-        <div class="eg-chat__notice eg-chat__notice--error">
-          <p><strong>{{ __('Something went wrong') }}</strong></p>
-          <p v-html="chatHtml(store.generationError)"></p>
-        </div>
-      </div>
-
     </div>
 
     <!-- ── Bottom composer bar ── -->
     <div class="eg-chat__bar">
       <!-- Prompt input (step 2) -->
-      <div v-if="renderedStep === 2" class="eg-chat__composer">
+      <div v-if="renderedStep === 2 || renderedStep === 3" class="eg-chat__composer">
         <textarea
           ref="promptTextarea"
           v-model="store.pendingPrompt"
           class="eg-chat__composer-input"
-          :placeholder="__('Describe one or more entries you want to create… Paste a URL to copy a page (text and images).')"
+          :placeholder="composerPlaceholder"
           rows="1"
-          @keyup.enter.ctrl="handleGenerate"
-          @keyup.enter.meta="handleGenerate"
+          :disabled="store.generating"
+          @keydown.enter="handleComposerEnter"
           @input="autoResize"
         />
         <button
           type="button"
           class="eg-chat__composer-send"
           :disabled="!canGenerate || store.generating"
-          :title="__('Generate')"
-          @click="handleGenerate"
+          :title="__('Send')"
+          @click="handleComposerSend"
         >
           <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M3.105 2.289a.75.75 0 00-.826.95l1.414 4.925A1.5 1.5 0 005.135 9.25h6.115a.75.75 0 010 1.5H5.135a1.5 1.5 0 00-1.442 1.086l-1.414 4.926a.75.75 0 00.826.95l14.095-5.638a.75.75 0 000-1.392L3.105 2.289z" /></svg>
         </button>
@@ -189,7 +192,7 @@
         <template v-if="renderedStep === 2 && !canGenerate">
           <span class="eg-chat__actions-hint">{{ __('Type at least 10 characters…') }}</span>
         </template>
-        <template v-else-if="renderedStep === 3 && store.generating">
+        <template v-else-if="store.generating">
           <span class="eg-chat__actions-status">
             <span class="eg-chat__actions-pulse" />
             {{ generatingStatusText }}
@@ -201,7 +204,7 @@
             @click="requestStop"
           />
         </template>
-        <template v-else-if="renderedStep === 3 && store.plan && store.entries.length > 0">
+        <template v-else-if="renderedStep === 3">
           <span v-if="readyOrSavedSummary" class="eg-chat__actions-summary">{{ readyOrSavedSummary }}</span>
           <Button variant="default" :text="__('New request')" @click="resetForNewRequest" />
           <Button
@@ -211,9 +214,6 @@
             :text="store.bulkSaving ? __('Saving…') : __('Save all as drafts')"
             @click="handleSaveAll('draft')"
           />
-        </template>
-        <template v-else-if="renderedStep === 3 && store.generationError">
-          <Button variant="primary" :text="__('Try again')" @click="resetForNewRequest" />
         </template>
       </div>
     </div>
@@ -334,6 +334,13 @@
           <Button variant="primary" :text="__('Try again')" @click="resetForNewRequest" />
         </div>
       </template>
+      <template v-else-if="store.plannerAnswer && store.entries.length === 0">
+        <h2 class="entry-generator__panel-title">{{ __('Answer') }}</h2>
+        <p v-html="chatHtml(store.plannerAnswer)"></p>
+        <div class="entry-generator__panel-footer">
+          <Button variant="primary" :text="__('New request')" @click="resetForNewRequest" />
+        </div>
+      </template>
       <template v-else>
         <h2 class="entry-generator__panel-title">{{ __('Preview') }}</h2>
         <p class="entry-generator__panel-desc">
@@ -411,12 +418,14 @@ import {
   STATUS,
   setActive,
   startGeneration,
+  continueGeneration,
   saveCard,
   saveAll,
   retryCard,
   discardCard,
   reset as storeReset,
   stopGeneration,
+  stopChatTurn,
   pushActivityLine,
   setI18n,
   setToaster,
@@ -500,6 +509,13 @@ export default {
       return (this.store.pendingPrompt || '').trim();
     },
 
+    /** Composer hint: first message vs. a follow-up in an ongoing chat. */
+    composerPlaceholder() {
+      return this.drawer && this.store.chatSessionId
+        ? this.__('Reply… e.g. “add a FAQ section to this entry”.')
+        : this.__('Describe one or more entries you want to create… Paste a URL to copy a page (text and images).');
+    },
+
     /**
      * Drawer step: when the store has plan/entries/error/generating, render step 3.
      * Otherwise render step 2 (composer).
@@ -508,10 +524,37 @@ export default {
     renderedStep() {
       if (!this.drawer) return this.step;
       const s = this.store;
-      if (s.plan || s.entries.length > 0 || s.generating || s.planning || s.generationError) {
+      if (s.transcript.length > 0 || s.plan || s.entries.length > 0 || s.generating || s.planning || s.generationError || s.plannerAnswer) {
         return 3;
       }
       return 2;
+    },
+
+    /**
+     * The conversation as renderable turns. Assistant turns carry the entry cards
+     * they produced (matched by id) so cards appear inline beneath their reply.
+     */
+    chatTurns() {
+      return (this.store.transcript || []).map((t, i) => ({
+        key: `${i}-${t.role}`,
+        role: t.role,
+        text: t.text,
+        kind: t.kind,
+        cards: t.role === 'assistant' && Array.isArray(t.entry_ids)
+          ? this.store.entries.filter((e) => t.entry_ids.includes(e.id))
+          : [],
+      }));
+    },
+
+    /**
+     * Cards for the in-flight turn — not yet claimed by any transcript turn
+     * (the assistant summary turn is appended only once the turn completes).
+     */
+    liveCards() {
+      const claimed = new Set(
+        (this.store.transcript || []).flatMap((t) => (Array.isArray(t.entry_ids) ? t.entry_ids : [])),
+      );
+      return this.store.entries.filter((e) => !claimed.has(e.id));
     },
 
     planProgressPercent() {
@@ -556,6 +599,14 @@ export default {
       if (failed) parts.push(this.__(':n failed', { n: failed }));
       return parts.join(' · ');
     },
+
+    /** Avoid duplicating an error already folded into the chat transcript. */
+    showLiveGenerationError() {
+      if (!this.store.generationError) return false;
+      const transcript = this.store.transcript || [];
+      const last = transcript[transcript.length - 1];
+      return !(last?.role === 'assistant' && last?.kind === 'error');
+    },
   },
 
   watch: {
@@ -567,6 +618,12 @@ export default {
       });
     },
     'store.entries': {
+      handler() {
+        this.$nextTick(() => this.scrollChatToBottom());
+      },
+      deep: true,
+    },
+    'store.transcript': {
       handler() {
         this.$nextTick(() => this.scrollChatToBottom());
       },
@@ -740,6 +797,30 @@ export default {
       this.chatStickToBottom = true;
     },
 
+    /**
+     * Drawer send: start a new chat on turn 1, or continue the existing one for
+     * follow-ups. Full-page mode never reaches step 3 with a chat session, so it
+     * always starts a fresh generation.
+     */
+    handleComposerEnter(event) {
+      if (event.shiftKey) return;
+      event.preventDefault();
+      this.handleComposerSend();
+    },
+
+    handleComposerSend() {
+      if (!this.canGenerate || this.store.generating) return;
+
+      if (this.drawer && this.store.chatSessionId) {
+        continueGeneration(this.store.pendingPrompt);
+        this.resetComposerHeight();
+        this.chatStickToBottom = true;
+        return;
+      }
+
+      this.handleGenerate();
+    },
+
     handleGenerate() {
       if (!this.canGenerate || this.store.generating) return;
 
@@ -747,9 +828,6 @@ export default {
 
       const useAutoTarget = this.drawer && !this.selectedCollection;
 
-      // Snapshot current composer values into the call. We keep them in the store
-      // so the textarea stays prefilled across close/reopen, but the request uses
-      // the values at submit time.
       startGeneration({
         prompt,
         attachedFile: this.store.pendingAttachedFile,
@@ -757,6 +835,7 @@ export default {
         collection: this.selectedCollection,
         blueprint: this.selectedBlueprint,
       });
+      if (this.drawer) this.resetComposerHeight();
       this.chatStickToBottom = true;
     },
 
@@ -771,7 +850,13 @@ export default {
     handleCardDiscard(id) { discardCard(id); },
 
     requestStop() {
-      // No drafted entries yet → stop straight away (nothing to keep).
+      // Drawer chat: stop just this turn, keeping history + prior cards.
+      if (this.drawer) {
+        stopChatTurn();
+        this.stopConfirmOpen = false;
+        return;
+      }
+      // Full-page wizard: no drafted entries yet → stop straight away.
       if (this.readyDraftedCount === 0) {
         stopGeneration({ keepReady: false });
         return;
@@ -792,6 +877,13 @@ export default {
       const el = e.target;
       el.style.height = 'auto';
       el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+    },
+
+    resetComposerHeight() {
+      this.$nextTick(() => {
+        const el = this.$refs.promptTextarea;
+        if (el) el.style.height = 'auto';
+      });
     },
 
     handleDrop(e) {

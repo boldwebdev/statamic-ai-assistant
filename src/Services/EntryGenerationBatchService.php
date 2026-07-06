@@ -67,6 +67,15 @@ class EntryGenerationBatchService
             'status' => 'running',
             'planning_status' => 'planning',
             'planner_error' => null,
+            // Set when the planner answered a read-only question (no create/update).
+            // A successful informational result, distinct from planner_error.
+            'planner_answer' => null,
+            // Conversation history for the multi-turn chat. One entry per visible
+            // turn: {role, text, entry_ids, kind}. Seeded with the first user turn
+            // so the planner has uniform input from turn 1.
+            'transcript' => [
+                ['role' => 'user', 'text' => $prompt, 'entry_ids' => [], 'kind' => null],
+            ],
             'auto_resolve' => $autoResolve,
             'prompt' => $prompt,
             'collection_handle' => $collectionHandle ?? '',
@@ -165,12 +174,98 @@ class EntryGenerationBatchService
         return $added;
     }
 
+    /**
+     * Append a visible user turn to the conversation transcript.
+     */
+    public function appendUserTurn(string $sessionId, string $text): void
+    {
+        $this->update($sessionId, function (array $session) use ($text): array {
+            $transcript = is_array($session['transcript'] ?? null) ? $session['transcript'] : [];
+            $transcript[] = ['role' => 'user', 'text' => $text, 'entry_ids' => [], 'kind' => null];
+            $session['transcript'] = array_values($transcript);
+
+            return $session;
+        });
+    }
+
+    /**
+     * Append a visible assistant turn (a summary of created/updated entries, a
+     * read-only answer, or an error) to the conversation transcript.
+     *
+     * @param  array<int, string>  $entryIds  Session plan-row ids acted on this turn.
+     */
+    public function appendAssistantTurn(string $sessionId, string $text, array $entryIds = [], string $kind = 'summary'): void
+    {
+        $this->update($sessionId, function (array $session) use ($text, $entryIds, $kind): array {
+            $transcript = is_array($session['transcript'] ?? null) ? $session['transcript'] : [];
+            $transcript[] = [
+                'role' => 'assistant',
+                'text' => $text,
+                'entry_ids' => array_values(array_filter($entryIds, 'is_string')),
+                'kind' => $kind,
+            ];
+            $session['transcript'] = array_values($transcript);
+
+            return $session;
+        });
+    }
+
+    /**
+     * Re-open a finished session for a follow-up chat turn: reset the per-turn
+     * planner scratch and re-run planning, while KEEPING the transcript history
+     * and all prior entries. Recovers a 'completed' or 'cancelled' session.
+     * Returns false if the session no longer exists (expired/unknown).
+     */
+    public function reopenForFollowUp(string $sessionId, string $prompt, ?int $maxPlanEntries): bool
+    {
+        $found = false;
+
+        $this->update($sessionId, function (array $session) use ($prompt, $maxPlanEntries, &$found): array {
+            $found = true;
+
+            $session['status'] = 'running';
+            $session['planning_status'] = 'planning';
+            $session['planner_error'] = null;
+            $session['planner_answer'] = null;
+            $session['prompt'] = $prompt;
+            $session['max_plan_entries'] = $maxPlanEntries !== null ? max(1, $maxPlanEntries) : null;
+
+            $transcript = is_array($session['transcript'] ?? null) ? $session['transcript'] : [];
+            $transcript[] = ['role' => 'user', 'text' => $prompt, 'entry_ids' => [], 'kind' => null];
+            $session['transcript'] = array_values($transcript);
+
+            return $session;
+        });
+
+        return $found;
+    }
+
     public function markPlanningComplete(string $sessionId): void
     {
         $this->update($sessionId, function (array $session): array {
             if (($session['planning_status'] ?? '') === 'planning_failed') {
                 return $session;
             }
+            $session['planning_status'] = 'planned';
+
+            return $session;
+        });
+
+        $this->markCompletedIfDone($sessionId);
+    }
+
+    /**
+     * Record a read-only informational answer (e.g. "which entry contains X?") and
+     * complete planning successfully. Distinct from markPlanningFailed: this is a
+     * legitimate result, not an error, even though no entries were created.
+     */
+    public function recordPlannerAnswer(string $sessionId, string $answer): void
+    {
+        $this->update($sessionId, function (array $session) use ($answer): array {
+            if (($session['planning_status'] ?? '') === 'planning_failed') {
+                return $session;
+            }
+            $session['planner_answer'] = $answer;
             $session['planning_status'] = 'planned';
 
             return $session;
@@ -454,6 +549,8 @@ class EntryGenerationBatchService
                 'status' => (string) ($session['status'] ?? 'running'),
                 'planning_status' => (string) ($session['planning_status'] ?? 'planned'),
                 'planner_error' => $session['planner_error'] ?? null,
+                'planner_answer' => $session['planner_answer'] ?? null,
+                'transcript' => array_values($session['transcript'] ?? []),
                 'auto_resolve' => (bool) ($session['auto_resolve'] ?? true),
                 'prompt' => (string) ($session['prompt'] ?? ''),
                 'entries' => $entriesOut,

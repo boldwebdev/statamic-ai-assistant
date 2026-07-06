@@ -3182,6 +3182,10 @@ html.dark .translation-progress__entry-error {
     word-break: break-all;
 }
 
+.eg-chat__bold {
+    font-weight: 700;
+}
+
 /* ── Card (tool UI, preview) ── */
 
 .eg-chat__card {

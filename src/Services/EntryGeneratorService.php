@@ -39,6 +39,18 @@ class EntryGeneratorService
 
     private const GEN_SKIP_TYPES = ['assets', 'section', 'color'];
 
+    /** Max candidate rows pulled from the store before in-PHP ranking in findEntriesShortlist(). */
+    private const SEARCH_SCAN_LIMIT = 200;
+
+    /** Max entries whose body content is flattened + scanned per searchEntryContent() call. */
+    private const SEARCH_CONTENT_SCAN_LIMIT = 800;
+
+    /** Per-entry cap on flattened content length (chars) before matching, to bound work. */
+    private const SEARCH_CONTENT_FLATTEN_CHARS = 20000;
+
+    /** Structural array keys skipped when flattening entry content (Bard/replicator plumbing). */
+    private const CONTENT_SKIP_KEYS = ['type', 'id', '_id', 'enabled', 'collapsed'];
+
     /**
      * @var array<string, array{by_lower_slug: array<string, string>, by_lower_title: array<string, string>}>
      */
@@ -205,7 +217,7 @@ class EntryGeneratorService
             throw new \RuntimeException(__('The AI returned no content. Check your provider settings and try again.'));
         }
 
-        $parsedData = $this->parseResponse($rawResponse);
+        $parsedData = $this->parseResponseOrRetry($rawResponse, $messages, $maxTokens, $onStreamToken);
 
         // Merge any preferred assets surfaced by the URL augmentation step
         // (single-prompt path) with the explicit ones passed in by the caller.
@@ -268,8 +280,9 @@ class EntryGeneratorService
             : '';
 
         $toolHint = "URL HANDLING RULES — these take priority over any later JSON output rule:\n"
-            ."1. If the user message references one or more http(s) URLs, you MUST call the **fetch_page_content** tool to retrieve them BEFORE producing any output. Never invent or guess content from a URL alone.\n"
-            ."2. After fetching, inspect the returned content. If it is a listing or index page (multiple teasers, news cards, 'read more' links, item summaries with detail URLs), identify the specific item the user asked for and call **fetch_page_content** AGAIN on that item's detail page URL. Write the entry from the detail page body, not from the listing teaser.\n"
+            ."0. Only ever fetch URLs the user explicitly provided in their message (or same-site links found INSIDE those fetched pages). NEVER invent, guess, shorten, or try alternative/variant URLs — a fetch of a guessed URL is a mistake and will be refused. If the user provided NO URL, do not fetch anything: write the entry from the CMS context and your own knowledge.\n"
+            ."1. When the user DID provide one or more http(s) URLs, you MUST call the **fetch_page_content** tool to retrieve them BEFORE producing any output. Never invent or guess content from a URL alone.\n"
+            ."2. After fetching, inspect the returned content. If it is a listing or index page (multiple teasers, news cards, 'read more' links, item summaries with detail URLs) on the SAME site, identify the specific item the user asked for and call **fetch_page_content** AGAIN on that item's detail page URL. Write the entry from the detail page body, not from the listing teaser.\n"
             ."3. If the user asked for 'the first', 'the latest', 'the next', 'the second', or a specific item from a listing, pick the URL that matches that intent and fetch it.\n"
             ."4. You may call the tool multiple times. Pass **url** (full link, https preferred) and **reason** (short: which item or which blueprint field this supports).\n"
             ."5. ONLY after you have the full source text you need, respond with the JSON object for the entry fields — no markdown fences, no commentary — exactly as required by the rules below.\n"
@@ -298,7 +311,12 @@ class EntryGeneratorService
             imageContainerHint: $imageContainerHint,
         );
 
-        $toolset = [new UrlFetchTool($this->promptUrlFetcher)];
+        // Only let the model open URLs the user actually provided (host allowlist
+        // from the prompt) — never URLs it invents. Empty allowlist = no fetching.
+        $restrictFetch = (bool) config('statamic-ai-assistant.entry_generator_restrict_fetch_to_prompt_urls', true);
+        $allowedFetchHosts = UrlFetchTool::hostsFromMessages($this->promptUrlFetcher, $messages);
+
+        $toolset = [new UrlFetchTool($this->promptUrlFetcher, $allowedFetchHosts, $restrictFetch)];
         if ($useImageTool && $this->imageFetcher !== null) {
             $toolset[] = new SaveImageTool($this->imageFetcher);
         }
@@ -507,23 +525,159 @@ class EntryGeneratorService
         $limit = max(1, min(50, $limit));
         $siteHandle = Site::selected()?->handle() ?? Site::default()->handle();
 
-        $q = Entry::query()->where('site', $siteHandle);
+        // A fresh base query per attempt — Statamic's query builder is stateful,
+        // so we rebuild rather than clone.
+        $makeBase = function () use ($siteHandle, $collectionHandle) {
+            $q = Entry::query()->where('site', $siteHandle);
+            if (is_string($collectionHandle) && $collectionHandle !== '') {
+                $q->where('collection', $collectionHandle);
+            }
 
-        if (is_string($collectionHandle) && $collectionHandle !== '') {
-            $q->where('collection', $collectionHandle);
+            return $q;
+        };
+
+        $tokens = $this->searchTokens($query);
+
+        // No meaningful search terms: preserve the old "most recent" behaviour.
+        if ($tokens === []) {
+            return $this->mapEntryRows(
+                $makeBase()->orderBy('updated_at', 'desc')->limit($limit)->get()
+            );
         }
 
-        $needle = trim($query);
-        if ($needle !== '') {
-            $q->where(function ($qq) use ($needle) {
-                $qq->where('title', 'like', '%'.$needle.'%')
-                    ->orWhere('slug', 'like', '%'.$needle.'%');
+        // Primary narrowing: every token must appear in the title OR slug. This is
+        // word-order agnostic and — because tokenising strips connectors like "&",
+        // "+", "and", "und", "et" — a query for "Body Soul" or "Body and Soul" still
+        // finds the entry titled "Body & Soul". `like` is case-insensitive here.
+        $andQuery = $makeBase();
+        foreach ($tokens as $token) {
+            $andQuery->where(function ($qq) use ($token) {
+                $qq->where('title', 'like', '%'.$token.'%')
+                    ->orWhere('slug', 'like', '%'.$token.'%');
             });
         }
+        $candidates = $andQuery->orderBy('updated_at', 'desc')->limit(self::SEARCH_SCAN_LIMIT)->get();
 
-        return $q->orderBy('updated_at', 'desc')
-            ->limit($limit)
-            ->get()
+        // Fallback: if requiring all tokens found nothing (a stray or misspelled
+        // token), relax to "any token" so we still surface near matches instead of
+        // returning zero rows and forcing the agent to give up.
+        if ($candidates->isEmpty()) {
+            $orQuery = $makeBase();
+            $orQuery->where(function ($outer) use ($tokens) {
+                foreach ($tokens as $token) {
+                    $outer->orWhere(function ($qq) use ($token) {
+                        $qq->where('title', 'like', '%'.$token.'%')
+                            ->orWhere('slug', 'like', '%'.$token.'%');
+                    });
+                }
+            });
+            $candidates = $orQuery->orderBy('updated_at', 'desc')->limit(self::SEARCH_SCAN_LIMIT)->get();
+        }
+
+        return $this->rankAndMapEntries($candidates, $query, $tokens, $limit);
+    }
+
+    /**
+     * Break a search query into normalised, comparable tokens.
+     *
+     * Lower-cased and split on any non-alphanumeric run (so punctuation and
+     * symbols never have to match literally). Diacritics are preserved so the
+     * tokens still match accented titles via the DB `like`. Connective words and
+     * symbols ("&", "+", "and", "und", "et", …) are dropped, which is what makes
+     * "Body & Soul", "Body and Soul" and "Body Soul" all resolve to the same entry.
+     *
+     * @return array<int, string>
+     */
+    private function searchTokens(string $query): array
+    {
+        $normalized = mb_strtolower(trim($query));
+        $normalized = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $normalized) ?? '';
+        $parts = preg_split('/\s+/', trim($normalized), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+
+        $connectors = ['and', 'und', 'et', 'y', 'e', 'or', 'oder', 'ou', 'plus'];
+
+        $tokens = [];
+        foreach ($parts as $part) {
+            if (in_array($part, $connectors, true)) {
+                continue;
+            }
+            // Drop single-character noise, but keep short numbers (e.g. years).
+            if (mb_strlen($part) < 2 && ! ctype_digit($part)) {
+                continue;
+            }
+            $tokens[$part] = $part;
+        }
+
+        return array_values($tokens);
+    }
+
+    /**
+     * Rank candidate entries by how well they match the query, then map the top
+     * $limit to the tool's row shape. Exact title beats full-phrase-in-title beats
+     * per-token coverage; ties keep the incoming (recency) order.
+     *
+     * @param  \Illuminate\Support\Collection<int, StatamicEntry>  $candidates
+     * @param  array<int, string>  $tokens
+     * @return array<int, array{id: string, title: string, slug: string, collection: string}>
+     */
+    private function rankAndMapEntries($candidates, string $query, array $tokens, int $limit): array
+    {
+        $queryFold = $this->foldForCompare($query);
+        $tokensFold = array_values(array_filter(array_map(fn ($t) => $this->foldForCompare($t), $tokens)));
+
+        $ranked = $candidates
+            ->map(function ($entry) use ($queryFold, $tokensFold) {
+                $titleFold = $this->foldForCompare((string) ($entry->value('title') ?? ''));
+                $slugFold = $this->foldForCompare((string) ($entry->slug() ?? ''));
+                $haystack = trim($titleFold.' '.$slugFold);
+
+                $score = 0;
+                if ($queryFold !== '' && $titleFold === $queryFold) {
+                    $score += 1000;
+                }
+                if ($queryFold !== '' && str_contains($titleFold, $queryFold)) {
+                    $score += 200;
+                }
+
+                $covered = 0;
+                foreach ($tokensFold as $token) {
+                    if (str_contains($haystack, $token)) {
+                        $covered++;
+                    }
+                }
+                $score += $covered * 10;
+                if ($tokensFold !== [] && $covered === count($tokensFold)) {
+                    $score += 50;
+                }
+
+                return ['entry' => $entry, 'score' => $score];
+            })
+            ->sortByDesc('score') // stable in PHP 8: equal scores keep recency order
+            ->take($limit)
+            ->pluck('entry');
+
+        return $this->mapEntryRows($ranked);
+    }
+
+    /**
+     * Fold a value for tolerant comparison: transliterate to ASCII (é→e, ä→a),
+     * lower-case, and collapse any non-alphanumeric run to a single space.
+     */
+    private function foldForCompare(string $value): string
+    {
+        $value = mb_strtolower(Str::ascii(trim($value)));
+        $value = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $value) ?? '';
+
+        return trim(preg_replace('/\s+/', ' ', $value) ?? '');
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, StatamicEntry>|iterable<StatamicEntry>  $entries
+     * @return array<int, array{id: string, title: string, slug: string, collection: string}>
+     */
+    private function mapEntryRows($entries): array
+    {
+        return collect($entries)
             ->map(fn ($e) => [
                 'id' => (string) $e->id(),
                 'title' => (string) ($e->value('title') ?? ''),
@@ -532,6 +686,153 @@ class EntryGeneratorService
             ])
             ->values()
             ->all();
+    }
+
+    /**
+     * Deep search: find entries whose *body content* (not just title/slug) matches
+     * the query. Each entry's field values are flattened to plain text server-side
+     * and matched with the same tolerant tokenising as findEntriesShortlist(), so a
+     * phrase split across rich-text nodes (e.g. "Kursleitung:" + "Claudia Eva Reinig")
+     * still resolves. The full content never leaves the server — callers receive only
+     * id/title/slug/collection plus a short snippet around the first match.
+     *
+     * @return array<int, array{id: string, title: string, slug: string, collection: string, snippet: string}>
+     */
+    public function searchEntryContent(?string $collectionHandle, string $query, int $limit): array
+    {
+        $limit = max(1, min(50, $limit));
+        $tokens = $this->searchTokens($query);
+        if ($tokens === []) {
+            return [];
+        }
+
+        $siteHandle = Site::selected()?->handle() ?? Site::default()->handle();
+
+        $q = Entry::query()->where('site', $siteHandle);
+        if (is_string($collectionHandle) && $collectionHandle !== '') {
+            $q->where('collection', $collectionHandle);
+        }
+
+        $candidates = $q->orderBy('updated_at', 'desc')->limit(self::SEARCH_CONTENT_SCAN_LIMIT + 1)->get();
+        if ($candidates->count() > self::SEARCH_CONTENT_SCAN_LIMIT) {
+            Log::warning('[entry-gen-tool] search_entry_content hit scan cap; some entries were not scanned', [
+                'collection' => $collectionHandle,
+                'scan_limit' => self::SEARCH_CONTENT_SCAN_LIMIT,
+            ]);
+            $candidates = $candidates->take(self::SEARCH_CONTENT_SCAN_LIMIT);
+        }
+
+        $tokensFold = array_values(array_filter(array_map(fn ($t) => $this->foldForCompare($t), $tokens)));
+
+        $matches = [];
+        foreach ($candidates as $entry) {
+            $flat = $this->flattenEntryText($entry);
+            if ($flat === '') {
+                continue;
+            }
+            $haystack = $this->foldForCompare($flat);
+
+            $hits = 0;
+            foreach ($tokensFold as $token) {
+                if (str_contains($haystack, $token)) {
+                    $hits++;
+                }
+            }
+
+            // Require every token to appear somewhere in the content (precision).
+            if ($tokensFold === [] || $hits < count($tokensFold)) {
+                continue;
+            }
+
+            $matches[] = [
+                'entry' => $entry,
+                'score' => $hits,
+                'snippet' => $this->buildContentSnippet($flat, $tokens),
+            ];
+        }
+
+        // Most token hits first; PHP 8 sort is stable so ties keep recency order.
+        usort($matches, fn ($a, $b) => $b['score'] <=> $a['score']);
+
+        return array_map(fn ($m) => [
+            'id' => (string) $m['entry']->id(),
+            'title' => (string) ($m['entry']->value('title') ?? ''),
+            'slug' => (string) ($m['entry']->slug() ?? ''),
+            'collection' => (string) ($m['entry']->collectionHandle() ?? ''),
+            'snippet' => $m['snippet'],
+        ], array_slice($matches, 0, $limit));
+    }
+
+    /**
+     * Flatten all string leaves of an entry's raw data into one plain-text blob,
+     * skipping structural keys (Bard/replicator plumbing) and capping total length.
+     */
+    private function flattenEntryText(StatamicEntry $entry): string
+    {
+        $parts = [];
+        $this->collectStringLeaves($entry->data()->all(), $parts, 0);
+        $text = trim(preg_replace('/\s+/', ' ', implode(' ', $parts)) ?? '');
+
+        return mb_strlen($text) > self::SEARCH_CONTENT_FLATTEN_CHARS
+            ? mb_substr($text, 0, self::SEARCH_CONTENT_FLATTEN_CHARS)
+            : $text;
+    }
+
+    /**
+     * Recursively gather non-empty string values from nested entry data.
+     *
+     * @param  mixed  $value
+     * @param  array<int, string>  $out
+     */
+    private function collectStringLeaves($value, array &$out, int $depth): void
+    {
+        if ($depth > 12 || count($out) > 5000) {
+            return;
+        }
+
+        if (is_string($value)) {
+            $trimmed = trim($value);
+            if ($trimmed !== '') {
+                $out[] = $trimmed;
+            }
+
+            return;
+        }
+
+        if (is_array($value)) {
+            foreach ($value as $key => $child) {
+                if (is_string($key) && in_array($key, self::CONTENT_SKIP_KEYS, true)) {
+                    continue;
+                }
+                $this->collectStringLeaves($child, $out, $depth + 1);
+            }
+        }
+    }
+
+    /**
+     * A short context window around the first query token found in the flat text.
+     *
+     * @param  array<int, string>  $tokens  Lower-cased, diacritics-preserved query tokens.
+     */
+    private function buildContentSnippet(string $flat, array $tokens): string
+    {
+        $pos = false;
+        foreach ($tokens as $token) {
+            $found = mb_stripos($flat, $token);
+            if ($found !== false) {
+                $pos = $found;
+                break;
+            }
+        }
+
+        if ($pos === false) {
+            return Str::limit($flat, 160);
+        }
+
+        $start = max(0, $pos - 40);
+        $snippet = trim(mb_substr($flat, $start, 200));
+
+        return ($start > 0 ? '…' : '').$snippet.'…';
     }
 
     /**
@@ -1738,6 +2039,73 @@ class EntryGeneratorService
     }
 
     /**
+     * Parse the AI response, retrying ONCE with a strict-JSON correction when the
+     * first reply is not valid JSON. Mid-tier models frequently emit malformed
+     * JSON (unbalanced brackets) for deep nested Bard/replicator structures; a
+     * single corrective round usually recovers instead of failing the whole entry.
+     *
+     * @param  array<int, array<string, mixed>>  $messages  The messages that produced $rawResponse.
+     * @return array<string, mixed>
+     */
+    private function parseResponseOrRetry(string $rawResponse, array $messages, int $maxTokens, ?callable $onStreamToken = null): array
+    {
+        try {
+            return $this->parseResponse($rawResponse);
+        } catch (\RuntimeException $e) {
+            Log::warning('[entry-gen] invalid JSON from model; retrying once with a strict-JSON instruction', [
+                'error' => $e->getMessage(),
+            ]);
+
+            $retryMessages = array_merge($messages, [
+                ['role' => 'assistant', 'content' => Str::limit($rawResponse, 12000)],
+                ['role' => 'user', 'content' =>
+                    'Your previous reply could not be parsed as JSON ('.$e->getMessage().'). '
+                    .'Return the SAME content again as ONE strictly valid, minified JSON object and nothing else — '
+                    .'no markdown fences, no comments, no trailing commas, and every "{" and "[" must be properly closed. '
+                    .'For rich-text (Bard) fields, return the value as an HTML string rather than nested node objects.',
+                ],
+            ]);
+
+            $retryRaw = $this->aiService->generateFromMessages($retryMessages, $maxTokens, $onStreamToken);
+
+            if ($retryRaw === null || $retryRaw === '') {
+                throw $e;
+            }
+
+            return $this->parseResponse($retryRaw);
+        }
+    }
+
+    /**
+     * Coerce a model-supplied Bard value into a flat list of ProseMirror block
+     * nodes. Accepts a `doc` wrapper, a single node, or an already-flat list.
+     *
+     * @param  array<int|string, mixed>  $value
+     * @return array<int, array<string, mixed>>
+     */
+    private function normalizeProseMirrorNodes(array $value): array
+    {
+        // Unwrap a { type: "doc", content: [...] } document.
+        if (($value['type'] ?? null) === 'doc' && is_array($value['content'] ?? null)) {
+            $value = $value['content'];
+        }
+
+        // A single node object → wrap into a list.
+        if (is_string($value['type'] ?? null)) {
+            $value = [$value];
+        }
+
+        $nodes = [];
+        foreach ($value as $node) {
+            if (is_array($node) && is_string($node['type'] ?? null)) {
+                $nodes[] = $node;
+            }
+        }
+
+        return $nodes;
+    }
+
+    /**
      * Log the raw AI response when JSON parsing fails, so a future failure can be
      * diagnosed from the logs (the model output is otherwise lost). The response
      * is capped to keep log lines manageable.
@@ -1856,19 +2224,35 @@ class EntryGeneratorService
         }
 
         if (in_array($type, self::GEN_HTML_TYPES)) {
-            if (! is_string($value) && ! is_scalar($value)) {
+            $buttons = $field->config()['buttons'] ?? null;
+            $buttons = is_array($buttons) ? $buttons : null;
+
+            // In UPDATE mode the current-values snapshot shows Bard content as raw
+            // ProseMirror JSON, so the model often returns the new value the same
+            // way (an array of nodes) rather than as an HTML string. Accept that
+            // directly instead of silently dropping the whole field.
+            if (is_array($value)) {
+                $nodes = $this->normalizeProseMirrorNodes($value);
+
+                if ($nodes === []) {
+                    $this->warnNonScalarDrop($field, $warnings);
+
+                    return null;
+                }
+
+                return $this->sanitizeBardNodesForFieldButtons($nodes, $buttons);
+            }
+
+            if (! is_scalar($value)) {
                 $this->warnNonScalarDrop($field, $warnings);
+
                 return null;
             }
             $html = is_string($value) ? $value : (string) $value;
 
             $nodes = $this->htmlToFullBardDocument($html);
-            $buttons = $field->config()['buttons'] ?? null;
 
-            return $this->sanitizeBardNodesForFieldButtons(
-                $nodes,
-                is_array($buttons) ? $buttons : null,
-            );
+            return $this->sanitizeBardNodesForFieldButtons($nodes, $buttons);
         }
 
         if (in_array($type, self::GEN_CHOICE_TYPES)) {
@@ -2482,7 +2866,7 @@ class EntryGeneratorService
             throw new \RuntimeException(__('The AI returned no content. Check your provider settings and try again.'));
         }
 
-        $parsedData = $this->parseResponse($rawResponse);
+        $parsedData = $this->parseResponseOrRetry($rawResponse, $messages, $maxTokens, $onStreamToken);
         $result = $this->mapToFieldData($parsedData, $blueprint, $locale, $prompt, null, true);
 
         // Resolve asset fields (top-level + nested in groups) the LLM asked to

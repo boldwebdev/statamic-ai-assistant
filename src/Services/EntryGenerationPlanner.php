@@ -78,8 +78,9 @@ class EntryGenerationPlanner
 
         $urlToolHint = $useUrlTool
             ? "URL HANDLING RULES — these take priority over any later JSON output rule:\n"
-                ."1. If the user message references one or more http(s) URLs, you MUST call the **fetch_page_content** tool to retrieve them BEFORE producing JSON. Never guess how many entries to plan from a URL alone.\n"
-                ."2. Use the fetched content to decide how many entries to create. If the URL is a homepage, sitemap, listing, or section index, fetch additional sub-pages as needed to enumerate every item the user asked about.\n"
+                ."0. Only ever fetch URLs the user explicitly provided (or same-site links found inside those fetched pages). NEVER invent, guess, or try alternative/variant URLs — a guessed URL will be refused. If the user provided NO URL, do not fetch anything: plan from the request and the CMS context alone.\n"
+                ."1. When the user DID provide one or more http(s) URLs, you MUST call the **fetch_page_content** tool to retrieve them BEFORE producing JSON. Never guess how many entries to plan from a URL alone.\n"
+                ."2. Use the fetched content to decide how many entries to create. If the URL is a homepage, sitemap, listing, or section index on the SAME site, fetch additional sub-pages as needed to enumerate every item the user asked about.\n"
                 ."3. For requests like 'all pages of this website', 'every news on this page', or 'one entry per article', produce **one `entries[]` row per distinct article/item** you discovered (capped at {$maxEntries}). Each row must have its own `label` and `prompt` that cites **exactly one** canonical detail-page URL for that item. Never collapse many articles into a single plan row — the downstream generator creates **one CMS entry per plan row**.\n"
                 ."4. You may call the tool multiple times. Pass **url** (full link) and **reason** (short: which planning step this supports).\n"
                 ."5. ONLY after you have understood the source structure, respond with the JSON object — no markdown fences, no commentary.\n"
@@ -243,18 +244,22 @@ class EntryGenerationPlanner
 
         $system = "You are a Statamic CMS planner running asynchronously. The user described one or more entries they want to create OR update. "
             ."Your job is to figure out which case applies and dispatch tool calls accordingly. **Never produce JSON output yourself** — entries are created or updated exclusively through tool calls.\n\n"
+            ."This may be an ongoing conversation: earlier turns appear as prior messages. When the user says \"this entry\", \"it\", \"the same page\", etc., they mean an entry discussed in an earlier turn — the assistant turns note the entries they acted on (with entry_id for updates). Use that id to target it, or call find_entries / search_entry_content to re-resolve it by name. Only act on what the newest user message asks for.\n\n"
             .$singleEntryRule
             ."AVAILABLE TOOLS:\n"
-            ."- `fetch_page_content`: read external http(s) URLs.\n"
+            ."- `fetch_page_content`: read external http(s) URLs — but ONLY URLs the user explicitly provided (or same-site links inside those pages). Never invent, guess, or try alternative/variant URLs; if the user gave no URL, do not fetch anything.\n"
             ."- `create_entry_job`: queue ONE new entry for asynchronous creation.\n"
             ."- `update_entry_job`: queue an UPDATE to an existing entry (you must know its `entry_id`).\n"
             ."- `find_entries`: search existing entries by title/slug when the catalog shortlist below is not enough.\n"
+            ."- `search_entry_content`: find an entry by a phrase/name/value that appears INSIDE its body content (not its title). Use this when the user quotes text from within a page rather than its title.\n"
+            ."- `answer_question`: reply to a read-only question without creating or updating anything.\n"
             ."- `read_entry_structure`: read an existing entry's layout/components (its sets in order) so a new or updated entry can mirror them. Pass `entry_id` (from the catalog or find_entries) or a title/slug `query`. The reference entry may use a different blueprint — mirror the structure, but each per-entry `prompt` you write must instruct mapping onto the target blueprint's own sets, never copying set handles blindly.\n\n"
             ."WORKFLOW:\n"
-            ."1. Decide whether the user wants to create new entries, update existing entries, or both. Phrases like \"add\", \"new\", \"create\", \"write a post about\" → create. Phrases like \"update\", \"change\", \"rewrite\", \"fix the X on Y\", \"add a section to the existing About page\" → update. When the user refers to content by a definite name (\"the About page\", \"our rooms page\", \"unsere Zimmer-Seite\") the entry most likely EXISTS — treat that as update intent unless they explicitly ask for a new entry.\n"
-            ."2. For UPDATES: find the target entry's `entry_id`. The catalog below carries an `entries` shortlist (recently updated) and a `count` per collection. If the right entry is in the shortlist, use its id directly. If not, call **find_entries** with a query (and optionally a collection handle) to search. If the intent is clearly UPDATE but neither the shortlist nor find_entries locates the entry, do NOT fall back to creating a new entry — end with `Cannot proceed:` naming the entry you could not find.\n"
+            ."0. First decide whether the user is REQUESTING A CHANGE (create/update) or just ASKING A QUESTION. If they are only asking a read-only question (\"which entry contains X?\", \"do we have a page about Y?\", \"what is the id of Z?\", or a superlative like \"which is the biggest / longest / newest entry in Events?\"), do NOT create or update anything and do NOT ask the user for a title — a question never needs one. Gather what you need with find_entries (optionally scoped to a collection handle) and/or search_entry_content, then call **answer_question** with a concise answer. That ends the run successfully. Follow-up messages in an ongoing conversation are frequently such questions.\n"
+            ."1. Otherwise, decide whether the user wants to create new entries, update existing entries, or both. Phrases like \"add\", \"new\", \"create\", \"write a post about\" → create. Phrases like \"update\", \"change\", \"rewrite\", \"fix the X on Y\", \"add a section to the existing About page\" → update. When the user refers to content by a definite name (\"the About page\", \"our rooms page\", \"unsere Zimmer-Seite\") the entry most likely EXISTS — treat that as update intent unless they explicitly ask for a new entry.\n"
+            ."2. For UPDATES: find the target entry's `entry_id`. A title alone is ENOUGH to identify an entry — never claim the target is ambiguous or unknown just because the user only gave a title. The catalog below carries an `entries` shortlist (recently updated) and a `count` per collection. First scan the shortlist and match the named entry by title, ignoring case, punctuation and connective words (so \"Body Soul\", \"Body and Soul\" and \"Body & Soul\" all refer to the same entry); if you find it, use its id directly. If it is not in the shortlist, you MUST call **find_entries** with the title (and optionally a collection handle) before concluding anything. If the user identifies the entry by a phrase or value from its body/content rather than a title, call **search_entry_content** instead. Only after searching returns no match may you give up. If the intent is clearly UPDATE but neither the shortlist nor find_entries locates the entry, do NOT fall back to creating a new entry — end with `Cannot proceed:` naming the entry you could not find.\n"
             ."2b. AVOID DUPLICATES on creates: before dispatching create_entry_job for content that may already exist (a topic matching an entry title in the shortlist, or a fetched URL whose title matches an existing entry), check the shortlist or call find_entries. If a matching entry exists and the user's wording is compatible with updating it, prefer update_entry_job over creating a near-duplicate.\n"
-            ."3. For CREATES with URLs in the user message, call **fetch_page_content** first to inspect them. For listing/index URLs, enumerate every relevant detail page.\n"
+            ."3. For CREATES with URLs in the user message, call **fetch_page_content** first to inspect them. For listing/index URLs on the same site, enumerate every relevant detail page. Do NOT fetch URLs the user did not provide — never guess or try URLs that might exist.\n"
             ."4. Dispatch each entry as soon as you have enough info — do not wait to plan all entries before dispatching. Each tool call enqueues a worker that starts immediately, in parallel.\n"
             ."5. Use one tool call per distinct entry. Never collapse many entries into a single call. The combined cap is {$cap} create_entry_job + update_entry_job calls per request.\n"
             ."6. For CREATES: pick collection + blueprint **only** from the catalog below (handles must match exactly, case-sensitive). The chosen blueprint must be one listed for that collection. If unsure, prefer the collection whose handle is `pages` if present; otherwise the first catalog collection.\n"
@@ -262,18 +267,49 @@ class EntryGenerationPlanner
             ."8. The `label` is a short human title (2-6 words) for the UI in the user's language.\n"
             .$this->germanNoEszettPlannerRule($locale)
             ."9. When you have dispatched every entry the user asked for (or hit the cap), end your turn with a short plain-text summary like `Done — N actions dispatched.` (no JSON, no tool calls).\n"
-            ."10. If the request is impossible (e.g. update target cannot be found, no usable URL, ambiguous intent), end your turn with a short plain-text explanation starting with `Cannot proceed:`.";
+            ."10. If the request is impossible, end your turn with a short plain-text explanation starting with `Cannot proceed:`. But NEVER give up on an update target without first checking the shortlist AND calling find_entries — a bare title is not a reason to stop.";
 
         $attachmentPart = $attachment
             ? "\n\nAdditional context from an attached document (excerpt):\n".Str::limit($attachment, 6000)
             : '';
 
-        $user = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$prompt}{$attachmentPart}";
+        // Build the message array from the conversation transcript so follow-up
+        // turns carry context. Only the newest user turn carries the catalog +
+        // attachment. On turn 1 the transcript is exactly [user], so this yields
+        // the same [system, user] shape as a single-shot request (regression-tested).
+        $transcript = is_array($session['transcript'] ?? null) && $session['transcript'] !== []
+            ? $session['transcript']
+            : [['role' => 'user', 'text' => $prompt, 'entry_ids' => [], 'kind' => null]];
 
-        $messages = [
-            ['role' => 'system', 'content' => $system],
-            ['role' => 'user', 'content' => $user],
-        ];
+        $lastUserIdx = null;
+        foreach ($transcript as $i => $turn) {
+            if (($turn['role'] ?? '') === 'user') {
+                $lastUserIdx = $i;
+            }
+        }
+
+        $messages = [['role' => 'system', 'content' => $system]];
+        foreach ($transcript as $i => $turn) {
+            $role = ($turn['role'] ?? '') === 'assistant' ? 'assistant' : 'user';
+            $text = (string) ($turn['text'] ?? '');
+            if ($role === 'assistant') {
+                $text .= $this->renderEntryRefs(
+                    is_array($turn['entry_ids'] ?? null) ? $turn['entry_ids'] : [],
+                    $session,
+                );
+            }
+            if ($i === $lastUserIdx) {
+                $text = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$text}{$attachmentPart}";
+            }
+            if (trim($text) === '') {
+                continue; // never send an empty message (some providers reject them)
+            }
+            $messages[] = ['role' => $role, 'content' => $text];
+        }
+
+        // Absolute cap for addPlannedEntry: prior turns' entries accumulate in the
+        // session, so a follow-up gets its own per-turn allowance on top of them.
+        $priorEntryCount = is_array($session['entry_order'] ?? null) ? count($session['entry_order']) : 0;
 
         $heartbeat = function () use ($sessionId): void {
             // Cancellation poll between LLM rounds + tool calls; throwing exits the loop.
@@ -283,6 +319,7 @@ class EntryGenerationPlanner
         };
 
         $toolWarnings = [];
+        $createdRowIds = [];
         $this->planAgenticToolLoop(
             $messages,
             $prompt,
@@ -291,6 +328,8 @@ class EntryGenerationPlanner
             $cap,
             $toolWarnings,
             $heartbeat,
+            $priorEntryCount,
+            $createdRowIds,
         );
 
         foreach ($toolWarnings as $w) {
@@ -299,7 +338,93 @@ class EntryGenerationPlanner
             }
         }
 
+        // Record this turn's outcome in the transcript so the next turn has context.
+        // The answer_question path already recorded its own assistant turn in the loop.
+        if ($createdRowIds !== []) {
+            $this->batch->appendAssistantTurn(
+                $sessionId,
+                $this->summarizeCreatedEntries($createdRowIds, $sessionId),
+                $createdRowIds,
+                'summary',
+            );
+        }
+
         $this->batch->markPlanningComplete($sessionId);
+    }
+
+    /**
+     * A short human-readable suffix naming the entries an assistant turn acted on,
+     * so a later "add a section to this entry" can resolve the target.
+     *
+     * @param  array<int, string>  $entryRowIds  Session plan-row ids from a prior turn.
+     * @param  array<string, mixed>  $session
+     */
+    private function renderEntryRefs(array $entryRowIds, array $session): string
+    {
+        $entries = is_array($session['entries'] ?? null) ? $session['entries'] : [];
+        $parts = [];
+        foreach ($entryRowIds as $rid) {
+            $row = $entries[(string) $rid] ?? null;
+            if (! is_array($row)) {
+                continue;
+            }
+            $label = (string) ($row['label'] ?? '');
+            $op = (string) ($row['operation'] ?? 'create');
+            $statamicId = isset($row['entry_id']) && is_string($row['entry_id']) ? $row['entry_id'] : '';
+            $desc = $label !== '' ? "“{$label}”" : (string) ($row['collection_title'] ?? ($row['collection'] ?? 'entry'));
+            if ($op === 'update' && $statamicId !== '') {
+                $desc .= " (entry_id {$statamicId})";
+            }
+            $desc .= " [{$op}]";
+            $parts[] = $desc;
+        }
+
+        return $parts === [] ? '' : "\n(Entries this turn: ".implode('; ', $parts).')';
+    }
+
+    /**
+     * Deterministic summary of the entries dispatched this turn (ids/labels are
+     * guaranteed correct, unlike the model's free-text tail).
+     *
+     * @param  array<int, string>  $createdRowIds
+     */
+    private function summarizeCreatedEntries(array $createdRowIds, string $sessionId): string
+    {
+        $session = $this->batch?->getSession($sessionId);
+        $entries = is_array($session['entries'] ?? null) ? $session['entries'] : [];
+
+        $created = [];
+        $updated = [];
+        foreach ($createdRowIds as $rid) {
+            $row = $entries[(string) $rid] ?? null;
+            if (! is_array($row)) {
+                continue;
+            }
+            $label = (string) ($row['label'] ?? '');
+            $name = $label !== '' ? "“{$label}”" : (string) ($row['collection_title'] ?? ($row['collection'] ?? 'entry'));
+            if ((string) ($row['operation'] ?? 'create') === 'update') {
+                $updated[] = $name;
+            } else {
+                $created[] = $name;
+            }
+        }
+
+        $clauses = [];
+        if ($created !== []) {
+            $clauses[] = (string) __('created :names', ['names' => implode(', ', $created)]);
+        }
+        if ($updated !== []) {
+            $clauses[] = (string) __('updated :names', ['names' => implode(', ', $updated)]);
+        }
+
+        if ($clauses === []) {
+            $n = count($createdRowIds);
+
+            return (string) __('Done — :n actions dispatched.', ['n' => $n]);
+        }
+
+        // "Done — created “A”, “B” and updated “C”."
+        return (string) __('Done — :summary.', ['summary' => implode(' '.__('and').' ', $clauses)]);
     }
 
     /**
@@ -312,8 +437,11 @@ class EntryGenerationPlanner
      */
     private function planWithToolLoop(array $messages, string $userPrompt, array &$toolWarningsOut, ?callable $streamHeartbeat = null): string
     {
+        $restrictFetch = (bool) config('statamic-ai-assistant.entry_generator_restrict_fetch_to_prompt_urls', true);
+        $allowedFetchHosts = UrlFetchTool::hostsFromMessages($this->promptUrlFetcher, $messages);
+
         $runner = new ChatToolRunner([
-            new UrlFetchTool($this->promptUrlFetcher),
+            new UrlFetchTool($this->promptUrlFetcher, $allowedFetchHosts, $restrictFetch),
             new ReadEntryStructureTool(
                 new EntryStructureSerializer,
                 fn (?string $collection, string $query, int $limit) => $this->generator->findEntriesShortlist($collection, $query, $limit),
@@ -408,6 +536,8 @@ class EntryGenerationPlanner
         int $cap,
         array &$toolWarningsOut,
         ?callable $streamHeartbeat = null,
+        int $priorEntryCount = 0,
+        array &$createdRowIdsOut = [],
     ): void {
         // Shared runner for the stateless read tools (URL fetch + entry-structure
         // read). The stateful job tools (create/update/find) stay outside the
@@ -420,8 +550,11 @@ class EntryGenerationPlanner
             heartbeat: $streamHeartbeat,
             activitySink: fn (string $line) => $this->batch?->appendPlannerActivity($sessionId, $line),
         );
+        $restrictFetch = (bool) config('statamic-ai-assistant.entry_generator_restrict_fetch_to_prompt_urls', true);
+        $allowedFetchHosts = UrlFetchTool::hostsFromMessages($this->promptUrlFetcher, $messages);
+
         $runner = new ChatToolRunner([
-            new UrlFetchTool($this->promptUrlFetcher),
+            new UrlFetchTool($this->promptUrlFetcher, $allowedFetchHosts, $restrictFetch),
             new ReadEntryStructureTool(
                 new EntryStructureSerializer,
                 fn (?string $collection, string $query, int $limit) => $this->generator->findEntriesShortlist($collection, $query, $limit),
@@ -440,10 +573,19 @@ class EntryGenerationPlanner
             // dispatch branches below; create_entry_job is unaffected.
             $this->updateEntryJobToolDefinition($cap),
             $this->findEntriesToolDefinition(),
+            $this->searchEntryContentToolDefinition(),
+            $this->answerQuestionToolDefinition(),
         ]);
         $maxRounds = (int) config('statamic-ai-assistant.entry_generator_tool_max_rounds', 120);
         $maxTokens = max(4096, (int) config('statamic-ai-assistant.entry_generator_planner_max_output_tokens', 12000));
         $created = 0;
+        // Counts every entry-locating search (find_entries + search_entry_content);
+        // used to decide whether a give-up happened without any search attempt.
+        $searchCalls = 0;
+        // One-shot guard for the "gave up without searching" self-correction below.
+        $nudgedEmptyResult = false;
+        // Set when the model calls answer_question — a read-only answer, not a failure.
+        $plannerAnswer = null;
 
         $promptHasUrl = (bool) preg_match('~\bhttps?://[^\s<>\]\}\)\"\'`]+~iu', $userPrompt);
         $working = $messages;
@@ -463,6 +605,8 @@ class EntryGenerationPlanner
             if (! is_array($msg)) {
                 throw new \RuntimeException(__('Unexpected planner response shape.'));
             }
+
+            $msg = $this->normalizeAssistantMessage($msg);
 
             $toolCalls = $msg['tool_calls'] ?? null;
             $hasToolCalls = is_array($toolCalls) && $toolCalls !== [];
@@ -484,11 +628,35 @@ class EntryGenerationPlanner
                 // Read tools (fetch_page_content, read_entry_structure) go through
                 // the shared runner. The stateful job tools are handled in the
                 // fallback so their session/cap mutations stay in the planner.
-                $runner->consume($toolCalls, $working, function (string $name, string $args) use ($sessionId, $catalog, $cap, &$created) {
+                // Absolute cap for addPlannedEntry (prior turns' entries + this
+                // turn's allowance); $cap stays the per-turn model limit.
+                $addCap = $priorEntryCount + $cap;
+
+                $runner->consume($toolCalls, $working, function (string $name, string $args) use ($sessionId, $catalog, $cap, $addCap, &$created, &$searchCalls, &$plannerAnswer, &$createdRowIdsOut) {
+                    if ($name === 'answer_question') {
+                        try {
+                            $decoded = json_decode($args, true, 512, JSON_THROW_ON_ERROR);
+                        } catch (\JsonException) {
+                            return ['ok' => false, 'error' => 'invalid_arguments_json'];
+                        }
+                        $answer = is_array($decoded) && isset($decoded['answer']) && is_string($decoded['answer'])
+                            ? trim($decoded['answer'])
+                            : '';
+                        if ($answer === '') {
+                            return ['ok' => false, 'error' => 'missing_answer'];
+                        }
+                        $plannerAnswer = $answer;
+
+                        return ['ok' => true];
+                    }
+
                     if ($name === 'create_entry_job') {
-                        $result = $this->handleCreateEntryJobToolCall($args, $sessionId, $catalog, $cap, $created);
+                        $result = $this->handleCreateEntryJobToolCall($args, $sessionId, $catalog, $cap, $created, $addCap);
                         if (($result['ok'] ?? false) === true) {
                             $created++;
+                            if (isset($result['id']) && is_string($result['id'])) {
+                                $createdRowIdsOut[] = $result['id'];
+                            }
                         }
 
                         return $result;
@@ -496,26 +664,84 @@ class EntryGenerationPlanner
 
                     // BOLD agent UPDATE tool — independent of create_entry_job.
                     if ($name === 'update_entry_job') {
-                        $result = $this->handleUpdateEntryJobToolCall($args, $sessionId, $catalog, $cap, $created);
+                        $result = $this->handleUpdateEntryJobToolCall($args, $sessionId, $catalog, $cap, $created, $addCap);
                         if (($result['ok'] ?? false) === true) {
                             $created++;
+                            if (isset($result['id']) && is_string($result['id'])) {
+                                $createdRowIdsOut[] = $result['id'];
+                            }
                         }
 
                         return $result;
                     }
 
                     if ($name === 'find_entries') {
+                        $searchCalls++;
+
                         return $this->handleFindEntriesToolCall($args);
+                    }
+
+                    if ($name === 'search_entry_content') {
+                        $searchCalls++;
+
+                        return $this->handleSearchEntryContentToolCall($args);
                     }
 
                     return null;
                 });
+
+                // answer_question is terminal: the model answered a read-only
+                // question. Record it as a successful result (not a failure) and stop.
+                if ($plannerAnswer !== null) {
+                    $this->completePlannerAnswer($sessionId, $plannerAnswer, $round, $created);
+
+                    return;
+                }
 
                 continue;
             }
 
             $content = $msg['content'] ?? '';
             if (is_string($content) && trim($content) !== '') {
+                // Some models emit answer_question as plain assistant text instead of
+                // a structured tool_call (e.g. answer_question:{"answer":"…"}). Treat
+                // that as a successful read-only answer, not a planning failure.
+                $plainAnswer = $this->extractAnswerQuestion($content);
+                if ($plainAnswer !== null) {
+                    $this->completePlannerAnswer($sessionId, $plainAnswer, $round, $created);
+
+                    return;
+                }
+
+                // Self-correction: mid-tier models sometimes bail with "Cannot
+                // proceed / I can't determine which entry" WITHOUT ever calling a
+                // search tool — even for a read-only question they could just answer,
+                // or when the entry sits in the catalog shortlist. If nothing was
+                // dispatched and no search was attempted, nudge the model to either
+                // answer the question or resolve the target before accepting the
+                // give-up. Fires at most once, so a truly-impossible request still ends.
+                if ($created === 0 && $searchCalls === 0 && ! $nudgedEmptyResult) {
+                    $nudgedEmptyResult = true;
+
+                    Log::info('[entry-gen-tool] agentic planner bailed without searching; nudging retry', [
+                        'round' => $round + 1,
+                    ]);
+
+                    $working[] = [
+                        'role' => 'assistant',
+                        'content' => $content,
+                    ];
+                    $working[] = [
+                        'role' => 'user',
+                        'content' => 'Do not give up yet — you have not used any tools. First re-read the newest user message and decide the intent:'."\n"
+                            .'• IF IT IS A READ-ONLY QUESTION (e.g. "which is the biggest/longest entry?", "which entry contains X?", "do we have a page about Y?", "what is the id of Z?"): this is NOT a create/update request and needs no title from the user. Use find_entries (optionally scoped to a collection handle) and/or search_entry_content to gather what you need, then call answer_question with a concise answer. Never reply "Cannot proceed:" for a question you can look up.'."\n"
+                            .'• IF IT IS A CHANGE REQUEST (create/update): a title alone is enough to identify an entry — do NOT claim the target is ambiguous or unknown before searching. Check the catalog shortlist above, matching by title while ignoring case, punctuation and connective words (so "Body Soul", "Body and Soul" and "Body & Soul" are the same). If it is there, call update_entry_job with its id; if not, call find_entries with the title first.'."\n"
+                            .'Only reply "Cannot proceed:" if, after actually using the tools, the request genuinely cannot be fulfilled.',
+                    ];
+
+                    continue;
+                }
+
                 Log::info('[entry-gen-tool] agentic planner done', [
                     'rounds' => $round + 1,
                     'fetches' => $runner->callCount('fetch_page_content'),
@@ -607,7 +833,7 @@ class EntryGenerationPlanner
      * @param  array<int, array{handle: string, title: string, blueprints: array<int, array{handle: string, title: string}>}>  $catalog
      * @return array{ok: bool, id?: string, count?: int, error?: string}
      */
-    private function handleCreateEntryJobToolCall(string $argumentsJson, string $sessionId, array $catalog, int $cap, int $alreadyCreated): array
+    private function handleCreateEntryJobToolCall(string $argumentsJson, string $sessionId, array $catalog, int $cap, int $alreadyCreated, ?int $addCap = null): array
     {
         if ($this->batch === null || $this->decorator === null) {
             return ['ok' => false, 'error' => 'planner_dependencies_missing'];
@@ -656,7 +882,7 @@ class EntryGenerationPlanner
             'label' => $label,
         ]);
 
-        $added = $this->batch->addPlannedEntry($sessionId, $decorated, $cap);
+        $added = $this->batch->addPlannedEntry($sessionId, $decorated, $addCap ?? $cap);
         if (! $added) {
             return ['ok' => false, 'error' => 'cap_or_session_rejected', 'count' => $alreadyCreated];
         }
@@ -717,13 +943,13 @@ class EntryGenerationPlanner
             'type' => 'function',
             'function' => [
                 'name' => 'find_entries',
-                'description' => 'Search existing entries by title or slug substring. Use when the catalog shortlist does not contain the entry the user is referring to. Returns up to `limit` rows with id/title/slug/collection.',
+                'description' => 'Search existing entries by title or slug. Use when the catalog shortlist does not contain the entry the user is referring to. Matching is tolerant: case-insensitive, word-order independent, and connective words/symbols are ignored (so "Body Soul", "Body and Soul" and "Body & Soul" all match the same entry). Returns up to `limit` rows, best matches first, with id/title/slug/collection.',
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
                         'query' => [
                             'type' => 'string',
-                            'description' => 'Substring to match in entry title or slug (case-insensitive). Required.',
+                            'description' => 'Words from the entry title or slug. Just pass the title as the user said it; punctuation, casing and word order do not need to match. Required.',
                         ],
                         'collection' => [
                             'type' => 'string',
@@ -741,10 +967,175 @@ class EntryGenerationPlanner
     }
 
     /**
+     * @return array{type: string, function: array<string, mixed>}
+     */
+    private function searchEntryContentToolDefinition(): array
+    {
+        return [
+            'type' => 'function',
+            'function' => [
+                'name' => 'search_entry_content',
+                'description' => 'Search INSIDE the body/content of existing entries — not just their title/slug. Use this when the user references an entry by a phrase, sentence, name or value that appears in its content (e.g. "the entry that contains \'Kursleitung: Claudia Eva Reinig\'"). Matching is tolerant (case, punctuation and word order do not matter) and works even when the phrase is split across rich-text blocks. Returns up to `limit` rows with id/title/slug/collection and a short `snippet` showing the match. The entries\' full content is scanned on the server and is NOT returned — only snippets.',
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'query' => [
+                            'type' => 'string',
+                            'description' => 'The words/phrase to look for inside entry content. Required.',
+                        ],
+                        'collection' => [
+                            'type' => 'string',
+                            'description' => 'Optional collection handle to scope (and speed up) the search. Omit to search all collections.',
+                        ],
+                        'limit' => [
+                            'type' => 'integer',
+                            'description' => 'Max rows to return (default 10, max 50).',
+                        ],
+                    ],
+                    'required' => ['query'],
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * Normalize legacy OpenAI `function_call` payloads into `tool_calls`.
+     *
+     * @param  array<string, mixed>  $msg
+     * @return array<string, mixed>
+     */
+    private function normalizeAssistantMessage(array $msg): array
+    {
+        $toolCalls = $msg['tool_calls'] ?? null;
+        if (is_array($toolCalls) && $toolCalls !== []) {
+            return $msg;
+        }
+
+        $fn = $msg['function_call'] ?? null;
+        if (! is_array($fn)) {
+            return $msg;
+        }
+
+        $name = isset($fn['name']) && is_string($fn['name']) ? $fn['name'] : '';
+        if ($name === '') {
+            return $msg;
+        }
+
+        $args = isset($fn['arguments']) && is_string($fn['arguments']) ? $fn['arguments'] : '{}';
+        $msg['tool_calls'] = [[
+            'id' => 'legacy_'.Str::uuid()->toString(),
+            'type' => 'function',
+            'function' => ['name' => $name, 'arguments' => $args],
+        ]];
+
+        return $msg;
+    }
+
+    /**
+     * Parse models that print answer_question as assistant text instead of calling the tool.
+     */
+    private function extractAnswerQuestion(string $content): ?string
+    {
+        $content = trim($content);
+        if ($content === '') {
+            return null;
+        }
+
+        $json = null;
+        if (preg_match('/^answer_question\s*[:(]\s*(\{.*\})\s*\)?$/s', $content, $matches)) {
+            $json = $matches[1];
+        } elseif (preg_match('/^\{\s*"answer"\s*:/s', $content)) {
+            $json = $content;
+        }
+
+        if ($json === null) {
+            return null;
+        }
+
+        try {
+            $decoded = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return null;
+        }
+
+        if (! is_array($decoded) || ! isset($decoded['answer']) || ! is_string($decoded['answer'])) {
+            return null;
+        }
+
+        $answer = trim($decoded['answer']);
+
+        return $answer !== '' ? $answer : null;
+    }
+
+    private function completePlannerAnswer(string $sessionId, string $answer, int $round, int $created): void
+    {
+        Log::info('[entry-gen-tool] agentic planner answered a question', [
+            'rounds' => $round + 1,
+            'entries_created' => $created,
+        ]);
+        $this->batch?->recordPlannerAnswer($sessionId, $answer);
+        $this->batch?->appendAssistantTurn($sessionId, $answer, [], 'answer');
+    }
+
+    /**
+     * @return array{type: string, function: array<string, mixed>}
+     */
+    private function answerQuestionToolDefinition(): array
+    {
+        return [
+            'type' => 'function',
+            'function' => [
+                'name' => 'answer_question',
+                'description' => 'Answer the user directly WITHOUT creating or updating anything. Use this only when the user is asking a read-only question (e.g. "which entry contains X?", "do we already have a page about Y?", "what is the id of Z?") rather than requesting a change. First look the answer up with find_entries / search_entry_content, then call this with a short, complete answer in the user\'s language. Calling this ends the run successfully.',
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'answer' => [
+                            'type' => 'string',
+                            'description' => 'The complete answer to show the user, in their language. Include the entry title and id when relevant.',
+                        ],
+                    ],
+                    'required' => ['answer'],
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * @return array{ok: bool, results?: array<int, array{id: string, title: string, slug: string, collection: string, snippet: string}>, error?: string}
+     */
+    private function handleSearchEntryContentToolCall(string $argumentsJson): array
+    {
+        try {
+            $args = json_decode($argumentsJson, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return ['ok' => false, 'error' => 'invalid_arguments_json'];
+        }
+
+        if (! is_array($args)) {
+            return ['ok' => false, 'error' => 'invalid_arguments_shape'];
+        }
+
+        $query = isset($args['query']) && is_string($args['query']) ? trim($args['query']) : '';
+        if ($query === '') {
+            return ['ok' => false, 'error' => 'missing_query'];
+        }
+
+        $collection = isset($args['collection']) && is_string($args['collection']) ? trim($args['collection']) : null;
+        if ($collection === '') {
+            $collection = null;
+        }
+
+        $limit = isset($args['limit']) && is_numeric($args['limit']) ? (int) $args['limit'] : 10;
+
+        return ['ok' => true, 'results' => $this->generator->searchEntryContent($collection, $query, $limit)];
+    }
+
+    /**
      * @param  array<int, array{handle: string, title: string, blueprints: array<int, array{handle: string, title: string}>}>  $catalog
      * @return array{ok: bool, id?: string, count?: int, error?: string, entry_id?: string, collection?: string}
      */
-    private function handleUpdateEntryJobToolCall(string $argumentsJson, string $sessionId, array $catalog, int $cap, int $alreadyCreated): array
+    private function handleUpdateEntryJobToolCall(string $argumentsJson, string $sessionId, array $catalog, int $cap, int $alreadyCreated, ?int $addCap = null): array
     {
         if ($this->batch === null || $this->decorator === null) {
             return ['ok' => false, 'error' => 'planner_dependencies_missing'];
@@ -801,7 +1192,7 @@ class EntryGenerationPlanner
             'entry_id' => $entryId,
         ]);
 
-        $added = $this->batch->addPlannedEntry($sessionId, $decorated, $cap);
+        $added = $this->batch->addPlannedEntry($sessionId, $decorated, $addCap ?? $cap);
         if (! $added) {
             return ['ok' => false, 'error' => 'cap_or_session_rejected', 'count' => $alreadyCreated];
         }

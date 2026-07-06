@@ -1,5 +1,10 @@
 {
   "title": "Assistente IA",
+  "Entry updated — opened in a new tab. Your other entries are kept here.": "Voce aggiornata — aperta in una nuova scheda. Le altre voci restano qui.",
+  "Entry created — opened in a new tab. Your other entries are kept here.": "Voce creata — aperta in una nuova scheda. Le altre voci restano qui.",
+  "Pop-up blocked — use the “Edit” link on the card to open this entry.": "Pop-up bloccato — usa il link «Modifica» sulla scheda per aprire questa voce.",
+  "Opens in a new tab so your other entries stay here.": "Si apre in una nuova scheda in modo che le altre voci restino qui.",
+  "Skipped fetching :url — the agent only opens links you provide.": "Recupero di :url ignorato — l’assistente apre solo i link forniti da te.",
   "loading": "elaborazione...",
   "generate": "Genera",
   "back": "Indietro",
