@@ -2,7 +2,8 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "cp:sync": "rsync -a --delete resources/dist/build/ ../hotel-eden-spiez-cms/public/vendor/statamic-ai-assistant/build/"
   },
   "devDependencies": {
     "@statamic/cms": "file:vendor/statamic/cms/packages/cms",

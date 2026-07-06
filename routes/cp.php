@@ -13,6 +13,7 @@ Route::prefix('ai-generate')->name('statamic-ai-assistant.generate.')->group(fun
     })->name('page');
 
     Route::get('/collections', [EntryGeneratorController::class, 'collections'])->name('collections');
+    Route::get('/entry-search', [EntryGeneratorController::class, 'entrySearch'])->name('entry-search');
     Route::get('/blueprint-fields', [EntryGeneratorController::class, 'blueprintFields'])->name('blueprint-fields');
     Route::post('/generate', [EntryGeneratorController::class, 'generate'])->name('generate');
     Route::post('/generate-stream', [EntryGeneratorController::class, 'generateStream'])->name('generate-stream');

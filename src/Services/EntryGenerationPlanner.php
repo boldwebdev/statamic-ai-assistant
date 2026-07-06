@@ -8,7 +8,10 @@ use BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy;
 use BoldWeb\StatamicAiAssistant\Support\JsonObjectExtractor;
 use BoldWeb\StatamicAiAssistant\Support\PlanEntryDecorator;
 use BoldWeb\StatamicAiAssistant\Tools\ChatToolRunner;
+use BoldWeb\StatamicAiAssistant\Tools\ListTaxonomiesTool;
 use BoldWeb\StatamicAiAssistant\Tools\ReadEntryStructureTool;
+use BoldWeb\StatamicAiAssistant\Tools\ReadGlobalsTool;
+use BoldWeb\StatamicAiAssistant\Tools\ReadNavTreeTool;
 use BoldWeb\StatamicAiAssistant\Tools\ToolContext;
 use BoldWeb\StatamicAiAssistant\Tools\UrlFetchTool;
 use Illuminate\Support\Facades\Log;
@@ -253,7 +256,10 @@ class EntryGenerationPlanner
             ."- `find_entries`: search existing entries by title/slug when the catalog shortlist below is not enough.\n"
             ."- `search_entry_content`: find an entry by a phrase/name/value that appears INSIDE its body content (not its title). Use this when the user quotes text from within a page rather than its title.\n"
             ."- `answer_question`: reply to a read-only question without creating or updating anything.\n"
-            ."- `read_entry_structure`: read an existing entry's layout/components (its sets in order) so a new or updated entry can mirror them. Pass `entry_id` (from the catalog or find_entries) or a title/slug `query`. The reference entry may use a different blueprint — mirror the structure, but each per-entry `prompt` you write must instruct mapping onto the target blueprint's own sets, never copying set handles blindly.\n\n"
+            ."- `read_entry_structure`: read an existing entry's layout/components (its sets in order) so a new or updated entry can mirror them. Pass `entry_id` (from the catalog or find_entries) or a title/slug `query`. The reference entry may use a different blueprint — mirror the structure, but each per-entry `prompt` you write must instruct mapping onto the target blueprint's own sets, never copying set handles blindly.\n"
+            ."- `read_globals`: read site-wide global values (general settings, contact details, social links, default CTA links). Call with no args for all sets, or a `handle` for one. Use it to reuse real contact info / CTA links instead of inventing them.\n"
+            ."- `read_nav_tree`: read a navigation as a hierarchy of page titles (with URLs + linked entry ids). Call with no args to list navigations, or a `handle` for its tree. Use it to understand site structure or pick internal link targets.\n"
+            ."- `list_taxonomies`: list taxonomies, or the terms of one (pass a `taxonomy` handle). Use the returned slugs when a per-entry prompt must set a `terms` field, so you only reference terms that exist.\n\n"
             ."WORKFLOW:\n"
             ."0. First decide whether the user is REQUESTING A CHANGE (create/update) or just ASKING A QUESTION. If they are only asking a read-only question (\"which entry contains X?\", \"do we have a page about Y?\", \"what is the id of Z?\", or a superlative like \"which is the biggest / longest / newest entry in Events?\"), do NOT create or update anything and do NOT ask the user for a title — a question never needs one. Gather what you need with find_entries (optionally scoped to a collection handle) and/or search_entry_content, then call **answer_question** with a concise answer. That ends the run successfully. Follow-up messages in an ongoing conversation are frequently such questions.\n"
             ."1. Otherwise, decide whether the user wants to create new entries, update existing entries, or both. Phrases like \"add\", \"new\", \"create\", \"write a post about\" → create. Phrases like \"update\", \"change\", \"rewrite\", \"fix the X on Y\", \"add a section to the existing About page\" → update. When the user refers to content by a definite name (\"the About page\", \"our rooms page\", \"unsere Zimmer-Seite\") the entry most likely EXISTS — treat that as update intent unless they explicitly ask for a new entry.\n"
@@ -446,6 +452,9 @@ class EntryGenerationPlanner
                 new EntryStructureSerializer,
                 fn (?string $collection, string $query, int $limit) => $this->generator->findEntriesShortlist($collection, $query, $limit),
             ),
+            new ReadGlobalsTool,
+            new ReadNavTreeTool,
+            new ListTaxonomiesTool,
         ], new ToolContext(
             warningSink: function (string $w) use (&$toolWarningsOut) {
                 $toolWarningsOut[] = $w;
@@ -559,6 +568,9 @@ class EntryGenerationPlanner
                 new EntryStructureSerializer,
                 fn (?string $collection, string $query, int $limit) => $this->generator->findEntriesShortlist($collection, $query, $limit),
             ),
+            new ReadGlobalsTool,
+            new ReadNavTreeTool,
+            new ListTaxonomiesTool,
         ], $toolContext);
 
         // Seed the activity feed so the CP never shows an empty "0 entries" panel

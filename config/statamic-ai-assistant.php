@@ -368,6 +368,11 @@ return [
     // to mirror their layout/components when creating or updating an entry).
     'entry_generator_tool_max_read_entries' => max(1, min(40, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_READ_ENTRIES', 20))),
 
+    // Max calls PER read tool for the generic CMS-context tools (read_globals,
+    // read_nav_tree, list_taxonomies) that let the agent inspect globals, the
+    // navigation hierarchy, and taxonomy terms while planning/writing.
+    'entry_generator_tool_max_cms_reads' => max(1, min(40, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_CMS_READS', 12))),
+
     /*
     |--------------------------------------------------------------------------
     | BOLD agent — multi-entry plan cap

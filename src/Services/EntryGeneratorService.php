@@ -5,7 +5,10 @@ namespace BoldWeb\StatamicAiAssistant\Services;
 use BoldWeb\StatamicAiAssistant\Services\Concerns\TranslatesFields;
 use BoldWeb\StatamicAiAssistant\Support\JsonObjectExtractor;
 use BoldWeb\StatamicAiAssistant\Tools\ChatToolRunner;
+use BoldWeb\StatamicAiAssistant\Tools\ListTaxonomiesTool;
 use BoldWeb\StatamicAiAssistant\Tools\ReadEntryStructureTool;
+use BoldWeb\StatamicAiAssistant\Tools\ReadGlobalsTool;
+use BoldWeb\StatamicAiAssistant\Tools\ReadNavTreeTool;
 use BoldWeb\StatamicAiAssistant\Tools\SaveImageTool;
 use BoldWeb\StatamicAiAssistant\Tools\ToolContext;
 use BoldWeb\StatamicAiAssistant\Tools\UrlFetchTool;
@@ -289,6 +292,7 @@ class EntryGeneratorService
             .$imageRule
             ."- TITLE FROM SOURCE: when you copy a page's content, set the entry's title field to that page's main heading VERBATIM. Use the fetched result's **h1** value (or the \"Page title (H1)\" line / the first top-level \"# \" heading in the fetched content). Do NOT paraphrase, translate, shorten, or invent a new title. Only deviate when the user's prompt explicitly dictates a different title, or when the source page genuinely has no H1 (then derive a concise, faithful title from the content).\n"
             ."- If the user asks to base this entry on the layout/components of an existing entry, call **read_entry_structure** (pass its **entry_id**, or a title/slug **query**) to read that entry's sections in order, then reproduce the same structure. The reference entry may use a different blueprint: map each section onto a set/field that exists in THIS entry's schema below — never copy set handles that are not in this schema.\n"
+            ."- You may also read CMS context to fill fields with real data: **read_globals** for site-wide contact details / CTA links, **read_nav_tree** for internal link targets and site structure, and **list_taxonomies** to get valid term slugs before setting any `terms` field (never invent term slugs).\n"
             ."---\n";
 
         $working = $messages;
@@ -324,6 +328,9 @@ class EntryGeneratorService
             $this->structureSerializer,
             fn (?string $collection, string $query, int $limit) => $this->findEntriesShortlist($collection, $query, $limit),
         );
+        $toolset[] = new ReadGlobalsTool;
+        $toolset[] = new ReadNavTreeTool;
+        $toolset[] = new ListTaxonomiesTool;
         $runner = new ChatToolRunner($toolset, $toolContext);
 
         $maxRounds = (int) config('statamic-ai-assistant.entry_generator_tool_max_rounds', 120);

@@ -41,6 +41,10 @@ export const state = reactive({
   chatSessionId: null,      // durable session id across turns (NOT cleared at poll-terminal)
   bulkSaving: false,
 
+  // Titles referenced via the composer "@" picker this session. Used purely to
+  // render "@Title" tokens as chips in the chat transcript.
+  mentionedTitles: [],
+
   /**
    * Human-readable activity lines (planning = entryId null; drafting = entry uuid).
    * Each item: { id: number, text: string, entryId: string|null }.
@@ -144,6 +148,47 @@ export function setToaster(toast) {
   _toast = toast;
 }
 
+/** Remember a title picked via the "@" entry picker (for transcript chips). */
+export function registerMention(title) {
+  const t = typeof title === 'string' ? title.trim() : '';
+  if (t !== '' && !state.mentionedTitles.includes(t)) {
+    state.mentionedTitles.push(t);
+  }
+}
+
+/** Titles from the session picker that appear as "@Title" in this message. */
+function mentionTitlesForPrompt(text) {
+  const s = String(text || '');
+  if (!s || state.mentionedTitles.length === 0) return [];
+
+  const found = [];
+  for (const title of [...state.mentionedTitles].sort((a, b) => b.length - a.length)) {
+    if (s.includes(`@${title}`)) found.push(title);
+  }
+  return found;
+}
+
+/** Preserve mention_titles when the server transcript overwrites the client copy. */
+function mergeTranscriptMentions(incoming, previous) {
+  if (!Array.isArray(incoming)) return incoming;
+
+  const prevByText = new Map();
+  for (const turn of previous || []) {
+    if (turn?.role === 'user' && turn.text && Array.isArray(turn.mention_titles) && turn.mention_titles.length) {
+      prevByText.set(turn.text, turn.mention_titles);
+    }
+  }
+
+  return incoming.map((turn) => {
+    if (turn?.role !== 'user') return turn;
+    const preserved = prevByText.get(turn.text) || [];
+    const detected = mentionTitlesForPrompt(turn.text);
+    const merged = [...new Set([...preserved, ...detected])];
+    if (merged.length === 0) return turn;
+    return { ...turn, mention_titles: merged };
+  });
+}
+
 // ─── Activity / visibility ───────────────────────────────────────────────
 
 /**
@@ -226,7 +271,7 @@ function applyBatchProgressSnapshot(data) {
 
   // Full conversation history — server is the source of truth. Overwrite each poll.
   if (Array.isArray(data.transcript)) {
-    state.transcript = data.transcript;
+    state.transcript = mergeTranscriptMentions(data.transcript, state.transcript);
     // Errors are rendered from the transcript turn — don't also show the live banner.
     const last = data.transcript[data.transcript.length - 1];
     if (last?.role === 'assistant' && last?.kind === 'error') {
@@ -403,12 +448,14 @@ export async function startGeneration({ prompt, attachedFile, useAutoTarget, col
   const text = (prompt || '').trim();
   if (text.length < 10) return;
 
+  const mentionTitles = mentionTitlesForPrompt(text);
+
   resetGenerationOnly();
   state.generating = true;
   state.planning = true;
   state.pendingPrompt = '';
   // Optimistic first user turn so the chat shows the message before the first poll.
-  state.transcript = [{ role: 'user', text, entry_ids: [], kind: null }];
+  state.transcript = [{ role: 'user', text, entry_ids: [], kind: null, mention_titles: mentionTitles }];
 
   const formData = new FormData();
   if (useAutoTarget) {
@@ -607,9 +654,11 @@ export async function continueGeneration(prompt) {
   state.generationPlanningStatus = 'planning';
   state.pendingPrompt = '';
   state.activityLog = [];
+  const mentionTitles = mentionTitlesForPrompt(text);
+
   // Optimistically show the user's message; the next poll's server transcript
   // (which also contains it) overwrites this idempotently.
-  state.transcript = [...state.transcript, { role: 'user', text, entry_ids: [], kind: null }];
+  state.transcript = [...state.transcript, { role: 'user', text, entry_ids: [], kind: null, mention_titles: mentionTitles }];
 
   const headers = { 'X-Requested-With': 'XMLHttpRequest' };
   const xsrf = getCpXsrfToken();
@@ -902,6 +951,7 @@ function resetGenerationOnly() {
 /** Clear everything except `active`; used when user clicks "New request". */
 export function reset() {
   resetGenerationOnly();
+  state.mentionedTitles = [];
   state._backgroundedAt = null;
 }
 

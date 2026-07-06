@@ -58,7 +58,7 @@
           <div class="eg-chat__user-wrap">
             <span class="eg-chat__sender">{{ __('You') }}</span>
             <div class="eg-chat__bubble eg-chat__bubble--user">
-              <p v-html="chatHtml(turn.text)"></p>
+              <p v-html="chatHtml(turn.text, turn.mention_titles)"></p>
             </div>
           </div>
         </div>
@@ -165,26 +165,62 @@
     <!-- ── Bottom composer bar ── -->
     <div class="eg-chat__bar">
       <!-- Prompt input (step 2) -->
-      <div v-if="renderedStep === 2 || renderedStep === 3" class="eg-chat__composer">
-        <textarea
-          ref="promptTextarea"
-          v-model="store.pendingPrompt"
-          class="eg-chat__composer-input"
-          :placeholder="composerPlaceholder"
-          rows="1"
-          :disabled="store.generating"
-          @keydown.enter="handleComposerEnter"
-          @input="autoResize"
-        />
-        <button
-          type="button"
-          class="eg-chat__composer-send"
-          :disabled="!canGenerate || store.generating"
-          :title="__('Send')"
-          @click="handleComposerSend"
-        >
-          <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M3.105 2.289a.75.75 0 00-.826.95l1.414 4.925A1.5 1.5 0 005.135 9.25h6.115a.75.75 0 010 1.5H5.135a1.5 1.5 0 00-1.442 1.086l-1.414 4.926a.75.75 0 00.826.95l14.095-5.638a.75.75 0 000-1.392L3.105 2.289z" /></svg>
-        </button>
+      <div v-if="renderedStep === 2 || renderedStep === 3" class="eg-chat__composer-wrap">
+        <!-- @-mention entry picker -->
+        <div v-if="mention.open" class="eg-chat__mention" role="listbox">
+          <div class="eg-chat__mention-head">
+            {{ __('Reference an entry') }}
+          </div>
+          <div v-if="mention.loading" class="eg-chat__mention-state">
+            <span class="eg-chat__mention-spinner" aria-hidden="true" />
+            {{ __('Searching…') }}
+          </div>
+          <template v-else>
+            <ul v-if="mention.results.length" ref="mentionList" class="eg-chat__mention-list">
+              <li
+                v-for="(item, i) in mention.results"
+                :key="item.id"
+                role="option"
+                :aria-selected="i === mention.activeIndex"
+                class="eg-chat__mention-item"
+                :class="{ 'is-active': i === mention.activeIndex }"
+                @mousedown.prevent="selectMention(item)"
+                @mousemove="mention.activeIndex = i"
+              >
+                <span class="eg-chat__mention-title">{{ item.title }}</span>
+                <span class="eg-chat__mention-meta">{{ item.collection_title }}</span>
+              </li>
+            </ul>
+            <div v-else class="eg-chat__mention-state">
+              {{ __('No entries found') }}
+            </div>
+          </template>
+        </div>
+
+        <div class="eg-chat__composer">
+          <textarea
+            ref="promptTextarea"
+            v-model="store.pendingPrompt"
+            class="eg-chat__composer-input"
+            :placeholder="composerPlaceholder"
+            rows="1"
+            :disabled="store.generating"
+            @keydown="onComposerKeydown"
+            @keyup="onComposerKeyup"
+            @click="updateMentionFromCaret"
+            @blur="onComposerBlur"
+            @input="onComposerInput"
+          />
+          <button
+            type="button"
+            class="eg-chat__composer-send"
+            :disabled="!canGenerate || store.generating"
+            :title="__('Send')"
+            @click="handleComposerSend"
+          >
+            <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M3.105 2.289a.75.75 0 00-.826.95l1.414 4.925A1.5 1.5 0 005.135 9.25h6.115a.75.75 0 010 1.5H5.135a1.5 1.5 0 00-1.442 1.086l-1.414 4.926a.75.75 0 00.826.95l14.095-5.638a.75.75 0 000-1.392L3.105 2.289z" /></svg>
+          </button>
+        </div>
       </div>
 
       <!-- Action buttons -->
@@ -427,10 +463,11 @@ import {
   stopGeneration,
   stopChatTurn,
   pushActivityLine,
+  registerMention,
   setI18n,
   setToaster,
 } from '../store/entryGeneratorStore.js';
-import { formatChatTextWithBoldUrls } from '../formatChatUrls.js';
+import { formatChatMessageHtml } from '../formatChatUrls.js';
 
 export default {
   name: 'EntryGeneratorPage',
@@ -475,6 +512,20 @@ export default {
         'Polishing titles and details…',
         'Almost ready to show you…',
       ],
+
+      // @-mention entry picker (composer typeahead).
+      mention: {
+        open: false,
+        query: '',
+        results: [],
+        activeIndex: 0,
+        loading: false,
+        start: 0, // index of the triggering "@" in the textarea value
+        end: 0, // caret index when the query was captured
+        _reqId: 0,
+        _debounce: null,
+        _blurTimer: null,
+      },
 
       // Expose the reactive store to the template.
       store: state,
@@ -676,6 +727,8 @@ export default {
   beforeUnmount() {
     this.stopPlanTicker();
     this.stopPlanningHints();
+    clearTimeout(this.mention._debounce);
+    clearTimeout(this.mention._blurTimer);
     // NOTE: We deliberately do NOT abort the in-flight stream here. The store
     // owns it and it must survive component teardown so generation continues
     // when the user navigates away.
@@ -683,8 +736,11 @@ export default {
   },
 
   methods: {
-    chatHtml(text) {
-      return formatChatTextWithBoldUrls(text);
+    chatHtml(text, mentionTitles) {
+      const titles = Array.isArray(mentionTitles) && mentionTitles.length
+        ? mentionTitles
+        : this.store.mentionedTitles;
+      return formatChatMessageHtml(text, titles);
     },
 
     async initializePage() {
@@ -798,18 +854,161 @@ export default {
     },
 
     /**
-     * Drawer send: start a new chat on turn 1, or continue the existing one for
-     * follow-ups. Full-page mode never reaches step 3 with a chat session, so it
-     * always starts a fresh generation.
+     * Composer keydown: when the mention picker is open, arrows/enter/tab/escape
+     * drive it. Otherwise Enter sends (Shift+Enter = newline).
      */
-    handleComposerEnter(event) {
-      if (event.shiftKey) return;
-      event.preventDefault();
-      this.handleComposerSend();
+    onComposerKeydown(event) {
+      if (this.mention.open) {
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          this.moveMention(1);
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          this.moveMention(-1);
+          return;
+        }
+        if (event.key === 'Enter' || event.key === 'Tab') {
+          const item = this.mention.results[this.mention.activeIndex];
+          if (item) {
+            event.preventDefault();
+            this.selectMention(item);
+            return;
+          }
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          this.closeMention();
+          return;
+        }
+      }
+
+      if (event.key === 'Enter') {
+        if (event.shiftKey) return;
+        event.preventDefault();
+        this.handleComposerSend();
+      }
+    },
+
+    onComposerInput(event) {
+      this.autoResize(event);
+      this.updateMentionFromCaret();
+    },
+
+    onComposerKeyup(event) {
+      // Navigation keys are handled in keydown; don't let them re-open/reset.
+      if (this.mention.open && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(event.key)) {
+        return;
+      }
+      this.updateMentionFromCaret();
+    },
+
+    onComposerBlur() {
+      // Delay so a mousedown selection on a list item still registers.
+      this.mention._blurTimer = setTimeout(() => this.closeMention(), 120);
+    },
+
+    /**
+     * Recompute the active "@query" from the caret position. Opens the picker
+     * when the caret sits inside a mention token started by "@" at a word
+     * boundary; closes it otherwise.
+     */
+    updateMentionFromCaret() {
+      const el = this.$refs.promptTextarea;
+      if (!el || this.store.generating) return this.closeMention();
+
+      const value = el.value || '';
+      const caret = el.selectionStart ?? value.length;
+      const upto = value.slice(0, caret);
+      const at = upto.lastIndexOf('@');
+
+      if (at === -1) return this.closeMention();
+
+      const charBefore = at === 0 ? '' : upto[at - 1];
+      if (charBefore && !/\s/.test(charBefore)) return this.closeMention();
+
+      // The active query is a single whitespace-free token. Once the user types a
+      // space, the mention is considered finished (so "@Eden Tea Time and …" stops
+      // querying), while an already-inserted "@Title" with spaces is just text.
+      const query = upto.slice(at + 1);
+      if (/\s/.test(query) || query.length > 40) return this.closeMention();
+
+      this.mention.start = at;
+      this.mention.end = caret;
+      this.mention.query = query;
+      this.mention.open = true;
+      this.searchMentions(query);
+    },
+
+    searchMentions(query) {
+      this.mention.loading = true;
+      clearTimeout(this.mention._debounce);
+      this.mention._debounce = setTimeout(async () => {
+        const reqId = ++this.mention._reqId;
+        try {
+          const { data } = await axios.get('/cp/ai-generate/entry-search', {
+            params: { q: query, limit: 8 },
+          });
+          if (reqId !== this.mention._reqId) return;
+          this.mention.results = Array.isArray(data.results) ? data.results : [];
+          this.mention.activeIndex = 0;
+        } catch (e) {
+          if (reqId !== this.mention._reqId) return;
+          this.mention.results = [];
+        } finally {
+          if (reqId === this.mention._reqId) this.mention.loading = false;
+        }
+      }, 160);
+    },
+
+    moveMention(direction) {
+      const n = this.mention.results.length;
+      if (!n) return;
+      this.mention.activeIndex = (this.mention.activeIndex + direction + n) % n;
+      this.$nextTick(() => {
+        const list = this.$refs.mentionList;
+        const active = list?.children?.[this.mention.activeIndex];
+        active?.scrollIntoView?.({ block: 'nearest' });
+      });
+    },
+
+    selectMention(item) {
+      const el = this.$refs.promptTextarea;
+      const value = this.store.pendingPrompt || '';
+      const token = `@${item.title}`;
+      const before = value.slice(0, this.mention.start);
+      const after = value.slice(this.mention.end);
+      const insert = `${token}${after.startsWith(' ') ? '' : ' '}`;
+
+      this.store.pendingPrompt = before + insert + after;
+      registerMention(item.title);
+      this.closeMention();
+
+      this.$nextTick(() => {
+        if (!el) return;
+        const pos = (before + insert).length;
+        el.focus();
+        el.setSelectionRange(pos, pos);
+        this.autoResize({ target: el });
+      });
+    },
+
+    closeMention() {
+      clearTimeout(this.mention._blurTimer);
+      clearTimeout(this.mention._debounce);
+      this.mention._reqId += 1; // invalidate any in-flight request
+      this.mention.open = false;
+      this.mention.loading = false;
+      this.mention.results = [];
+      this.mention.query = '';
+      this.mention.activeIndex = 0;
     },
 
     handleComposerSend() {
       if (!this.canGenerate || this.store.generating) return;
+
+      this.closeMention();
 
       if (this.drawer && this.store.chatSessionId) {
         continueGeneration(this.store.pendingPrompt);

@@ -42,6 +42,43 @@ class EntryGeneratorController
     }
 
     /**
+     * Typeahead for the chat composer's "@" entry mentions. Reuses the same
+     * native Statamic entry query as the planner's find_entries tool so results
+     * are consistent with what the agent can actually resolve.
+     */
+    public function entrySearch(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'q' => 'nullable|string|max:120',
+            'collection' => 'nullable|string',
+            'limit' => 'nullable|integer',
+        ]);
+
+        $limit = max(1, min(20, (int) ($data['limit'] ?? 8)));
+        $query = trim((string) ($data['q'] ?? ''));
+        $collection = ($data['collection'] ?? '') !== '' ? $data['collection'] : null;
+
+        $rows = $this->generator->findEntriesShortlist($collection, $query, $limit);
+
+        $collectionTitles = Collection::all()->keyBy->handle();
+
+        $results = array_map(function (array $row) use ($collectionTitles) {
+            $handle = (string) ($row['collection'] ?? '');
+            $collection = $collectionTitles->get($handle);
+
+            return [
+                'id' => (string) ($row['id'] ?? ''),
+                'title' => ($row['title'] ?? '') !== '' ? (string) $row['title'] : (string) ($row['slug'] ?? ''),
+                'slug' => (string) ($row['slug'] ?? ''),
+                'collection' => $handle,
+                'collection_title' => $collection ? (string) $collection->title() : $handle,
+            ];
+        }, $rows);
+
+        return response()->json(['results' => array_values($results)]);
+    }
+
+    /**
      * Return the field schema for a given collection + blueprint.
      */
     public function blueprintFields(Request $request): JsonResponse
