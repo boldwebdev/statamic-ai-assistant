@@ -241,6 +241,10 @@ class ServiceProvider extends AddonServiceProvider
                     return;
                 }
 
+                if (! $this->agentEnabledForCurrentUser()) {
+                    return;
+                }
+
                 $nav->settings(__('BOLD agent settings'))
                     ->route('statamic-ai-assistant.block-hints.page')
                     ->icon('layers-stacks');
@@ -249,12 +253,28 @@ class ServiceProvider extends AddonServiceProvider
 
         Statamic::provideToScript([
             'translationsActiv' => config('statamic-ai-assistant.translations'),
-            'entryGeneratorEnabled' => config('statamic-ai-assistant.entry_generator', true),
-            // Effective per-request entry cap for the current user, so the drawer
-            // can message the single-entry limit to non-super users. Server-side
-            // enforcement lives in EntryCreationPolicy / the planner regardless.
-            'entryCreationMax' => \BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy::maxPlanEntries(),
-            'entryCreationLimited' => \BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy::appliesTo(),
+            // Closures are resolved per CP request (User::current() is null at boot).
+            'entryGeneratorEnabled' => fn () => $this->agentEnabledForCurrentUser(),
+            'entryCreationMax' => fn () => \BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy::maxPlanEntries(),
+            'entryCreationLimited' => fn () => \BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy::appliesTo(),
         ]);
+    }
+
+    /**
+     * Whether the BOLD agent (floating button + generator) is available to the
+     * current CP user. Super admins always have access when the master switch
+     * is on; non-super editors additionally require enable_agent_for_editors.
+     */
+    protected function agentEnabledForCurrentUser(): bool
+    {
+        if (! config('statamic-ai-assistant.entry_generator', true)) {
+            return false;
+        }
+
+        if (User::current()?->isSuper()) {
+            return true;
+        }
+
+        return (bool) config('statamic-ai-assistant.enable_agent_for_editors', true);
     }
 }

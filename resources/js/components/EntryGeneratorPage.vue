@@ -10,7 +10,7 @@
       <!-- Agent: welcome -->
       <div class="eg-chat__msg eg-chat__msg--agent">
         <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
-        <p>{{ __('Describe what you need. I can create one entry — or several at once across different collections.') }}</p>
+        <p>{{ __("Describe what you need. I'll choose the right collection and draft the entry for you.") }}</p>
       </div>
 
       <!-- Step 2: brief -->
