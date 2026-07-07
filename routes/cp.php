@@ -1,13 +1,17 @@
 <?php
 
+use BoldWeb\StatamicAiAssistant\Controllers\AgentAccessController;
 use BoldWeb\StatamicAiAssistant\Controllers\EntryGeneratorController;
 use BoldWeb\StatamicAiAssistant\Controllers\FigmaOAuthController;
 use BoldWeb\StatamicAiAssistant\Controllers\SetHintsController;
 use BoldWeb\StatamicAiAssistant\Controllers\TranslationController;
 use BoldWeb\StatamicAiAssistant\Controllers\TranslationGlossaryController;
+use BoldWeb\StatamicAiAssistant\Support\AgentAccess;
 use Illuminate\Support\Facades\Route;
 
-Route::prefix('ai-generate')->name('statamic-ai-assistant.generate.')->group(function () {
+Route::prefix('ai-generate')->name('statamic-ai-assistant.generate.')
+    ->middleware('can:'.AgentAccess::gateAbility('agent'))
+    ->group(function () {
     Route::get('/', function () {
         return view('statamic-ai-assistant::entry-generator');
     })->name('page');
@@ -24,20 +28,34 @@ Route::prefix('ai-generate')->name('statamic-ai-assistant.generate.')->group(fun
     Route::post('/regenerate-field', [EntryGeneratorController::class, 'regenerateField'])->name('regenerate-field');
 });
 
-Route::prefix('ai-block-hints')->name('statamic-ai-assistant.block-hints.')->group(function () {
-    Route::get('/', function () {
-        return view('statamic-ai-assistant::set-hints-settings');
-    })->name('page');
+Route::prefix('ai-block-hints')->name('statamic-ai-assistant.block-hints.')
+    ->middleware('can:'.AgentAccess::gateAbility('agent_settings'))
+    ->group(function () {
+        Route::get('/', function () {
+            return view('statamic-ai-assistant::set-hints-settings');
+        })->name('page');
 
-    Route::get('/list', [SetHintsController::class, 'index'])->name('list');
-    Route::post('/save', [SetHintsController::class, 'save'])->name('save');
-    Route::post('/generate', [SetHintsController::class, 'generate'])->name('generate');
+        Route::get('/list', [SetHintsController::class, 'index'])->name('list');
+        Route::post('/save', [SetHintsController::class, 'save'])->name('save');
+        Route::post('/generate', [SetHintsController::class, 'generate'])->name('generate');
 
     Route::get('/figma/status', [FigmaOAuthController::class, 'status'])->name('figma.status');
     Route::get('/figma/connect', [FigmaOAuthController::class, 'connect'])->name('figma.connect');
     Route::get('/figma/callback', [FigmaOAuthController::class, 'callback'])->name('figma.callback');
     Route::post('/figma/disconnect', [FigmaOAuthController::class, 'disconnect'])->name('figma.disconnect');
 });
+
+// "Who has access" — dedicated settings screen, super-admins only.
+Route::prefix('ai-agent-access')->name('statamic-ai-assistant.access.')
+    ->middleware('can:'.AgentAccess::manageGateAbility())
+    ->group(function () {
+        Route::get('/', function () {
+            return view('statamic-ai-assistant::agent-access');
+        })->name('page');
+
+        Route::get('/data', [AgentAccessController::class, 'index'])->name('data');
+        Route::post('/save', [AgentAccessController::class, 'save'])->name('save');
+    });
 
 Route::prefix('ai-translation-glossary')->name('statamic-ai-assistant.glossary.')->group(function () {
     Route::get('/', function () {
@@ -53,22 +71,27 @@ Route::prefix('ai-translation-glossary')->name('statamic-ai-assistant.glossary.'
 });
 
 Route::prefix('ai-translations')->name('statamic-ai-assistant.')->group(function () {
-    Route::get('/', function () {
-        if (! config('statamic-ai-assistant.bulk_translations', true)) {
-            abort(404);
-        }
-
-        return view('statamic-ai-assistant::translations');
-    })->name('translations');
-
+    // Field-level + page/entry-level translation stay open to every CP user.
     Route::post('/entry', [TranslationController::class, 'translateEntry'])->name('translate.entry');
-    Route::post('/bulk', [TranslationController::class, 'translateBulk'])->name('translate.bulk');
     Route::post('/conflict-check', [TranslationController::class, 'conflictCheck'])->name('translate.conflict-check');
     Route::post('/field', [TranslationController::class, 'translateField'])->name('translate.field');
     Route::get('/progress/{batchId}', [TranslationController::class, 'progress'])->name('translate.progress');
     Route::get('/status', [TranslationController::class, 'status'])->name('translate.status');
     Route::get('/deepl-usage', [TranslationController::class, 'deeplUsage'])->name('translate.deepl-usage');
-    Route::get('/collection-entries', [TranslationController::class, 'collectionEntries'])->name('translate.collection-entries');
-    Route::get('/navigation-entries', [TranslationController::class, 'navigationEntries'])->name('translate.navigation-entries');
-    Route::post('/navigation-sync', [TranslationController::class, 'navigationSync'])->name('translate.navigation-sync');
+
+    // Bulk translation: the page + its bulk-only endpoints require access.
+    Route::middleware('can:'.AgentAccess::gateAbility('bulk_translations'))->group(function () {
+        Route::get('/', function () {
+            if (! config('statamic-ai-assistant.bulk_translations', true)) {
+                abort(404);
+            }
+
+            return view('statamic-ai-assistant::translations');
+        })->name('translations');
+
+        Route::post('/bulk', [TranslationController::class, 'translateBulk'])->name('translate.bulk');
+        Route::get('/collection-entries', [TranslationController::class, 'collectionEntries'])->name('translate.collection-entries');
+        Route::get('/navigation-entries', [TranslationController::class, 'navigationEntries'])->name('translate.navigation-entries');
+        Route::post('/navigation-sync', [TranslationController::class, 'navigationSync'])->name('translate.navigation-sync');
+    });
 });

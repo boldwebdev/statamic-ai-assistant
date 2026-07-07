@@ -477,6 +477,12 @@ class PlanEntriesJobTest extends TestCase
         return ['choices' => [['message' => ['role' => 'assistant', 'content' => $text]]]];
     }
 
+    /** An empty completion — no content, no tool calls (provider hiccup). */
+    private function assistantEmpty(): array
+    {
+        return ['choices' => [['message' => ['role' => 'assistant', 'content' => null]]]];
+    }
+
     /** @param array<string, mixed> $args */
     private function toolCall(string $id, string $name, array $args): array
     {
@@ -591,6 +597,98 @@ class PlanEntriesJobTest extends TestCase
         $this->assertSame('summary', $summary['kind']);
         $this->assertCount(1, $summary['entry_ids']);
         $this->assertStringContainsString('Contact', $summary['text']);
+    }
+
+    public function test_empty_response_is_recovered_by_nudging_then_succeeds(): void
+    {
+        Bus::fake();
+        $captured = [];
+        $generator = $this->catalogStub();
+        // Round 1: empty completion (no content, no tool calls) — must NOT fail.
+        // Round 2 (after nudge): the create. Round 3: final text.
+        $ai = $this->mockAi([
+            $this->assistantEmpty(),
+            $this->assistantToolCalls([$this->toolCall('c', 'create_entry_job', [
+                'collection' => 'pages', 'blueprint' => 'page', 'label' => 'Contact', 'prompt' => 'Write the contact page.',
+            ])]),
+            $this->assistantText('Done.'),
+        ], $captured);
+
+        $sid = $this->initAgenticSession('Write the contact page.');
+        (new PlanEntriesJob($sid))->handle($this->batch, $this->makePlanner($ai, $generator), $generator, new PlanEntryDecorator($generator));
+
+        $session = $this->batch->getSession($sid);
+        $this->assertSame('planned', $session['planning_status']);
+        $this->assertNull($session['planner_error']);
+        $this->assertCount(1, $session['entry_order']);
+        Bus::assertDispatchedTimes(GeneratePlannedEntryJob::class, 1);
+    }
+
+    public function test_ignored_forced_fetch_then_empty_recovers_and_creates(): void
+    {
+        Bus::fake();
+        $captured = [];
+        $generator = $this->catalogStub();
+        // URL prompt → round 1 forces fetch_page_content, but the model ignores it
+        // and returns empty. We must relax to auto + nudge, not get stuck. Round 2
+        // then creates the entry.
+        $ai = $this->mockAi([
+            $this->assistantEmpty(),
+            $this->assistantToolCalls([$this->toolCall('c', 'create_entry_job', [
+                'collection' => 'pages', 'blueprint' => 'page', 'label' => 'Bankette',
+                'prompt' => 'Create a page based on https://www.eden-spiez.ch/hochzeiten-feiern/bankette',
+            ])]),
+            $this->assistantText('Done.'),
+        ], $captured);
+
+        $sid = $this->initAgenticSession('erstelle mir eine neue seite basierend auf: https://www.eden-spiez.ch/hochzeiten-feiern/bankette');
+        (new PlanEntriesJob($sid))->handle($this->batch, $this->makePlanner($ai, $generator), $generator, new PlanEntryDecorator($generator));
+
+        $session = $this->batch->getSession($sid);
+        $this->assertSame('planned', $session['planning_status']);
+        $this->assertNull($session['planner_error']);
+        $this->assertCount(1, $session['entry_order']);
+        Bus::assertDispatchedTimes(GeneratePlannedEntryJob::class, 1);
+    }
+
+    public function test_empty_response_after_dispatch_finishes_successfully(): void
+    {
+        Bus::fake();
+        $captured = [];
+        $generator = $this->catalogStub();
+        // Create, then the model returns empty instead of a closing summary → still a success.
+        $ai = $this->mockAi([
+            $this->assistantToolCalls([$this->toolCall('c', 'create_entry_job', [
+                'collection' => 'pages', 'blueprint' => 'page', 'label' => 'Contact', 'prompt' => 'Write the contact page.',
+            ])]),
+            $this->assistantEmpty(),
+        ], $captured);
+
+        $sid = $this->initAgenticSession('Write the contact page.');
+        (new PlanEntriesJob($sid))->handle($this->batch, $this->makePlanner($ai, $generator), $generator, new PlanEntryDecorator($generator));
+
+        $session = $this->batch->getSession($sid);
+        $this->assertSame('planned', $session['planning_status']);
+        $this->assertNull($session['planner_error']);
+        $this->assertCount(1, $session['entry_order']);
+    }
+
+    public function test_persistent_empty_responses_fail_gracefully(): void
+    {
+        Bus::fake();
+        $captured = [];
+        $generator = $this->catalogStub();
+        // The model only ever returns empty completions → fail with a clear message,
+        // not an infinite loop.
+        $ai = $this->mockAi([$this->assistantEmpty()], $captured);
+
+        $sid = $this->initAgenticSession('Write the contact page.');
+        (new PlanEntriesJob($sid))->handle($this->batch, $this->makePlanner($ai, $generator), $generator, new PlanEntryDecorator($generator));
+
+        $session = $this->batch->getSession($sid);
+        $this->assertSame('planning_failed', $session['planning_status']);
+        $this->assertStringContainsString('empty response', $session['planner_error']);
+        Bus::assertNotDispatched(GeneratePlannedEntryJob::class);
     }
 
     public function test_answer_question_appends_answer_turn(): void

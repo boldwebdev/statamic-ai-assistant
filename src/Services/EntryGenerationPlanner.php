@@ -25,6 +25,9 @@ use Illuminate\Support\Str;
  */
 class EntryGenerationPlanner
 {
+    /** Max consecutive empty model responses to nudge through before giving up. */
+    private const MAX_EMPTY_RESPONSES = 2;
+
     private AbstractAiService $aiService;
 
     private EntryGeneratorService $generator;
@@ -596,16 +599,23 @@ class EntryGenerationPlanner
         $searchCalls = 0;
         // One-shot guard for the "gave up without searching" self-correction below.
         $nudgedEmptyResult = false;
+        // Bounds recovery from empty model responses (no content + no tool calls).
+        $emptyResponses = 0;
         // Set when the model calls answer_question — a read-only answer, not a failure.
         $plannerAnswer = null;
 
         $promptHasUrl = (bool) preg_match('~\bhttps?://[^\s<>\]\}\)\"\'`]+~iu', $userPrompt);
+        // Some providers/models don't honour a forced specific-tool choice and
+        // return an empty turn. Once we see the forced fetch ignored, stop forcing
+        // and let the model proceed with tool_choice=auto (it can still fetch on
+        // its own) — otherwise it can get stuck emitting empty responses.
+        $forceToolDisabled = false;
         $working = $messages;
 
         for ($round = 0; $round < $maxRounds; $round++) {
             $streamHeartbeat?->__invoke();
 
-            $forceTool = $promptHasUrl && $runner->callCount('fetch_page_content') === 0 && $created === 0;
+            $forceTool = ! $forceToolDisabled && $promptHasUrl && $runner->callCount('fetch_page_content') === 0 && $created === 0;
             $toolChoice = $forceTool
                 ? ['type' => 'function', 'function' => ['name' => 'fetch_page_content']]
                 : 'auto';
@@ -624,7 +634,11 @@ class EntryGenerationPlanner
             $hasToolCalls = is_array($toolCalls) && $toolCalls !== [];
 
             if ($forceTool && ! $hasToolCalls) {
-                Log::warning('[entry-gen-tool] agentic planner forced tool call IGNORED', [
+                // The model ignored the forced tool — stop forcing so subsequent
+                // rounds use tool_choice=auto and it can move forward.
+                $forceToolDisabled = true;
+
+                Log::warning('[entry-gen-tool] agentic planner forced tool call IGNORED; relaxing to auto', [
                     'round' => $round,
                     'tool_choice_sent' => $toolChoice,
                 ]);
@@ -769,7 +783,43 @@ class EntryGenerationPlanner
                 return;
             }
 
-            throw new \RuntimeException(__('Planner returned no usable text after tool use.'));
+            // Empty response: the model returned neither content nor a tool call
+            // (a provider hiccup, an ignored forced tool, or an empty completion
+            // after a fetch). Recover generically rather than hard-failing:
+            //  - if entries were already dispatched, finish successfully;
+            //  - otherwise nudge the model to act, bounded so we can't loop forever.
+            if ($created > 0) {
+                Log::info('[entry-gen-tool] agentic planner returned empty after dispatching; finishing', [
+                    'rounds' => $round + 1,
+                    'entries_created' => $created,
+                ]);
+
+                return;
+            }
+
+            $emptyResponses++;
+            if ($emptyResponses <= self::MAX_EMPTY_RESPONSES) {
+                // Capture why the completion was empty (e.g. finish_reason "length"
+                // = the model hit the output-token cap) so the cause is diagnosable.
+                Log::warning('[entry-gen-tool] agentic planner returned an empty response; nudging retry', [
+                    'round' => $round + 1,
+                    'attempt' => $emptyResponses,
+                    'finish_reason' => is_array($choice) ? ($choice['finish_reason'] ?? null) : null,
+                    'usage' => is_array($data) ? ($data['usage'] ?? null) : null,
+                ]);
+
+                $working[] = [
+                    'role' => 'user',
+                    'content' => 'Your last response was empty. Continue the task: either call a tool now '
+                        .'(fetch_page_content to read a URL, find_entries / search_entry_content to locate an entry, '
+                        .'create_entry_job / update_entry_job to act, or answer_question for a read-only question), '
+                        .'or, if the request truly cannot be fulfilled, reply with a short message starting with "Cannot proceed:".',
+                ];
+
+                continue;
+            }
+
+            throw new \RuntimeException(__('The AI model returned an empty response. Please try again.'));
         }
 
         Log::error('[entry-gen-tool] agentic planner tool loop exceeded max rounds', [

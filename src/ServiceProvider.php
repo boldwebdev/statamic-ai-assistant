@@ -31,9 +31,10 @@ use BoldWeb\StatamicAiAssistant\Services\SetHintsService;
 use BoldWeb\StatamicAiAssistant\Services\TranslationGlossaryService;
 use BoldWeb\StatamicAiAssistant\Services\TranslationService;
 use BoldWeb\StatamicAiAssistant\Services\TranslationStyleRulesService;
+use BoldWeb\StatamicAiAssistant\Support\AgentAccess;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Route;
 use Statamic\Facades\CP\Nav;
-use Statamic\Facades\User;
 use Statamic\Providers\AddonServiceProvider;
 use Statamic\Statamic;
 
@@ -194,6 +195,15 @@ class ServiceProvider extends AddonServiceProvider
             __DIR__.'/../config/deepl.php' => config_path('deepl.php'),
         ], 'statamic-ai-assistant-config');
 
+        // Native Gate abilities backing the dashboard-managed access config, so
+        // nav ->can(...) and route can: middleware enforce it. Super users pass
+        // via AgentAccess::allows() itself.
+        foreach (AgentAccess::FEATURES as $feature) {
+            Gate::define(AgentAccess::gateAbility($feature), fn () => AgentAccess::allows($feature));
+        }
+        // Managing the access config itself is always super-only.
+        Gate::define(AgentAccess::manageGateAbility(), fn () => AgentAccess::canManage());
+
         // Legacy prompt routes
         $this->registerCpRoutes(function () {
             Route::post('/prompt', [PromptController::class, 'handle']);
@@ -214,13 +224,10 @@ class ServiceProvider extends AddonServiceProvider
         if (config('statamic-ai-assistant.translations', true)
             && config('statamic-ai-assistant.bulk_translations', true)) {
             Nav::extend(function ($nav) {
-                if (! User::current()?->isSuper()) {
-                    return;
-                }
-
                 $nav->tools(__('Bulk translations'))
                     ->route('statamic-ai-assistant.translations')
-                    ->icon('globe-world-wide-web');
+                    ->icon('globe-world-wide-web')
+                    ->can(AgentAccess::gateAbility('bulk_translations'));
             });
         }
 
@@ -237,17 +244,20 @@ class ServiceProvider extends AddonServiceProvider
         if (config('statamic-ai-assistant.entry_generator', true)
             && config('statamic-ai-assistant.bold_agent_settings_nav', true)) {
             Nav::extend(function ($nav) {
-                if (! User::current()?->isSuper()) {
-                    return;
-                }
-
-                if (! $this->agentEnabledForCurrentUser()) {
-                    return;
-                }
-
                 $nav->settings(__('BOLD agent settings'))
                     ->route('statamic-ai-assistant.block-hints.page')
-                    ->icon('layers-stacks');
+                    ->icon('layers-stacks')
+                    ->can(AgentAccess::gateAbility('agent_settings'));
+            });
+        }
+
+        // "BOLD agent access" — a separate settings screen, super-admins only.
+        if (config('statamic-ai-assistant.entry_generator', true)) {
+            Nav::extend(function ($nav) {
+                $nav->settings(__('BOLD agent access'))
+                    ->route('statamic-ai-assistant.access.page')
+                    ->icon('permissions')
+                    ->can(AgentAccess::manageGateAbility());
             });
         }
 
@@ -262,8 +272,8 @@ class ServiceProvider extends AddonServiceProvider
 
     /**
      * Whether the BOLD agent (floating button + generator) is available to the
-     * current CP user. Super admins always have access when the master switch
-     * is on; non-super editors additionally require enable_agent_for_editors.
+     * current CP user. Gated globally by the `entry_generator` master switch,
+     * then by the dashboard-managed access config (super admins always pass).
      */
     protected function agentEnabledForCurrentUser(): bool
     {
@@ -271,10 +281,6 @@ class ServiceProvider extends AddonServiceProvider
             return false;
         }
 
-        if (User::current()?->isSuper()) {
-            return true;
-        }
-
-        return (bool) config('statamic-ai-assistant.enable_agent_for_editors', true);
+        return AgentAccess::allows('agent');
     }
 }

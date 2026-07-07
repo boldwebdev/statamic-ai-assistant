@@ -242,6 +242,21 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | BOLD agent access configuration storage
+    |--------------------------------------------------------------------------
+    |
+    | YAML file storing which roles / users may use each gated capability
+    | (BOLD agent, bulk translations, agent settings) plus the per-role /
+    | per-user entry-generation limits. Managed by super admins from the
+    | "Who has access" tab in the BOLD agent settings. Default under content/
+    | so it can be versioned in git.
+    |
+    */
+
+    'access_path' => env('STATAMIC_AI_ASSISTANT_ACCESS_PATH', base_path('content/statamic-ai-assistant/access.yaml')),
+
+    /*
+    |--------------------------------------------------------------------------
     | Glossary terminology takes precedence over style tone
     |--------------------------------------------------------------------------
     |
@@ -293,18 +308,6 @@ return [
     */
 
     'entry_generator' => (bool) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR', true),
-
-    /*
-    | Show the BOLD agent to non-super editors
-    |--------------------------------------------------------------------------
-    |
-    | ENABLE_AGENT_FOR_EDITORS=false hides the agent (floating button + settings)
-    | from non-super users only. Super admins ALWAYS have access, regardless of
-    | this flag or the environment. Requires `entry_generator` to be on.
-    |
-    */
-
-    'enable_agent_for_editors' => (bool) env('ENABLE_AGENT_FOR_EDITORS', true),
 
     /*
     | Show the "BOLD agent settings" entry in the CP Settings sidebar
@@ -463,6 +466,22 @@ return [
         'remove_selector' => env(
             'STATAMIC_AI_ASSISTANT_REMOVE_SELECTOR',
             \BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher::DEFAULT_REMOVE_SELECTOR,
+        ),
+
+        // Fetch order for reading a page. By default the Jina reader is tried
+        // first (it is harder to block and can render JS), and a plain direct
+        // HTTP fetch is the fallback for when Jina returns junk (e.g. it handed
+        // back an empty <body> for some TYPO3 sites). Set to true to try the
+        // direct fetch first instead (faster, no third-party dependency), with
+        // Jina as the fallback. Either way, whichever source yields usable
+        // content first wins, and Jina's markdown mode is the final fallback.
+        'direct_first' => (bool) env('STATAMIC_AI_ASSISTANT_URL_FETCH_DIRECT_FIRST', false),
+
+        // User-Agent used for the direct fetch. A browser-like UA avoids naive
+        // bot blocking on many sites. Override if a source site needs a specific one.
+        'user_agent' => env(
+            'STATAMIC_AI_ASSISTANT_URL_FETCH_USER_AGENT',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         ),
     ],
 
