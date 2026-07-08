@@ -456,5 +456,14 @@
   "Not recommended on production sites — test structural changes locally first.": "Déconseillé sur les sites en production – testez d'abord les modifications structurelles en local.",
   "Enable advanced tools": "Activer les outils avancés",
   "Advanced structure tools enabled. Verify every structural change before committing.": "Outils de structure avancés activés. Vérifiez chaque modification structurelle avant de committer.",
-  "Could not save the advanced tools setting.": "Impossible d'enregistrer le réglage des outils avancés."
+  "Could not save the advanced tools setting.": "Impossible d'enregistrer le réglage des outils avancés.",
+  "asset \":file\" metadata updated": "métadonnées de l'asset \":file\" mises à jour",
+  "Also applied: :list.": "Également appliqué : :list.",
+  "asset \":file\" updated (:fields)": "asset \":file\" mis à jour (:fields)",
+  "Applied: :list.": "Appliqué : :list.",
+  "Done.": "Terminé.",
+  "Done (stopped at the tool-round limit).": "Terminé (arrêt à la limite de tours).",
+  "Copy conversation": "Copier la conversation",
+  "Conversation copied to clipboard.": "Conversation copiée dans le presse-papiers.",
+  "Nothing to copy yet.": "Rien à copier pour le moment."
 }

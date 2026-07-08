@@ -464,5 +464,14 @@
   "Not recommended on production sites — test structural changes locally first.": "Auf Produktions-Websites nicht empfohlen – testen Sie Strukturänderungen zuerst lokal.",
   "Enable advanced tools": "Erweiterte Werkzeuge aktivieren",
   "Advanced structure tools enabled. Verify every structural change before committing.": "Erweiterte Struktur-Werkzeuge aktiviert. Überprüfen Sie jede Strukturänderung vor dem Commit.",
-  "Could not save the advanced tools setting.": "Die Einstellung für erweiterte Werkzeuge konnte nicht gespeichert werden."
+  "Could not save the advanced tools setting.": "Die Einstellung für erweiterte Werkzeuge konnte nicht gespeichert werden.",
+  "asset \":file\" metadata updated": "Asset \":file\" Metadaten aktualisiert",
+  "Also applied: :list.": "Ausserdem angewendet: :list.",
+  "asset \":file\" updated (:fields)": "Asset \":file\" aktualisiert (:fields)",
+  "Applied: :list.": "Angewendet: :list.",
+  "Done.": "Fertig.",
+  "Done (stopped at the tool-round limit).": "Fertig (am Runden-Limit gestoppt).",
+  "Copy conversation": "Konversation kopieren",
+  "Conversation copied to clipboard.": "Konversation in die Zwischenablage kopiert.",
+  "Nothing to copy yet.": "Noch nichts zum Kopieren vorhanden."
 }

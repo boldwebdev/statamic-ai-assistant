@@ -8,14 +8,18 @@ use BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy;
 use BoldWeb\StatamicAiAssistant\Support\JsonObjectExtractor;
 use BoldWeb\StatamicAiAssistant\Support\PlanEntryDecorator;
 use BoldWeb\StatamicAiAssistant\Tools\Advanced\AdvancedToolset;
+use BoldWeb\StatamicAiAssistant\Tools\AnalyzeImageTool;
 use BoldWeb\StatamicAiAssistant\Tools\ChatToolRunner;
+use BoldWeb\StatamicAiAssistant\Tools\ListAssetsTool;
 use BoldWeb\StatamicAiAssistant\Tools\ListTaxonomiesTool;
 use BoldWeb\StatamicAiAssistant\Tools\ReadEntryStructureTool;
 use BoldWeb\StatamicAiAssistant\Tools\ReadEntryTool;
 use BoldWeb\StatamicAiAssistant\Tools\ReadGlobalsTool;
 use BoldWeb\StatamicAiAssistant\Tools\ReadNavTreeTool;
 use BoldWeb\StatamicAiAssistant\Tools\ToolContext;
+use BoldWeb\StatamicAiAssistant\Tools\UpdateAssetTool;
 use BoldWeb\StatamicAiAssistant\Tools\UrlFetchTool;
+use BoldWeb\StatamicAiAssistant\Tools\UseAssetsTool;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -272,11 +276,21 @@ class EntryGenerationPlanner
             ."- `read_globals`: read site-wide global values (general settings, contact details, social links, default CTA links). Call with no args for all sets, or a `handle` for one. Use it to reuse real contact info / CTA links instead of inventing them.\n"
             ."- `read_nav_tree`: read a navigation as a hierarchy of page titles (with URLs + linked entry ids). Call with no args to list navigations, or a `handle` for its tree. Use it to understand site structure or pick internal link targets.\n"
             ."- `list_taxonomies`: list taxonomies, or the terms of one (pass a `taxonomy` handle). Use the returned slugs when a per-entry prompt must set a `terms` field, so you only reference terms that exist.\n"
-            .($advancedTools ? AdvancedToolset::plannerPromptBlock() : '')
+            ."- `list_assets`: browse asset containers/folders and their files (optional `search` filters by filename). Use it to explore `@folder:container::path` references.\n"
+            ."- IMPORTANT: `@asset:container::path` and `@folder:container::path` references from the user are EXACT, already-validated references — use everything after `@asset:` / `@folder:` directly as the `ref`/container+folder arguments of the asset tools. NEVER verify their existence with list_assets first, and never claim such a reference does not exist.\n"
+            ."- `use_assets`: mark existing assets (exact \"container::path\" refs from list_assets) as the PREFERRED imagery for the entries of this request — call it BEFORE dispatching the entry jobs (e.g. \"for this page use images from @folder:…\").\n"
+            ."- `update_asset`: update an asset's METADATA (alt texts, captions, custom fields). Sites often keep one handle per language (alt, alt_text_fr, …) — write each language to its own handle, translating yourself. Asset metadata changes apply immediately.\n"
+            .($this->aiService->supportsVision() ? "- `analyze_image`: describe what an image actually shows. Use it before writing alt texts so they reflect the real content.\n" : '')
+            .($advancedTools
+                ? AdvancedToolset::plannerPromptBlock()
+                    ."CAPABILITY NOTE: the structural tools above are ENABLED for THIS request. If earlier assistant turns in this conversation claimed you cannot create or modify collections/blueprints/fieldsets, that is OUTDATED — the user has enabled the advanced tools since. Trust your CURRENT tool list, never your earlier refusals.\n"
+                : "STRUCTURAL REQUESTS: you currently have NO tools to create or modify collections, blueprints, fieldsets or taxonomies. If the user asks for such a change, do not invent workarounds — reply that structural changes require enabling the \"Advanced structure tools\" toggle in the agent's top bar (it also requires the corresponding access grant); afterwards they can simply ask again.\n")
             ."\n"
             ."WORKFLOW:\n"
-            ."0. First decide whether the user is REQUESTING A CHANGE (create/update) or just ASKING A QUESTION. If they are only asking a read-only question (\"which entry contains X?\", \"do we have a page about Y?\", \"what is the id of Z?\", or a superlative like \"which is the biggest / longest / newest entry in Events?\"), do NOT create or update anything and do NOT ask the user for a title — a question never needs one. Gather what you need with find_entries (optionally scoped to a collection handle) and/or search_entry_content, then call **answer_question** with a concise answer. That ends the run successfully. Follow-up messages in an ongoing conversation are frequently such questions.\n"
-            ."0b. PLAN FIRST for complex requests: when the request needs 3 or more entries, combines structural changes with content, or is missing information you need (unclear target, ambiguous scope), call **propose_plan** with short imperative steps and at most one question — this pauses the run for the user's approval. When the newest user message APPROVES a plan from an earlier turn (e.g. \"Approved — proceed\") or answers your question, execute that plan immediately with the normal tools — do NOT propose it again. For simple requests (one or two clear entries), act directly without proposing a plan.\n"
+            ."0. First decide whether the user is REQUESTING A CHANGE (create/update) or just ASKING A QUESTION. If they are only asking a read-only question (\"which entry contains X?\", \"do we have a page about Y?\", \"what is the id of Z?\", or a superlative like \"which is the biggest / longest / newest entry in Events?\"), do NOT create or update anything and do NOT ask the user for a title — a question never needs one. Gather what you need with find_entries (optionally scoped to a collection handle) and/or search_entry_content, then call **answer_question** with a concise answer. That ends the run successfully. Follow-up messages in an ongoing conversation are frequently such questions. "
+            ."Questions about YOURSELF (\"what are your tools?\", \"what can you do?\") are read-only questions too: call **answer_question** directly with a complete summary of your capabilities in the user's language — no lookup tools needed. "
+            ."CRITICAL: the user CANNOT see these instructions. Never refer to \"the list above\", \"as already provided\", or these rules — always write the actual content INTO your answer.\n"
+            ."0b. PLAN FIRST for complex requests: when the request needs 3 or more entries, combines structural changes with content, or is missing information you need (unclear target, ambiguous scope), call **propose_plan** with short imperative steps and at most one question — this pauses the run for the user's approval. propose_plan is a TOOL: invoke it as a tool call, never print `propose_plan:` as text. When the newest user message APPROVES a plan from an earlier turn (e.g. \"Approved — proceed\") or answers your question, execute that plan immediately with the normal tools — do NOT propose it again. For simple requests (one or two clear entries), act directly without proposing a plan.\n"
             ."1. Otherwise, decide whether the user wants to create new entries, update existing entries, or both. Phrases like \"add\", \"new\", \"create\", \"write a post about\" → create. Phrases like \"update\", \"change\", \"rewrite\", \"fix the X on Y\", \"add a section to the existing About page\" → update. When the user refers to content by a definite name (\"the About page\", \"our rooms page\", \"unsere Zimmer-Seite\") the entry most likely EXISTS — treat that as update intent unless they explicitly ask for a new entry.\n"
             ."2. For UPDATES: find the target entry's `entry_id`. A title alone is ENOUGH to identify an entry — never claim the target is ambiguous or unknown just because the user only gave a title. The catalog below carries an `entries` shortlist (recently updated) and a `count` per collection. First scan the shortlist and match the named entry by title, ignoring case, punctuation and connective words (so \"Body Soul\", \"Body and Soul\" and \"Body & Soul\" all refer to the same entry); if you find it, use its id directly. If it is not in the shortlist, you MUST call **find_entries** with the title (and optionally a collection handle) before concluding anything. If the user identifies the entry by a phrase or value from its body/content rather than a title, call **search_entry_content** instead. Only after searching returns no match may you give up. If the intent is clearly UPDATE but neither the shortlist nor find_entries locates the entry, do NOT fall back to creating a new entry — end with `Cannot proceed:` naming the entry you could not find.\n"
             ."2b. AVOID DUPLICATES on creates: before dispatching create_entry_job for content that may already exist (a topic matching an entry title in the shortlist, or a fetched URL whose title matches an existing entry), check the shortlist or call find_entries. If a matching entry exists and the user's wording is compatible with updating it, prefer update_entry_job over creating a near-duplicate.\n"
@@ -287,7 +301,7 @@ class EntryGenerationPlanner
             ."7. Each `prompt` MUST be a complete, self-contained brief in the user's language: include the URL (when applicable), the topic, and any constraints. For updates, describe ONLY what should change — do not restate the rest of the entry. Do not reference other entries.\n"
             ."8. The `label` is a short human title (2-6 words) for the UI in the user's language.\n"
             .$this->germanNoEszettPlannerRule($locale)
-            ."9. When you have dispatched every entry the user asked for (or hit the cap), end your turn with a short plain-text summary like `Done — N actions dispatched.` (no JSON, no tool calls).\n"
+            ."9. When you have done everything the newest user message asked for (or hit the cap), end your turn with a short plain-text summary (1-3 sentences, no JSON, no tool calls) naming CONCRETELY what you did: which entries, which fields/languages, which assets or structures. Example: `Updated the alt text of martina-seiler.jpg in DE, FR, EN and IT based on the image content.` Never reply with just `Done` or a bare action count.\n"
             ."10. If the request is impossible, end your turn with a short plain-text explanation starting with `Cannot proceed:`. But NEVER give up on an update target without first checking the shortlist AND calling find_entries — a bare title is not a reason to stop.";
 
         // Editor-maintained site-wide instructions (BOLD agent settings) —
@@ -379,7 +393,7 @@ class EntryGenerationPlanner
             $summary = $this->summarizeCreatedEntries($createdRowIds, $sessionId);
 
             if ($structuralChanges !== []) {
-                $summary .= "\n".__('Also applied structural changes: :list.', ['list' => implode(', ', $structuralChanges)]);
+                $summary .= "\n".__('Also applied: :list.', ['list' => implode(', ', $structuralChanges)]);
             }
 
             $this->batch->appendAssistantTurn($sessionId, $summary, $createdRowIds, 'summary');
@@ -589,11 +603,17 @@ class EntryGenerationPlanner
         // read). The stateful job tools (create/update/find) stay outside the
         // runner and are handled via the $fallback in consume() below, since they
         // mutate session/cap state that a generic runner shouldn't own.
+        // Existing assets the model selects via use_assets land here and are
+        // drained into the session after every tool round, so already-dispatched
+        // and future entry jobs alike pick them up as preferred imagery.
+        $selectedAssets = new PreferredAssetPaths;
+
         $toolContext = new ToolContext(
             warningSink: function (string $w) use (&$toolWarningsOut) {
                 $toolWarningsOut[] = $w;
             },
             heartbeat: $streamHeartbeat,
+            imageSink: $selectedAssets,
             activitySink: fn (string $line) => $this->batch?->appendPlannerActivity($sessionId, $line),
         );
         $restrictFetch = (bool) config('statamic-ai-assistant.entry_generator_restrict_fetch_to_prompt_urls', true);
@@ -611,7 +631,14 @@ class EntryGenerationPlanner
             new ReadGlobalsTool,
             new ReadNavTreeTool,
             new ListTaxonomiesTool,
+            new ListAssetsTool,
+            new UseAssetsTool,
+            new UpdateAssetTool,
         ];
+
+        if ($this->aiService->supportsVision()) {
+            $toolset[] = new AnalyzeImageTool($this->aiService);
+        }
 
         // Structural tools are appended only for sessions whose requesting user
         // holds the 'advanced_tools' grant — otherwise they don't exist as far
@@ -627,7 +654,29 @@ class EntryGenerationPlanner
         $structuralWrites = 0;
         $structuralNames = AdvancedToolset::writeToolNames();
 
-        $runner = new ChatToolRunner($toolset, $toolContext, function (string $name, array $result) use (&$structuralWrites, &$structuralChangesOut, $structuralNames, $sessionId): void {
+        $runner = new ChatToolRunner($toolset, $toolContext, function (string $name, array $result) use (&$structuralWrites, &$structuralChangesOut, $structuralNames, $sessionId, $selectedAssets): void {
+            // Drain use_assets picks into the session IMMEDIATELY — a
+            // create_entry_job later in the same tool round must already see
+            // them as preferred imagery when its queue job starts.
+            if ($name === 'use_assets' && ! $selectedAssets->isEmpty()) {
+                $this->batch?->appendPreferredAssetPaths($sessionId, $selectedAssets->remainingEntries());
+            }
+
+            // Asset metadata writes are real work too: a run that only filled
+            // alt texts must complete successfully (no entry jobs dispatched),
+            // appear in the live operations feed, and be named in the summary.
+            if ($name === 'update_asset' && ($result['ok'] ?? false) === true) {
+                $structuralWrites++;
+                $description = (string) __('asset ":file" updated (:fields)', [
+                    'file' => basename((string) ($result['ref'] ?? '')),
+                    'fields' => implode(', ', array_filter((array) ($result['applied'] ?? []), 'is_string')),
+                ]);
+                $structuralChangesOut[] = $description;
+                $this->batch?->appendOperation($sessionId, 'asset', $description);
+
+                return;
+            }
+
             if (($result['ok'] ?? false) !== true || ! in_array($name, $structuralNames, true)) {
                 return;
             }
@@ -683,6 +732,9 @@ class EntryGenerationPlanner
         $nudgedEmptyResult = false;
         // Bounds recovery from empty model responses (no content + no tool calls).
         $emptyResponses = 0;
+        // Bounds recovery from protocol drift (tool calls PRINTED as text).
+        $protocolCorrections = 0;
+        $toolNames = array_map(fn ($t) => strtolower((string) ($t['function']['name'] ?? '')), $tools);
         // Set when the model calls answer_question — a read-only answer, not a failure.
         $plannerAnswer = null;
         // Set when the model calls propose_plan — pauses the run for user approval.
@@ -715,7 +767,7 @@ class EntryGenerationPlanner
             if ($round > 0) {
                 $callMessages[] = [
                     'role' => 'user',
-                    'content' => $this->buildLoopStatusReminder($created, $cap, $structuralWrites, $round, $maxRounds),
+                    'content' => $this->buildLoopStatusReminder($created, $cap, $structuralWrites, $round, $maxRounds, $advancedTools),
                 ];
             }
 
@@ -870,6 +922,43 @@ class EntryGenerationPlanner
                     return;
                 }
 
+                // Same recovery for propose_plan printed as text ("propose_plan:
+                // …"): record it as a real plan turn so the CP shows the plan
+                // panel with the approve action instead of a raw text blob.
+                $plainPlan = $this->extractProposedPlan($content);
+                if ($plainPlan !== null) {
+                    $this->recordPlanTurn($sessionId, $plainPlan, $round);
+
+                    return;
+                }
+
+                // GENERIC protocol-drift recovery: the model wrote a TOOL CALL
+                // as reply text ("find_entries: …"). Works for every registered
+                // tool — bounce it back with a format correction (bounded), and
+                // never let such text through as an answer or an error message.
+                $printedTool = $this->printedToolCallName($content, $toolNames);
+                if ($printedTool !== null) {
+                    if ($protocolCorrections < 2) {
+                        $protocolCorrections++;
+
+                        Log::warning('[entry-gen-tool] tool call printed as text; correcting', [
+                            'round' => $round + 1,
+                            'tool' => $printedTool,
+                            'attempt' => $protocolCorrections,
+                        ]);
+
+                        $working[] = ['role' => 'assistant', 'content' => $content];
+                        $working[] = [
+                            'role' => 'user',
+                            'content' => "FORMAT ERROR: you wrote `{$printedTool}` as plain text in your reply. Tools are invoked ONLY as native tool calls — never written into the reply text. Repeat your intended action NOW as a proper tool call to `{$printedTool}`. Reply text must never contain tool names.",
+                        ];
+
+                        continue;
+                    }
+
+                    throw new \RuntimeException((string) __('The AI model kept responding in an invalid format. Please try again.'));
+                }
+
                 // Self-correction: mid-tier models sometimes bail with "Cannot
                 // proceed / I can't determine which entry" WITHOUT ever calling a
                 // search tool — even for a read-only question they could just answer,
@@ -892,6 +981,7 @@ class EntryGenerationPlanner
                         'role' => 'user',
                         'content' => 'Do not give up yet — you have not used any tools. First re-read the newest user message and decide the intent:'."\n"
                             .'• IF IT IS A READ-ONLY QUESTION (e.g. "which is the biggest/longest entry?", "which entry contains X?", "do we have a page about Y?", "what is the id of Z?"): this is NOT a create/update request and needs no title from the user. Use find_entries (optionally scoped to a collection handle) and/or search_entry_content to gather what you need, then call answer_question with a concise answer. Never reply "Cannot proceed:" for a question you can look up.'."\n"
+                            .'• IF IT IS A QUESTION YOU CAN ANSWER WITHOUT ANY LOOKUP (e.g. about your own tools and capabilities): call answer_question NOW with the complete answer written out — do not describe what you are going to do, and do not refer to anything the user cannot see.'."\n"
                             .'• IF IT IS A CHANGE REQUEST (create/update): a title alone is enough to identify an entry — do NOT claim the target is ambiguous or unknown before searching. Check the catalog shortlist above, matching by title while ignoring case, punctuation and connective words (so "Body Soul", "Body and Soul" and "Body & Soul" are the same). If it is there, call update_entry_job with its id; if not, call find_entries with the title first.'."\n"
                             .'Only reply "Cannot proceed:" if, after actually using the tools, the request genuinely cannot be fulfilled.',
                     ];
@@ -906,10 +996,28 @@ class EntryGenerationPlanner
                     'structural_writes' => $structuralWrites,
                 ]);
 
-                // Structural-only run (collections/blueprints changed, no entry
-                // jobs): a successful outcome — record the model's own summary of
-                // what it changed, exactly like a read-only answer, and finish.
+                // Work-without-entries run (structural changes and/or asset
+                // metadata, no entry jobs): a successful outcome — record the
+                // model's own summary, enriched with the precise applied-changes
+                // list so terse model summaries still carry the detail.
                 if ($created === 0 && $structuralWrites > 0) {
+                    $this->completePlannerAnswer(
+                        $sessionId,
+                        $this->withAppliedList(trim($content), $structuralChangesOut),
+                        $round,
+                        $created,
+                    );
+
+                    return;
+                }
+
+                // The model already got the one-shot nudge and STILL answered in
+                // plain text: accept that text as its answer instead of failing
+                // the run — turning "the model answered without the tool" into an
+                // error only converts working answers into error panels. Explicit
+                // give-ups ("Cannot proceed:") keep failing loudly below.
+                if ($created === 0 && $nudgedEmptyResult && trim($content) !== ''
+                    && ! str_starts_with(trim($content), 'Cannot proceed')) {
                     $this->completePlannerAnswer($sessionId, trim($content), $round, $created);
 
                     return;
@@ -939,9 +1047,14 @@ class EntryGenerationPlanner
             }
 
             if ($structuralWrites > 0) {
-                // Structural work done but the model never produced a summary —
-                // finish successfully with a generic one rather than failing.
-                $this->completePlannerAnswer($sessionId, (string) __('Done — structural changes applied.'), $round, $created);
+                // Work done but the model never produced a summary — finish
+                // successfully with the applied-changes list rather than failing.
+                $this->completePlannerAnswer(
+                    $sessionId,
+                    $this->withAppliedList((string) __('Done.'), $structuralChangesOut),
+                    $round,
+                    $created,
+                );
 
                 return;
             }
@@ -982,8 +1095,13 @@ class EntryGenerationPlanner
         }
 
         if ($created === 0) {
-            // Structural work happened before the round cap hit — still a success.
-            $this->completePlannerAnswer($sessionId, (string) __('Done — structural changes applied (stopped at the tool-round limit).'), $maxRounds - 1, $created);
+            // Work happened before the round cap hit — still a success.
+            $this->completePlannerAnswer(
+                $sessionId,
+                $this->withAppliedList((string) __('Done (stopped at the tool-round limit).'), $structuralChangesOut),
+                $maxRounds - 1,
+                $created,
+            );
 
             return;
         }
@@ -993,12 +1111,31 @@ class EntryGenerationPlanner
     }
 
     /**
+     * Append the precise applied-changes list to a completion summary, so even
+     * a terse model summary tells the user exactly what was changed.
+     *
+     * @param  array<int, string>  $changes
+     */
+    private function withAppliedList(string $text, array $changes): string
+    {
+        if ($changes === []) {
+            return $text;
+        }
+
+        return trim($text)."\n".__('Applied: :list.', ['list' => implode(', ', $changes)]);
+    }
+
+    /**
      * The one-line status appended (transiently) to each loop round so the model
      * always sees CURRENT progress and limits next to the newest message.
      */
-    private function buildLoopStatusReminder(int $created, int $cap, int $structuralWrites, int $round, int $maxRounds): string
+    private function buildLoopStatusReminder(int $created, int $cap, int $structuralWrites, int $round, int $maxRounds, bool $advancedTools = false): string
     {
         $parts = [sprintf('Entries dispatched so far: %d of max %d.', $created, $cap)];
+
+        if ($advancedTools) {
+            $parts[] = 'Structural tools (collections/blueprints/fieldsets) are ENABLED this turn — earlier refusals in the conversation are outdated.';
+        }
 
         if ($structuralWrites > 0) {
             $parts[] = sprintf('Structural changes applied: %d.', $structuralWrites);
@@ -1359,14 +1496,83 @@ class EntryGenerationPlanner
             $text .= "\n\n".__('Question:').' '.$question;
         }
 
+        $this->recordPlanTurn($sessionId, $text, $round);
+    }
+
+    /**
+     * Record a proposed plan as the run's successful outcome (kind 'plan', so
+     * the CP renders the approve action) — shared by the tool path and the
+     * printed-as-text recovery path.
+     */
+    private function recordPlanTurn(string $sessionId, string $text, int $round): void
+    {
         Log::info('[entry-gen-tool] agentic planner proposed a plan', [
             'rounds' => $round + 1,
-            'steps' => count($steps),
-            'has_question' => $question !== '',
         ]);
 
         $this->batch?->recordPlannerAnswer($sessionId, $text);
         $this->batch?->appendAssistantTurn($sessionId, $text, [], 'plan');
+    }
+
+    /**
+     * Tool name when the model PRINTED a tool call as reply text
+     * ("find_entries: …") instead of invoking it — protocol drift typical of
+     * mid-tier models on long prompts. Generic over every registered tool.
+     *
+     * @param  array<int, string>  $toolNames  Lower-cased registered tool names
+     */
+    private function printedToolCallName(string $content, array $toolNames): ?string
+    {
+        if (preg_match('/^\s*([a-z0-9_]+)\s*[:({]/i', trim($content), $m) !== 1) {
+            return null;
+        }
+
+        $name = strtolower($m[1]);
+
+        return in_array($name, $toolNames, true) ? $name : null;
+    }
+
+    /**
+     * Recover a propose_plan the model printed as assistant TEXT instead of a
+     * tool call ("propose_plan: …" or "propose_plan:{\"steps\":[…]}").
+     * Returns the human-readable plan text, or null when the content is not a
+     * printed plan.
+     */
+    private function extractProposedPlan(string $content): ?string
+    {
+        $content = trim($content);
+
+        if ($content === '' || preg_match('/^propose_plan\s*[:(]?\s*/i', $content, $m) !== 1) {
+            return null;
+        }
+
+        $rest = trim(substr($content, strlen($m[0])), " \t\n\r)");
+
+        if (str_starts_with($rest, '{')) {
+            $decoded = json_decode($rest, true);
+
+            if (is_array($decoded)) {
+                $steps = array_values(array_filter((array) ($decoded['steps'] ?? []), 'is_string'));
+
+                if ($steps !== []) {
+                    $lines = [];
+                    foreach ($steps as $i => $step) {
+                        $lines[] = ($i + 1).'. '.$step;
+                    }
+
+                    $text = __('Proposed plan:')."\n".implode("\n", $lines);
+                    $question = isset($decoded['question']) && is_string($decoded['question']) ? trim($decoded['question']) : '';
+
+                    if ($question !== '') {
+                        $text .= "\n\n".__('Question:').' '.$question;
+                    }
+
+                    return $text;
+                }
+            }
+        }
+
+        return $rest !== '' ? $rest : null;
     }
 
     private function completePlannerAnswer(string $sessionId, string $answer, int $round, int $created): void

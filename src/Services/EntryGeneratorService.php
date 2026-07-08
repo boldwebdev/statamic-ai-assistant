@@ -336,6 +336,11 @@ class EntryGeneratorService
         $toolset[] = new ReadGlobalsTool;
         $toolset[] = new ReadNavTreeTool;
         $toolset[] = new ListTaxonomiesTool;
+        $toolset[] = new \BoldWeb\StatamicAiAssistant\Tools\ListAssetsTool;
+        $toolset[] = new \BoldWeb\StatamicAiAssistant\Tools\UseAssetsTool;
+        if ($this->aiService->supportsVision()) {
+            $toolset[] = new \BoldWeb\StatamicAiAssistant\Tools\AnalyzeImageTool($this->aiService);
+        }
         $runner = new ChatToolRunner($toolset, $toolContext);
 
         $maxRounds = (int) config('statamic-ai-assistant.entry_generator_tool_max_rounds', 120);

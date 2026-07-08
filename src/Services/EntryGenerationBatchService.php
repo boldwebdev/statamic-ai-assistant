@@ -330,6 +330,41 @@ class EntryGenerationBatchService
     }
 
     /**
+     * Merge preferred asset paths (existing assets the planner selected via
+     * use_assets) into the session, deduplicated — GeneratePlannedEntryJob
+     * seeds each entry's PreferredAssetPaths from this list.
+     *
+     * @param  array<int, array{container: string, path: string}>  $entries
+     */
+    public function appendPreferredAssetPaths(string $sessionId, array $entries): void
+    {
+        if ($entries === []) {
+            return;
+        }
+        $this->update($sessionId, function (array $session) use ($entries): array {
+            $existing = $session['url_augmentation']['preferred_paths'] ?? [];
+            $existing = is_array($existing) ? $existing : [];
+
+            $seen = [];
+            foreach ($existing as $row) {
+                $seen[($row['container'] ?? '').'::'.($row['path'] ?? '')] = true;
+            }
+
+            foreach ($entries as $row) {
+                $key = ($row['container'] ?? '').'::'.($row['path'] ?? '');
+                if (! isset($seen[$key]) && ($row['container'] ?? '') !== '' && ($row['path'] ?? '') !== '') {
+                    $existing[] = ['container' => $row['container'], 'path' => $row['path']];
+                    $seen[$key] = true;
+                }
+            }
+
+            $session['url_augmentation']['preferred_paths'] = $existing;
+
+            return $session;
+        });
+    }
+
+    /**
      * Record one completed non-entry operation (structural changes like
      * collections/blueprints/taxonomies today; any tool can report one). Unlike
      * the drained activity feed, operations persist for the whole turn so the

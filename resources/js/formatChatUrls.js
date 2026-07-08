@@ -74,9 +74,12 @@ function wrapMentionChips(html, titles) {
   for (const title of unique) {
     const escaped = escapeRegExp(escapeHtml(title));
     const re = new RegExp(`@${escaped}`, 'g');
+    // Asset/folder mentions ("asset:container::path") get their own chip color.
+    const kind = title.startsWith('asset:') ? 'asset' : title.startsWith('folder:') ? 'folder' : 'entry';
+    const kindClass = kind === 'entry' ? '' : ` eg-chat__chip--${kind}`;
     out = out.replace(
       re,
-      `<span class="eg-chat__chip"><span class="eg-chat__chip-at">@</span>${escapeHtml(title)}</span>`,
+      `<span class="eg-chat__chip${kindClass}"><span class="eg-chat__chip-at">@</span>${escapeHtml(title)}</span>`,
     );
   }
   return out;

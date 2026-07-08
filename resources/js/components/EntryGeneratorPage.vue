@@ -1,9 +1,22 @@
 <template>
   <!-- ═══ Agentic chat (drawer) — Claude-style flat layout ═══ -->
   <div v-if="drawer" ref="chatRoot" class="eg-chat">
-    <!-- Top bar: advanced-tools opt-in (only for users holding the grant) -->
-    <div v-if="advancedTools.granted" class="eg-chat__topbar">
+    <!-- Top bar: conversation copy + advanced-tools opt-in -->
+    <div class="eg-chat__topbar">
+      <button
+        type="button"
+        class="eg-topbar-copy"
+        :title="__('Copy conversation')"
+        :aria-label="__('Copy conversation')"
+        @click="copyConversation"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true">
+          <rect x="9" y="9" width="12" height="12" rx="2" />
+          <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+        </svg>
+      </button>
       <label
+        v-if="advancedTools.granted"
         class="eg-topbar-toggle"
         :class="{
           'eg-topbar-toggle--on': advancedTools.enabled,
@@ -139,6 +152,9 @@
               {{ __('Approve to proceed, or reply below to adjust the plan or answer the question.') }}
             </p>
           </div>
+          <div v-else-if="turn.kind === 'answer'" class="eg-chat__answer">
+            <p v-html="chatHtml(turn.text)"></p>
+          </div>
           <p v-else v-html="chatHtml(turn.text)"></p>
 
           <div v-if="turn.cards.length" class="eg-chat__cards">
@@ -164,8 +180,8 @@
           <div class="eg-chat__stream-panel__bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="planProgressPercent" :aria-label="__('Planning')">
             <div class="eg-chat__stream-panel__fill" :style="{ width: planProgressPercent + '%' }" />
           </div>
-          <p class="eg-chat__stream-panel__title">{{ __('Working out a plan…') }}</p>
-          <p class="eg-chat__stream-panel__hint">{{ __('Figuring out how many entries to create and where each one fits.') }}</p>
+          <p class="eg-chat__stream-panel__title">{{ planningHeadline }}</p>
+          <p v-if="!store.hasServerActivity" class="eg-chat__stream-panel__hint">{{ __('Figuring out how many entries to create and where each one fits.') }}</p>
 
           <!-- Non-entry operations already completed this turn (structural
                changes etc.) — a stable checklist, unlike the scrolling feed. -->
@@ -260,11 +276,15 @@
             <ul v-if="mention.results.length" ref="mentionList" class="eg-chat__mention-list">
               <li
                 v-for="(item, i) in mention.results"
-                :key="item.id"
+                :key="item.ref || item.id"
                 role="option"
                 :aria-selected="i === mention.activeIndex"
                 class="eg-chat__mention-item"
-                :class="{ 'is-active': i === mention.activeIndex }"
+                :class="{
+                  'is-active': i === mention.activeIndex,
+                  'eg-chat__mention-item--asset': item.kind === 'asset',
+                  'eg-chat__mention-item--folder': item.kind === 'folder',
+                }"
                 @mousedown.prevent="selectMention(item)"
                 @mousemove="mention.activeIndex = i"
               >
@@ -453,7 +473,9 @@
       </template>
       <template v-else-if="store.plannerAnswer && store.entries.length === 0">
         <h2 class="entry-generator__panel-title">{{ __('Answer') }}</h2>
-        <p v-html="chatHtml(store.plannerAnswer)"></p>
+        <div class="eg-chat__answer">
+          <p v-html="chatHtml(store.plannerAnswer)"></p>
+        </div>
         <div class="entry-generator__panel-footer">
           <Button variant="primary" :text="__('New request')" @click="resetForNewRequest" />
         </div>
@@ -710,6 +732,15 @@ export default {
       return this.store.activityLog.filter((row) => row.entryId == null);
     },
 
+    /** Live panel headline: the agent's newest real step, else the static title. */
+    planningHeadline() {
+      if (this.store.hasServerActivity) {
+        const rows = this.planningActivityLog;
+        if (rows.length) return rows[rows.length - 1].text;
+      }
+      return this.__('Working out a plan…');
+    },
+
     generatingStatusText() {
       if (this.store.planning) return this.__('Working out a plan…');
       const drafting = this.store.entries.filter((e) => e.status === STATUS.DRAFTING).length;
@@ -850,6 +881,47 @@ export default {
       }
     },
 
+    /**
+     * Copy the whole visible conversation (plus the session id, so devs can
+     * match server logs) to the clipboard — the "send this weird chat to the
+     * developers" affordance.
+     */
+    async copyConversation() {
+      const turns = this.store.transcript || [];
+      if (!turns.length) {
+        Statamic.$toast?.error?.(this.__('Nothing to copy yet.'));
+        return;
+      }
+
+      const sid = this.store.chatSessionId;
+      const lines = [`BOLD agent conversation${sid ? ` (session ${sid})` : ''} — ${new Date().toISOString()}`, ''];
+
+      for (const turn of turns) {
+        const who = turn.role === 'user' ? this.__('You') : this.__('BOLD agent');
+        const kind = turn.kind && turn.kind !== 'summary' ? ` [${turn.kind}]` : '';
+        lines.push(`${who}${kind}:`, turn.text || '', '');
+      }
+
+      const text = lines.join('\n');
+
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (e) {
+        // Clipboard API unavailable (permissions/older context) — fallback.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+
+      Statamic.$toast?.success?.(this.__('Conversation copied to clipboard.'));
+    },
+
     async loadAdvancedToolsPreference() {
       try {
         const { data } = await axios.get('/cp/ai-generate/advanced-tools');
@@ -943,6 +1015,9 @@ export default {
       this.planningHintIdx = 0;
       this.planningHintTimer = setInterval(() => {
         if (!this.store.planning) return;
+        // Canned filler only until the agent reports REAL steps — once server
+        // activity flows, the feed and headline show what actually happens.
+        if (this.store.hasServerActivity) return;
         const key = this.planningHintKeys[this.planningHintIdx % this.planningHintKeys.length];
         this.planningHintIdx += 1;
         pushActivityLine(this.__(key), null);
@@ -1119,13 +1194,18 @@ export default {
     selectMention(item) {
       const el = this.$refs.promptTextarea;
       const value = this.store.pendingPrompt || '';
-      const token = `@${item.title}`;
+      // Entries mention by title; assets/folders by precise "kind:container::path"
+      // reference — the planner resolves those with list_assets.
+      const mentionText = item.kind === 'asset' || item.kind === 'folder'
+        ? `${item.kind}:${item.ref}`
+        : item.title;
+      const token = `@${mentionText}`;
       const before = value.slice(0, this.mention.start);
       const after = value.slice(this.mention.end);
       const insert = `${token}${after.startsWith(' ') ? '' : ' '}`;
 
       this.store.pendingPrompt = before + insert + after;
-      registerMention(item.title);
+      registerMention(mentionText);
       this.closeMention();
 
       this.$nextTick(() => {

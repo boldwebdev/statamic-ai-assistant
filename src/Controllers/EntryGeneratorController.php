@@ -68,6 +68,7 @@ class EntryGeneratorController
             $collection = $collectionTitles->get($handle);
 
             return [
+                'kind' => 'entry',
                 'id' => (string) ($row['id'] ?? ''),
                 'title' => ($row['title'] ?? '') !== '' ? (string) $row['title'] : (string) ($row['slug'] ?? ''),
                 'slug' => (string) ($row['slug'] ?? ''),
@@ -76,7 +77,62 @@ class EntryGeneratorController
             ];
         }, $rows);
 
+        // Assets + folders join the same picker (distinct kinds) so prompts can
+        // reference imagery: "@asset:container::path" / "@folder:container::path".
+        if ($query !== '') {
+            $results = array_merge($results, $this->searchAssetMentions($query));
+        }
+
         return response()->json(['results' => array_values($results)]);
+    }
+
+    /**
+     * Filename/folder-name matches across all asset containers, as mention rows.
+     *
+     * @return array<int, array<string, string>>
+     */
+    private function searchAssetMentions(string $query): array
+    {
+        $needle = mb_strtolower($query);
+        $rows = [];
+
+        foreach (\Statamic\Facades\AssetContainer::all() as $container) {
+            $containerHandle = (string) $container->handle();
+
+            foreach ($container->folders() as $folder) {
+                if (count($rows) >= 8) {
+                    return $rows;
+                }
+                $folder = (string) $folder;
+
+                if (str_contains(mb_strtolower($folder), $needle)) {
+                    $rows[] = [
+                        'kind' => 'folder',
+                        'title' => $folder,
+                        'ref' => $containerHandle.'::'.$folder,
+                        'collection_title' => $container->title().' · '.__('Folder'),
+                    ];
+                }
+            }
+
+            foreach ($container->files() as $path) {
+                if (count($rows) >= 8) {
+                    return $rows;
+                }
+                $path = (string) $path;
+
+                if (str_contains(mb_strtolower(basename($path)), $needle)) {
+                    $rows[] = [
+                        'kind' => 'asset',
+                        'title' => basename($path),
+                        'ref' => $containerHandle.'::'.$path,
+                        'collection_title' => $container->title().' · '.__('Asset'),
+                    ];
+                }
+            }
+        }
+
+        return $rows;
     }
 
     /**

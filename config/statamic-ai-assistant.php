@@ -392,6 +392,22 @@ return [
     'advanced_tools' => (bool) env('STATAMIC_AI_ASSISTANT_ADVANCED_TOOLS', true),
     'entry_generator_tool_max_structural_writes' => max(1, min(20, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_STRUCTURAL_WRITES', 6))),
 
+    // Max update_asset calls per request (asset metadata writes: alt texts, captions).
+    'entry_generator_tool_max_asset_writes' => max(1, min(100, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_ASSET_WRITES', 40))),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Vision model (image understanding)
+    |--------------------------------------------------------------------------
+    |
+    | Optional multimodal model for the analyze_image tool (e.g. generating
+    | alt texts from what an image actually shows). Set to a vision-capable
+    | model id from your Infomaniak AI product (GET /1/ai/models lists them);
+    | leave empty to disable image analysis entirely.
+    |
+    */
+    'infomaniak_vision_model' => (string) env('STATAMIC_AI_ASSISTANT_INFOMANIAK_VISION_MODEL', ''),
+
     /*
     |--------------------------------------------------------------------------
     | BOLD agent — multi-entry plan cap

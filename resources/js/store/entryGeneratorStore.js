@@ -51,6 +51,7 @@ export const state = reactive({
    * Each item: { id: number, text: string, entryId: string|null }.
    */
   activityLog: [],
+  hasServerActivity: false, // true once the planner reported a REAL step this turn (suppresses canned filler)
 
   // Field schema cache, keyed `${collection}/${blueprint}`.
   fieldPreviewCache: {},
@@ -290,6 +291,7 @@ function applyBatchProgressSnapshot(data) {
   // Live planner step feed (fetching URLs, reading layouts, deciding). The buffer
   // is drained server-side on each poll, so every line here is new — just append.
   for (const line of (data.planner_activity || [])) {
+    state.hasServerActivity = true;
     pushActivityLine(line, null);
   }
 
@@ -662,6 +664,7 @@ export async function continueGeneration(prompt) {
   state.generationPlanningStatus = 'planning';
   state.pendingPrompt = '';
   state.activityLog = [];
+  state.hasServerActivity = false;
   const mentionTitles = mentionTitlesForPrompt(text);
 
   // Optimistically show the user's message; the next poll's server transcript
@@ -955,6 +958,7 @@ function resetGenerationOnly() {
   state.generating = false;
   state.bulkSaving = false;
   state.activityLog = [];
+  state.hasServerActivity = false;
 }
 
 /** Clear everything except `active`; used when user clicks "New request". */
