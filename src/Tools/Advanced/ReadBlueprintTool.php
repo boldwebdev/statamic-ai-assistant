@@ -41,6 +41,10 @@ class ReadBlueprintTool extends AbstractAdvancedTool
                             'type' => 'string',
                             'description' => 'Taxonomy handle the blueprint belongs to (for term blueprints).',
                         ],
+                        'form' => [
+                            'type' => 'string',
+                            'description' => 'Form handle, for FORM blueprints (a form blueprint shares the form\'s handle).',
+                        ],
                     ],
                     'required' => ['handle'],
                 ],

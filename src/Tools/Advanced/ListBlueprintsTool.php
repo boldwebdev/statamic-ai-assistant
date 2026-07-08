@@ -89,7 +89,14 @@ class ListBlueprintsTool extends AbstractAdvancedTool
             return ['ok' => false, 'error' => "Taxonomy \"{$taxonomyFilter}\" not found. Available: ".Taxonomy::handles()->sort()->implode(', ')];
         }
 
-        return ['ok' => true, 'collections' => $collections, 'taxonomies' => $taxonomies];
+        // Form blueprints (contact forms etc.) — one blueprint per form, same
+        // handle as the form. Address them via the "form" parameter.
+        $forms = \Statamic\Facades\Form::all()->map(fn ($form) => [
+            'form' => (string) $form->handle(),
+            'title' => (string) $form->title(),
+        ])->values()->all();
+
+        return ['ok' => true, 'collections' => $collections, 'taxonomies' => $taxonomies, 'forms' => $forms];
     }
 
     /** Read-only: uses the shared CMS-read budget, not the write budget. */

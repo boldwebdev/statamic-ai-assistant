@@ -323,6 +323,53 @@ class AdvancedToolsTest extends TestCase
         $this->assertStringContainsString('not a components container', $notContainer['error']);
     }
 
+    public function test_form_blueprints_are_listable_readable_and_updatable(): void
+    {
+        \Statamic\Facades\Form::make('adv_kontakt')->title('Adv Kontakt')->save();
+        Blueprint::make('adv_kontakt')->setNamespace('forms')->setContents([
+            'title' => 'Adv Kontakt',
+            'fields' => [
+                ['handle' => 'name', 'field' => ['type' => 'text', 'display' => 'Name']],
+                ['handle' => 'email', 'field' => ['type' => 'text', 'display' => 'E-Mail']],
+            ],
+        ])->save();
+
+        try {
+            // Discoverable.
+            $list = $this->invokeTool(new \BoldWeb\StatamicAiAssistant\Tools\Advanced\ListBlueprintsTool, []);
+            $this->assertContains('adv_kontakt', array_column($list['forms'], 'form'));
+
+            // Readable via the form parameter.
+            $read = $this->invokeTool(new ReadBlueprintTool, ['handle' => 'adv_kontakt', 'form' => 'adv_kontakt']);
+            $this->assertTrue($read['ok'], $read['error'] ?? '');
+            $this->assertContains('email', array_column($read['fields'], 'handle'));
+
+            // Updatable: the checkbox lands on the FORM blueprint.
+            $updated = $this->invokeTool(new UpdateBlueprintTool, [
+                'handle' => 'adv_kontakt',
+                'form' => 'adv_kontakt',
+                'fields' => [
+                    ['handle' => 'food_type', 'field' => ['type' => 'checkboxes', 'options' => ['vegan' => 'Vegan']]],
+                ],
+            ]);
+            $this->assertTrue($updated['ok'], $updated['error'] ?? '');
+            $this->assertContains('food_type', $updated['fields']);
+            $this->assertContains('name', $updated['fields']);
+
+            // Unknown form → actionable error listing forms.
+            $bad = $this->invokeTool(new ReadBlueprintTool, ['handle' => 'x', 'form' => 'ghost_form']);
+            $this->assertFalse($bad['ok']);
+            $this->assertStringContainsString('adv_kontakt', $bad['error']);
+        } finally {
+            foreach (Blueprint::in('forms')->all() as $bp) {
+                if ($bp->handle() === 'adv_kontakt') {
+                    $bp->delete();
+                }
+            }
+            \Statamic\Facades\Form::find('adv_kontakt')?->delete();
+        }
+    }
+
     public function test_invalid_handles_are_rejected(): void
     {
         $result = $this->invokeTool(new CreateCollectionTool, ['handle' => 'Adv Events!', 'title' => 'X']);

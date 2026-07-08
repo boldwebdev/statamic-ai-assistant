@@ -29,7 +29,7 @@ class UpdateBlueprintTool extends AbstractAdvancedTool
             'type' => 'function',
             'function' => [
                 'name' => 'update_blueprint',
-                'description' => 'Add or modify fields on an EXISTING blueprint. By default the given fields are MERGED: '
+                'description' => 'Add or modify fields on an EXISTING blueprint (collection entry, taxonomy term, or FORM blueprint via the form parameter). By default the given fields are MERGED: '
                     .'a field whose handle already exists is replaced in place, new handles are appended — other fields and the tab layout are kept. '
                     .'Read the blueprint first with read_blueprint. Changes apply IMMEDIATELY — only do this when the user explicitly asked for it. '
                     .'Removing a field is NOT supported (set replace_fields=true only when the user explicitly wants to replace ALL fields).',
@@ -47,6 +47,10 @@ class UpdateBlueprintTool extends AbstractAdvancedTool
                         'taxonomy' => [
                             'type' => 'string',
                             'description' => 'Taxonomy handle the blueprint belongs to.',
+                        ],
+                        'form' => [
+                            'type' => 'string',
+                            'description' => 'Form handle, for FORM blueprints (e.g. a contact form — pass the form handle as "handle" too).',
                         ],
                         'fields' => [
                             'type' => 'array',
