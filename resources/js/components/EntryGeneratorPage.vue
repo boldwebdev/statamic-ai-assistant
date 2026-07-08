@@ -3,14 +3,23 @@
   <div v-if="drawer" ref="chatRoot" class="eg-chat">
     <!-- Top bar: advanced-tools opt-in (only for users holding the grant) -->
     <div v-if="advancedTools.granted" class="eg-chat__topbar">
-      <label class="eg-topbar-toggle" :class="{ 'eg-topbar-toggle--on': advancedTools.enabled }">
+      <label
+        class="eg-topbar-toggle"
+        :class="{
+          'eg-topbar-toggle--on': advancedTools.enabled,
+          'eg-topbar-toggle--disabled': advancedTools.saving,
+        }"
+      >
         <input
           type="checkbox"
-          class="eg-topbar-toggle__input"
+          class="eg-topbar-toggle__input sr-only"
           :checked="advancedTools.enabled"
           :disabled="advancedTools.saving"
           @change="onAdvancedToolsToggle($event)"
         />
+        <span class="eg-topbar-toggle__switch" aria-hidden="true">
+          <span class="eg-topbar-toggle__thumb" />
+        </span>
         <span class="eg-topbar-toggle__label">{{ __('Advanced structure tools') }}</span>
         <span v-if="advancedTools.enabled" class="eg-topbar-toggle__badge">{{ __('active') }}</span>
       </label>
