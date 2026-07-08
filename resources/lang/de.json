@@ -454,5 +454,13 @@
   "new taxonomy \":handle\"": "neue Taxonomie \":handle\"",
   "new blueprint \":handle\"": "neuer Blueprint \":handle\"",
   "blueprint \":handle\" updated": "Blueprint \":handle\" aktualisiert",
-  "Changes applied": "Angewendete Änderungen"
+  "Changes applied": "Angewendete Änderungen",
+  "new fieldset \":handle\"": "neues Fieldset \":handle\"",
+  "component \":handle\" registered in \":container\"": "Komponente \":handle\" in \":container\" registriert",
+  "Taxonomy": "Taxonomie",
+  "Choose a taxonomy...": "Taxonomie wählen...",
+  "Term not found: :id": "Begriff nicht gefunden: :id",
+  "Translation failed for term :title: :error": "Übersetzung fehlgeschlagen für Begriff :title: :error",
+  "This taxonomy does not support multiple languages.": "Diese Taxonomie unterstützt keine mehreren Sprachen.",
+  "Taxonomy not found.": "Taxonomie nicht gefunden."
 }

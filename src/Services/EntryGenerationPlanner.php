@@ -645,6 +645,8 @@ class EntryGenerationPlanner
                 'create_taxonomy' => __('new taxonomy ":handle"', ['handle' => $handle]),
                 'create_blueprint' => __('new blueprint ":handle"', ['handle' => $handle]),
                 'update_blueprint' => __('blueprint ":handle" updated', ['handle' => $handle]),
+                'create_fieldset' => __('new fieldset ":handle"', ['handle' => $handle]),
+                'add_component_set' => __('component ":handle" registered in ":container"', ['handle' => $handle, 'container' => (string) ($result['container'] ?? '')]),
                 default => __('structural change (:name)', ['name' => $name]),
             };
 

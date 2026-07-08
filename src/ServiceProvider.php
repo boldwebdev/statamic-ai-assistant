@@ -91,7 +91,10 @@ class ServiceProvider extends AddonServiceProvider
         });
 
         $this->app->singleton(TranslationService::class, function ($app) {
-            return new TranslationService($app->make(EntryTranslator::class));
+            return new TranslationService(
+                $app->make(EntryTranslator::class),
+                $app->make(\BoldWeb\StatamicAiAssistant\Services\TermTranslator::class),
+            );
         });
 
         $this->app->singleton(TranslationGlossaryService::class, function ($app) {

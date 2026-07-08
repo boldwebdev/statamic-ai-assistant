@@ -91,6 +91,8 @@ Route::prefix('ai-translations')->name('statamic-ai-assistant.')->group(function
 
         Route::post('/bulk', [TranslationController::class, 'translateBulk'])->name('translate.bulk');
         Route::get('/collection-entries', [TranslationController::class, 'collectionEntries'])->name('translate.collection-entries');
+        Route::get('/taxonomy-terms', [TranslationController::class, 'taxonomyTerms'])->name('translate.taxonomy-terms');
+        Route::post('/term', [TranslationController::class, 'translateTerm'])->name('translate.term');
         Route::get('/navigation-entries', [TranslationController::class, 'navigationEntries'])->name('translate.navigation-entries');
         Route::post('/navigation-sync', [TranslationController::class, 'navigationSync'])->name('translate.navigation-sync');
     });

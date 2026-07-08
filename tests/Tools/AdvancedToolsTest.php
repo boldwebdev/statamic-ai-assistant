@@ -29,7 +29,9 @@ class AdvancedToolsTest extends TestCase
         }
         Collection::find(self::COLLECTION)?->delete();
         Taxonomy::find(self::TAXONOMY)?->delete();
-        \Statamic\Facades\Fieldset::find('adv_hero')?->delete();
+        foreach (['adv_hero', 'component_adv_slider', 'adv_main_components', 'adv_flat_components'] as $fs) {
+            \Statamic\Facades\Fieldset::find($fs)?->delete();
+        }
 
         parent::tearDown();
     }
@@ -205,6 +207,120 @@ class AdvancedToolsTest extends TestCase
         $importRows = array_filter($this->structureFieldRows($reread['structure']), fn ($row) => ($row['import'] ?? null) === 'adv_hero');
         $this->assertCount(1, $importRows);
         $this->assertContains('location', array_column($reread['fields'], 'handle'));
+    }
+
+    public function test_create_fieldset_and_register_it_as_component_in_grouped_container(): void
+    {
+        // Container in the grouped format real sites use (sets → group → sets).
+        \Statamic\Facades\Fieldset::make('adv_main_components')->setContents([
+            'title' => 'Main Components',
+            'fields' => [[
+                'handle' => 'main_components',
+                'field' => [
+                    'type' => 'replicator',
+                    'display' => 'Komponenten',
+                    'sets' => [
+                        'default_group' => [
+                            'display' => 'Blocks',
+                            'sets' => [
+                                'text' => ['display' => 'Text', 'fields' => [['import' => 'adv_hero']]],
+                            ],
+                        ],
+                    ],
+                ],
+            ]],
+        ])->save();
+        \Statamic\Facades\Fieldset::make('adv_hero')->setContents([
+            'title' => 'Adv Hero',
+            'fields' => [['handle' => 'hero_title', 'field' => ['type' => 'text']]],
+        ])->save();
+
+        // 1. Create the component fieldset.
+        $created = $this->invokeTool(new \BoldWeb\StatamicAiAssistant\Tools\Advanced\CreateFieldsetTool, [
+            'handle' => 'component_adv_slider',
+            'fields' => [
+                ['handle' => 'title', 'field' => ['type' => 'text', 'display' => 'Titel']],
+                ['handle' => 'images', 'field' => ['type' => 'assets']],
+            ],
+        ]);
+        $this->assertTrue($created['ok'], $created['error'] ?? '');
+        $this->assertStringContainsString('add_component_set', $created['next_step']);
+
+        // Duplicate handle refused.
+        $dupe = $this->invokeTool(new \BoldWeb\StatamicAiAssistant\Tools\Advanced\CreateFieldsetTool, [
+            'handle' => 'component_adv_slider',
+            'fields' => [['handle' => 'title', 'field' => ['type' => 'text']]],
+        ]);
+        $this->assertFalse($dupe['ok']);
+
+        // 2. The container is discoverable via list_fieldsets.
+        $list = $this->invokeTool(new \BoldWeb\StatamicAiAssistant\Tools\Advanced\ListFieldsetsTool, ['handle' => 'adv_main_components']);
+        $this->assertTrue($list['fieldsets'][0]['component_container']);
+        $this->assertSame(['text'], $list['fieldsets'][0]['set_handles']);
+
+        // 3. Register the component: set lands in the group, importing the fieldset.
+        $registered = $this->invokeTool(new \BoldWeb\StatamicAiAssistant\Tools\Advanced\AddComponentSetTool, [
+            'component' => 'component_adv_slider',
+            'container' => 'adv_main_components',
+            'display' => 'Slider',
+        ]);
+        $this->assertTrue($registered['ok'], $registered['error'] ?? '');
+        $this->assertSame('adv_slider', $registered['set_handle']);
+
+        $sets = \Statamic\Facades\Fieldset::find('adv_main_components')->contents()['fields'][0]['field']['sets'];
+        $this->assertSame(
+            ['display' => 'Slider', 'fields' => [['import' => 'component_adv_slider']]],
+            $sets['default_group']['sets']['adv_slider'],
+        );
+        // Existing sets untouched.
+        $this->assertArrayHasKey('text', $sets['default_group']['sets']);
+
+        // 4. Re-registering the same component is refused.
+        $again = $this->invokeTool(new \BoldWeb\StatamicAiAssistant\Tools\Advanced\AddComponentSetTool, [
+            'component' => 'component_adv_slider',
+            'container' => 'adv_main_components',
+        ]);
+        $this->assertFalse($again['ok']);
+        $this->assertStringContainsString('already registered', $again['error']);
+    }
+
+    public function test_add_component_set_supports_flat_containers_and_reports_missing_ones(): void
+    {
+        \Statamic\Facades\Fieldset::make('component_adv_slider')->setContents([
+            'title' => 'Adv Slider',
+            'fields' => [['handle' => 'title', 'field' => ['type' => 'text']]],
+        ])->save();
+
+        // Flat sets format (no groups).
+        \Statamic\Facades\Fieldset::make('adv_flat_components')->setContents([
+            'title' => 'Flat Components',
+            'fields' => [[
+                'handle' => 'blocks',
+                'field' => ['type' => 'replicator', 'sets' => ['text' => ['display' => 'Text', 'fields' => []]]],
+            ]],
+        ])->save();
+
+        $registered = $this->invokeTool(new \BoldWeb\StatamicAiAssistant\Tools\Advanced\AddComponentSetTool, [
+            'component' => 'component_adv_slider',
+            'container' => 'adv_flat_components',
+        ]);
+        $this->assertTrue($registered['ok'], $registered['error'] ?? '');
+
+        $sets = \Statamic\Facades\Fieldset::find('adv_flat_components')->contents()['fields'][0]['field']['sets'];
+        $this->assertSame([['import' => 'component_adv_slider']], $sets['adv_slider']['fields']);
+
+        // A fieldset without sets is called out as not-a-container.
+        \Statamic\Facades\Fieldset::make('adv_hero')->setContents([
+            'title' => 'Adv Hero',
+            'fields' => [['handle' => 'hero_title', 'field' => ['type' => 'text']]],
+        ])->save();
+
+        $notContainer = $this->invokeTool(new \BoldWeb\StatamicAiAssistant\Tools\Advanced\AddComponentSetTool, [
+            'component' => 'component_adv_slider',
+            'container' => 'adv_hero',
+        ]);
+        $this->assertFalse($notContainer['ok']);
+        $this->assertStringContainsString('not a components container', $notContainer['error']);
     }
 
     public function test_invalid_handles_are_rejected(): void
