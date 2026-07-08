@@ -597,8 +597,8 @@ class EntryGeneratorService
 
         // Primary narrowing: every token must appear in the title OR slug. This is
         // word-order agnostic and — because tokenising strips connectors like "&",
-        // "+", "and", "und", "et" — a query for "Body Soul" or "Body and Soul" still
-        // finds the entry titled "Body & Soul". `like` is case-insensitive here.
+        // "+", "and", "und", "et" — a query for "Salt Stone" or "Salt and Stone" still
+        // finds the entry titled "Salt & Stone". `like` is case-insensitive here.
         $andQuery = $makeBase();
         foreach ($tokens as $token) {
             $andQuery->where(function ($qq) use ($token) {
@@ -651,7 +651,7 @@ class EntryGeneratorService
      * symbols never have to match literally). Diacritics are preserved so the
      * tokens still match accented titles via the DB `like`. Connective words and
      * symbols ("&", "+", "and", "und", "et", …) are dropped, which is what makes
-     * "Body & Soul", "Body and Soul" and "Body Soul" all resolve to the same entry.
+     * "Salt & Stone", "Salt and Stone" and "Salt Stone" all resolve to the same entry.
      *
      * @return array<int, string>
      */

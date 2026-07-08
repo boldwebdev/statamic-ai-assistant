@@ -73,10 +73,95 @@
       </div>
     </div>
 
+    <!-- Preview modal for "@asset:" / "@folder:" chips (click to open). Rendered
+         inline in the drawer branch — the same proven pattern as the advanced-
+         tools modal above (a body Teleport here would live in the v-else root
+         and never render while the drawer is showing). -->
+    <div
+      v-if="assetPreview.open"
+      class="eg-asset-modal__backdrop"
+      role="dialog"
+      aria-modal="true"
+      @click.self="closeAssetPreview"
+    >
+      <div class="eg-asset-modal">
+        <div class="eg-asset-modal__head">
+          <div class="eg-asset-modal__heading">
+            <span class="eg-asset-modal__title">{{ assetPreview.data?.name || (assetPreview.kind === 'folder' ? __('Folder') : __('Asset')) }}</span>
+            <span v-if="assetPreview.data?.meta" class="eg-asset-modal__subtitle">{{ assetPreview.data.meta }}</span>
+          </div>
+          <button type="button" class="eg-asset-modal__close" :aria-label="__('Close')" @click="closeAssetPreview">&times;</button>
+        </div>
+
+        <div v-if="assetPreview.loading" class="eg-asset-modal__loading">
+          <span class="eg-chat__mention-spinner" aria-hidden="true"></span>
+        </div>
+
+        <template v-else-if="assetPreview.data && assetPreview.data.ok">
+          <!-- Folder: thumbnail grid + item count -->
+          <template v-if="assetPreview.data.kind === 'folder'">
+            <div v-if="assetPreview.data.thumbnails.length" class="eg-asset-modal__grid">
+              <img v-for="(t, i) in assetPreview.data.thumbnails" :key="i" :src="t" alt="" loading="lazy" />
+            </div>
+            <div v-else class="eg-asset-modal__media eg-asset-modal__media--file">
+              <span class="eg-asset-modal__ext">{{ __('No images') }}</span>
+            </div>
+            <div class="eg-asset-modal__body">
+              <p class="eg-asset-modal__meta">{{ assetPreview.data.count }} {{ __('items') }}</p>
+            </div>
+          </template>
+
+          <!-- Single asset: image (or filetype badge) + details -->
+          <template v-else>
+            <div v-if="assetPreview.data.thumbnail" class="eg-asset-modal__media">
+              <img :src="assetPreview.data.thumbnail" :alt="assetPreview.data.alt || assetPreview.data.name" />
+            </div>
+            <div v-else class="eg-asset-modal__media eg-asset-modal__media--file">
+              <span class="eg-asset-modal__ext">{{ assetPreview.data.extension || __('File') }}</span>
+            </div>
+            <div class="eg-asset-modal__body">
+              <p v-if="assetPreview.data.width" class="eg-asset-modal__meta">
+                {{ assetPreview.data.width }} × {{ assetPreview.data.height }} px · {{ assetPreview.data.extension }}
+              </p>
+              <p v-if="assetPreview.data.alt" class="eg-asset-modal__alt">“{{ assetPreview.data.alt }}”</p>
+            </div>
+          </template>
+
+          <div class="eg-asset-modal__foot">
+            <a :href="assetBrowseUrl" class="eg-asset-modal__link" target="_blank" rel="noopener">
+              {{ __('Open in assets') }} ↗
+            </a>
+            <Button
+              variant="primary"
+              size="sm"
+              :text="__('Reference in chat')"
+              @click="insertPreviewedAssetRef"
+            />
+          </div>
+        </template>
+
+        <div v-else class="eg-asset-modal__body">
+          <p class="eg-asset-modal__meta">{{ __('Preview unavailable.') }}</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Native Statamic asset browser (Stack) for folder navigation + picking
+         refs into the chat. Opened from folder chips and the composer button. -->
+    <AgentAssetSelectorStack
+      v-if="assetBrowser.container"
+      v-model:open="assetBrowser.open"
+      :container="assetBrowser.container"
+      :columns="assetBrowser.columns"
+      :folder="assetBrowser.folder"
+      @insert="insertRefTokens"
+    />
+
     <div
       ref="chatStream"
       class="eg-chat__stream"
       @scroll.passive="onChatStreamScroll"
+      @click="onChatStreamClick"
     >
 
       <!-- Agent: welcome -->
@@ -314,6 +399,20 @@
           />
           <button
             type="button"
+            class="eg-chat__composer-assets"
+            :disabled="store.generating"
+            :title="__('Reference assets')"
+            :aria-label="__('Reference assets')"
+            @click="openAssetBrowser()"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="17" height="17" aria-hidden="true">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+              <path d="M21 15l-5-5L5 21" />
+            </svg>
+          </button>
+          <button
+            type="button"
             class="eg-chat__composer-send"
             :disabled="!canGenerate || store.generating"
             :title="__('Send')"
@@ -544,6 +643,7 @@
         </div>
       </template>
     </div>
+
   </div>
 </template>
 
@@ -551,6 +651,7 @@
 import axios from 'axios';
 import { Button } from '@statamic/cms/ui';
 import AiModalLoadingOverlay from './AiModalLoadingOverlay.vue';
+import AgentAssetSelectorStack from './AgentAssetSelectorStack.vue';
 import EntryGeneratorEntryCard from './EntryGeneratorEntryCard.vue';
 import {
   state,
@@ -574,7 +675,7 @@ import { formatChatMessageHtml } from '../formatChatUrls.js';
 
 export default {
   name: 'EntryGeneratorPage',
-  components: { Button, AiModalLoadingOverlay, EntryGeneratorEntryCard },
+  components: { Button, AiModalLoadingOverlay, EntryGeneratorEntryCard, AgentAssetSelectorStack },
 
   props: {
     drawer: { type: Boolean, default: false },
@@ -635,6 +736,25 @@ export default {
         _blurTimer: null,
       },
 
+      // Preview modal for "@asset:" chips in the chat (click to open).
+      assetPreview: {
+        open: false,
+        loading: false,
+        kind: 'asset',
+        ref: null,
+        data: null,
+      },
+      _assetPreviewCache: {},
+
+      // Native Statamic asset browser (Stack): folder chips + composer button.
+      assetBrowser: {
+        open: false,
+        container: null,
+        columns: [],
+        folder: '',
+      },
+      _assetBrowserCache: {},
+
       // Expose the reactive store to the template.
       store: state,
     };
@@ -643,6 +763,19 @@ export default {
   computed: {
     stepLabels() {
       return [this.__('Configure'), this.__('Prompt'), this.__('Preview')];
+    },
+
+    /** Deep link into Statamic's asset browser for the previewed ref. */
+    assetBrowseUrl() {
+      const ref = this.assetPreview.ref || '';
+      const [container, path = ''] = ref.split('::');
+      if (!container) return '#';
+      const encoded = path.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+      const base = `/cp/assets/browse/${encodeURIComponent(container)}`;
+      if (this.assetPreview.kind === 'folder') {
+        return encoded ? `${base}/${encoded}` : base;
+      }
+      return `${base}/${encoded}/edit`;
     },
 
     availableBlueprints() {
@@ -845,6 +978,7 @@ export default {
       this.startPlanTicker();
       this.startPlanningHints();
     }
+    window.addEventListener('keydown', this.onAssetPreviewKeydown);
   },
 
   beforeUnmount() {
@@ -852,6 +986,7 @@ export default {
     this.stopPlanningHints();
     clearTimeout(this.mention._debounce);
     clearTimeout(this.mention._blurTimer);
+    window.removeEventListener('keydown', this.onAssetPreviewKeydown);
     // NOTE: We deliberately do NOT abort the in-flight stream here. The store
     // owns it and it must survive component teardown so generation continues
     // when the user navigates away.
@@ -984,6 +1119,127 @@ export default {
       if (!el) return;
       const threshold = 80;
       this.chatStickToBottom = this.chatStreamDistanceFromBottom(el) <= threshold;
+    },
+
+    /**
+     * Delegated click on "@asset:" / "@folder:" chips (v-html content). Assets
+     * open the compact preview modal; folders open the native asset browser at
+     * that folder. Clicks bubble reliably, so no per-chip binding needed.
+     */
+    onChatStreamClick(event) {
+      const chip = event.target.closest?.('[data-mention-ref]');
+      if (!chip) return;
+
+      const ref = chip.getAttribute('data-mention-ref');
+      const kind = chip.getAttribute('data-mention-kind') || 'asset';
+      if (!ref) return;
+
+      if (kind === 'folder') {
+        const [container, folder = ''] = ref.split('::');
+        this.openAssetBrowser(container, folder);
+        return;
+      }
+
+      this.openAssetPreview(kind, ref);
+    },
+
+    /**
+     * Open Statamic's native asset browser (in a Stack) at a container/folder.
+     * Called with no arguments (composer button) it opens the first container's
+     * root. The container payload comes from /asset-browser and is cached.
+     */
+    async openAssetBrowser(containerHandle = '', folder = '') {
+      const cacheKey = containerHandle || '~first~';
+      let payload = this._assetBrowserCache[cacheKey];
+
+      if (!payload) {
+        try {
+          const { data } = await axios.get('/cp/ai-generate/asset-browser', {
+            params: containerHandle ? { container: containerHandle } : {},
+          });
+          if (!data.ok) throw new Error('unavailable');
+          payload = data;
+          this._assetBrowserCache[cacheKey] = data;
+        } catch (e) {
+          Statamic.$toast?.error?.(this.__('Asset browser unavailable.'));
+          return;
+        }
+      }
+
+      this.assetBrowser.container = payload.container;
+      this.assetBrowser.columns = payload.columns || [];
+      this.assetBrowser.folder = folder;
+      this.assetBrowser.open = true;
+    },
+
+    /**
+     * Append "@asset:…" / "@folder:…" tokens to the composer — the "reference
+     * in chat" action of the preview modal and the asset browser Stack.
+     */
+    insertRefTokens(tokens) {
+      const list = (Array.isArray(tokens) ? tokens : [tokens]).filter(Boolean);
+      if (!list.length) return;
+
+      const current = this.store.pendingPrompt || '';
+      const glue = current === '' || current.endsWith(' ') ? '' : ' ';
+      this.store.pendingPrompt = current + glue + list.map((t) => `@${t}`).join(' ') + ' ';
+      list.forEach((t) => registerMention(t));
+
+      this.$nextTick(() => {
+        const el = this.$refs.promptTextarea;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+        this.autoResize({ target: el });
+      });
+    },
+
+    insertPreviewedAssetRef() {
+      if (!this.assetPreview.ref) return;
+      this.insertRefTokens([`${this.assetPreview.kind}:${this.assetPreview.ref}`]);
+      this.closeAssetPreview();
+    },
+
+    onAssetPreviewKeydown(event) {
+      if (event.key === 'Escape' && this.assetPreview.open) this.closeAssetPreview();
+    },
+
+    closeAssetPreview() {
+      this.assetPreview.open = false;
+      this.assetPreview.ref = null;
+    },
+
+    async openAssetPreview(kind, ref) {
+      this.assetPreview.kind = kind;
+      this.assetPreview.ref = ref;
+      this.assetPreview.open = true;
+
+      const cacheKey = `${kind}:${ref}`;
+      const cached = this._assetPreviewCache[cacheKey];
+      if (cached) {
+        this.assetPreview.loading = false;
+        this.assetPreview.data = cached;
+        return;
+      }
+
+      this.assetPreview.loading = true;
+      this.assetPreview.data = null;
+
+      try {
+        const { data } = await axios.get('/cp/ai-generate/asset-preview', {
+          params: { ref, kind },
+          validateStatus: (status) => status < 500,
+        });
+        this._assetPreviewCache[cacheKey] = data;
+        // Ignore a response for a ref the user has already navigated away from.
+        if (this.assetPreview.ref !== ref) return;
+        this.assetPreview.data = data;
+      } catch (e) {
+        if (this.assetPreview.ref !== ref) return;
+        this.assetPreview.data = { ok: false };
+      } finally {
+        if (this.assetPreview.ref === ref) this.assetPreview.loading = false;
+      }
     },
 
     /**

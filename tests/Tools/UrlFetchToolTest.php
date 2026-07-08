@@ -49,8 +49,8 @@ class UrlFetchToolTest extends TestCase
         ]);
 
         $ctx = new ToolContext;
-        // User referenced edenspa.ch — a guessed example.com URL must be refused.
-        $tool = new UrlFetchTool(new PromptUrlFetcher, ['edenspa.ch'], true);
+        // User referenced allowed-site.test — a guessed example.com URL must be refused.
+        $tool = new UrlFetchTool(new PromptUrlFetcher, ['allowed-site.test'], true);
         $result = $tool->handle('{"url":"https://example.com/made-up","reason":"guessing"}', $ctx);
 
         $this->assertFalse($result['ok']);
@@ -65,11 +65,11 @@ class UrlFetchToolTest extends TestCase
         ]);
 
         $ctx = new ToolContext;
-        $tool = new UrlFetchTool(new PromptUrlFetcher, ['edenspa.ch'], true);
+        $tool = new UrlFetchTool(new PromptUrlFetcher, ['allowed-site.test'], true);
 
         // www. variant and a same-site detail page are both allowed.
-        $this->assertTrue($tool->handle('{"url":"https://www.edenspa.ch/","reason":"home"}', $ctx)['ok']);
-        $this->assertTrue($tool->handle('{"url":"https://edenspa.ch/events/x","reason":"detail"}', $ctx)['ok']);
+        $this->assertTrue($tool->handle('{"url":"https://www.allowed-site.test/","reason":"home"}', $ctx)['ok']);
+        $this->assertTrue($tool->handle('{"url":"https://allowed-site.test/events/x","reason":"detail"}', $ctx)['ok']);
     }
 
     public function test_empty_allowlist_forbids_all_fetching(): void
@@ -89,13 +89,13 @@ class UrlFetchToolTest extends TestCase
     {
         $messages = [
             ['role' => 'system', 'content' => 'ignore https://system-should-not-count.example'],
-            ['role' => 'user', 'content' => 'Copy https://www.edenspa.ch/de and http://foo.test/x please'],
+            ['role' => 'user', 'content' => 'Copy https://www.allowed-site.test/de and http://foo.test/x please'],
             ['role' => 'assistant', 'content' => 'ok https://assistant-should-not-count.example'],
         ];
 
         $hosts = UrlFetchTool::hostsFromMessages(new PromptUrlFetcher, $messages);
 
-        $this->assertContains('www.edenspa.ch', $hosts);
+        $this->assertContains('www.allowed-site.test', $hosts);
         $this->assertContains('foo.test', $hosts);
         $this->assertNotContains('system-should-not-count.example', $hosts);
         $this->assertNotContains('assistant-should-not-count.example', $hosts);

@@ -21,7 +21,7 @@ class FindEntriesShortlistTest extends TestCase
         $this->site = Site::default()->handle();
 
         // The Stache persists across tests in a single process run, so start clean.
-        Entry::all()->each(fn ($e) => $e->delete());
+        $this->wipeEntries();
 
         Blueprint::make('package')->setNamespace('collections.packages')->setContents([
             'tabs' => ['main' => ['sections' => [['fields' => [
@@ -60,23 +60,23 @@ class FindEntriesShortlistTest extends TestCase
     #[DataProvider('ampersandQueries')]
     public function test_ampersand_titles_are_found_regardless_of_how_the_connector_is_written(string $query): void
     {
-        $this->makeEntry('Body & Soul', 'body-soul');
+        $this->makeEntry('Salt & Stone', 'salt-stone');
         $this->makeEntry('After Sunrise', 'after-sunrise'); // decoy
 
-        $this->assertContains('Body & Soul', $this->titles('packages', $query), "query [{$query}] did not find the entry");
+        $this->assertContains('Salt & Stone', $this->titles('packages', $query), "query [{$query}] did not find the entry");
     }
 
     /** @return array<int, array<int, string>> */
     public static function ampersandQueries(): array
     {
         return [
-            'literal ampersand' => ['Body & Soul'],
-            'spelled out and' => ['Body and Soul'],
-            'connector dropped' => ['Body Soul'],
-            'plus sign' => ['Body + Soul'],
-            'lower case' => ['body soul'],
-            'reversed order' => ['Soul Body'],
-            'single token' => ['Soul'],
+            'literal ampersand' => ['Salt & Stone'],
+            'spelled out and' => ['Salt and Stone'],
+            'connector dropped' => ['Salt Stone'],
+            'plus sign' => ['Salt + Stone'],
+            'lower case' => ['salt stone'],
+            'reversed order' => ['Stone Salt'],
+            'single token' => ['Stone'],
         ];
     }
 
@@ -90,40 +90,40 @@ class FindEntriesShortlistTest extends TestCase
 
     public function test_best_match_is_ranked_first(): void
     {
-        $this->makeEntry('Body & Soul', 'body-soul');
-        $this->makeEntry('Body & Soul Deluxe Weekend', 'body-soul-deluxe');
+        $this->makeEntry('Salt & Stone', 'salt-stone');
+        $this->makeEntry('Salt & Stone Deluxe Weekend', 'salt-stone-deluxe');
 
-        $titles = $this->titles('packages', 'Body & Soul');
+        $titles = $this->titles('packages', 'Salt & Stone');
 
         // Exact title beats the longer superset title.
-        $this->assertSame('Body & Soul', $titles[0]);
+        $this->assertSame('Salt & Stone', $titles[0]);
     }
 
     public function test_requires_all_tokens_so_unrelated_entries_are_excluded(): void
     {
-        $this->makeEntry('Body & Soul', 'body-soul');
+        $this->makeEntry('Salt & Stone', 'salt-stone');
         $this->makeEntry('Day Spa', 'day-spa');
 
-        $titles = $this->titles('packages', 'Body Soul');
+        $titles = $this->titles('packages', 'Salt Stone');
 
-        $this->assertContains('Body & Soul', $titles);
+        $this->assertContains('Salt & Stone', $titles);
         $this->assertNotContains('Day Spa', $titles);
     }
 
     public function test_relaxes_to_any_token_when_no_entry_matches_all(): void
     {
-        $this->makeEntry('Body & Soul', 'body-soul');
+        $this->makeEntry('Salt & Stone', 'salt-stone');
 
         // "Wellness" matches nothing; without the relax fallback the strict AND
         // would return zero rows and the agent would give up.
-        $titles = $this->titles('packages', 'Body Wellness');
+        $titles = $this->titles('packages', 'Salt Wellness');
 
-        $this->assertContains('Body & Soul', $titles);
+        $this->assertContains('Salt & Stone', $titles);
     }
 
     public function test_empty_query_returns_recent_entries(): void
     {
-        $this->makeEntry('Body & Soul', 'body-soul');
+        $this->makeEntry('Salt & Stone', 'salt-stone');
         $this->makeEntry('Day Spa', 'day-spa');
 
         $this->assertCount(2, $this->titles('packages', '   '));
@@ -153,9 +153,9 @@ class FindEntriesShortlistTest extends TestCase
 
     public function test_result_rows_carry_the_published_state(): void
     {
-        $this->makeEntry('Body & Soul', 'body-soul');
+        $this->makeEntry('Salt & Stone', 'salt-stone');
 
-        $rows = $this->service()->findEntriesShortlist('packages', 'Body Soul', 5);
+        $rows = $this->service()->findEntriesShortlist('packages', 'Salt Stone', 5);
 
         $this->assertArrayHasKey('published', $rows[0]);
         $this->assertIsBool($rows[0]['published']);

@@ -21,7 +21,7 @@ class ReadEntryToolTest extends TestCase
         $this->site = Site::default()->handle();
 
         // The Stache persists across tests in a single process run, so start clean.
-        Entry::all()->each(fn ($e) => $e->delete());
+        $this->wipeEntries();
 
         // Reuse the fixture 'packages' collection (like FindEntriesShortlistTest)
         // so test runs never leave new collection files in tests/__fixtures__.

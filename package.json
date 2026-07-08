@@ -3,6 +3,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:cp": "vite build && npm run cp:sync",
     "cp:sync": "rsync -a --delete resources/dist/build/ ../hotel-eden-spiez-cms/public/vendor/statamic-ai-assistant/build/"
   },
   "devDependencies": {

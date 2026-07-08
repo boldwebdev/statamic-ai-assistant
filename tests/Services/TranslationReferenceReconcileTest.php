@@ -27,7 +27,7 @@ class TranslationReferenceReconcileTest extends TestCase
 
         $this->site = Site::default()->handle();
 
-        Entry::all()->each(fn ($e) => $e->delete());
+        $this->wipeEntries();
 
         Blueprint::make('package')->setNamespace('collections.packages')->setContents([
             'tabs' => ['main' => ['sections' => [['fields' => [

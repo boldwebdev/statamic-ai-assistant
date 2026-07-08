@@ -36,7 +36,7 @@ class ListTaxonomiesTool implements ChatTool
                     'properties' => [
                         'taxonomy' => [
                             'type' => 'string',
-                            'description' => 'Optional taxonomy handle to list terms for (e.g. "hotel_room_types"). Omit to list taxonomies.',
+                            'description' => 'Optional taxonomy handle to list terms for (e.g. "topics"). Omit to list taxonomies.',
                         ],
                         'site' => [
                             'type' => 'string',

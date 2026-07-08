@@ -965,6 +965,7 @@ function resetGenerationOnly() {
 export function reset() {
   resetGenerationOnly();
   state.mentionedTitles = [];
+  state.pendingAttachedFile = null;
   state._backgroundedAt = null;
 }
 

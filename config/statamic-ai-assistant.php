@@ -365,7 +365,13 @@ return [
     // that don't exist. Set to false to let the model fetch any public URL.
     'entry_generator_restrict_fetch_to_prompt_urls' => (bool) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_RESTRICT_FETCH_TO_PROMPT_URLS', true),
 
-    'entry_generator_tool_max_rounds' => max(1, min(24, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_ROUNDS', 120))),
+    // Max agentic tool-loop rounds per request. Rounds are consumed on demand
+    // (a two-entry create finishes in a handful), so this only bounds long bulk
+    // jobs — e.g. "add alt text to every image in a folder", where each item
+    // costs ~2 rounds (analyze_image + update_asset). Keep it high enough that
+    // such per-item work finishes instead of the model wrapping up early once
+    // the round budget looks tight.
+    'entry_generator_tool_max_rounds' => max(1, min(60, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_ROUNDS', 120))),
     'entry_generator_tool_max_fetches' => max(1, min(40, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_FETCHES', 100))),
     // Max read_entry_structure calls per request (the agent reads existing entries
     // to mirror their layout/components when creating or updating an entry).
@@ -394,6 +400,11 @@ return [
 
     // Max update_asset calls per request (asset metadata writes: alt texts, captions).
     'entry_generator_tool_max_asset_writes' => max(1, min(100, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_ASSET_WRITES', 40))),
+
+    // Max analyze_image (vision) calls per request. This is the throughput ceiling
+    // for content-based alt text over a folder of images, so it tracks the asset
+    // write budget rather than the smaller generic CMS-read cap.
+    'entry_generator_tool_max_image_analyses' => max(1, min(100, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_IMAGE_ANALYSES', 40))),
 
     /*
     |--------------------------------------------------------------------------

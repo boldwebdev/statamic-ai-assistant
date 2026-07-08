@@ -210,8 +210,8 @@ class PlanEntriesJobTest extends TestCase
             ]]]]],
         ])->save();
         Collection::make('packages')->title('Packages')->sites(['default'])->save();
-        Entry::make()->id('body-soul-id')->collection('packages')->locale('default')
-            ->slug('body-soul')->data(['title' => 'Body & Soul'])->save();
+        Entry::make()->id('salt-stone-id')->collection('packages')->locale('default')
+            ->slug('salt-stone')->data(['title' => 'Salt & Stone'])->save();
 
         $catalog = [
             ['handle' => 'packages', 'title' => 'Packages', 'blueprints' => [
@@ -237,7 +237,7 @@ class PlanEntriesJobTest extends TestCase
                     'choices' => [[
                         'message' => [
                             'role' => 'assistant',
-                            'content' => 'Cannot proceed: the user provided only the title "Body & Soul". '
+                            'content' => 'Cannot proceed: the user provided only the title "Salt & Stone". '
                                 .'I cannot determine which entry they mean or whether it exists.',
                         ],
                     ]],
@@ -253,8 +253,8 @@ class PlanEntriesJobTest extends TestCase
                                 'function' => [
                                     'name' => 'update_entry_job',
                                     'arguments' => json_encode([
-                                        'entry_id' => 'body-soul-id',
-                                        'label' => 'Body & Soul',
+                                        'entry_id' => 'salt-stone-id',
+                                        'label' => 'Salt & Stone',
                                         'prompt' => 'Change the title to "Bodies and Soule".',
                                     ]),
                                 ],
@@ -284,7 +284,7 @@ class PlanEntriesJobTest extends TestCase
         $sid = $this->batch->initPlanningSession(
             'default',
             null,
-            'update "Body & Soul" title to bodies and soule',
+            'update "Salt & Stone" title to salts and stones',
             true,
             ['appendix' => '', 'warnings' => [], 'preferred' => new PreferredAssetPaths, 'appended_to_prompts' => false],
         );
@@ -299,7 +299,7 @@ class PlanEntriesJobTest extends TestCase
         $this->assertCount(1, $session['entry_order']);
 
         $row = array_values($session['entries'])[0];
-        $this->assertSame('body-soul-id', $row['entry_id']);
+        $this->assertSame('salt-stone-id', $row['entry_id']);
         Bus::assertDispatchedTimes(GeneratePlannedEntryJob::class, 1);
     }
 
@@ -312,7 +312,7 @@ class PlanEntriesJobTest extends TestCase
             ['handle' => 'packages', 'title' => 'Packages', 'blueprints' => [['handle' => 'package', 'title' => 'Package']]],
         ]);
         $generator->method('searchEntryContent')->willReturn([
-            ['id' => 'caee315a', 'title' => 'Yoga & Wellness mit Claudia Eva Reinig', 'slug' => 'yoga', 'collection' => 'packages', 'snippet' => '…Kursleitung: Claudia Eva Reinig…'],
+            ['id' => 'caee315a', 'title' => 'Yoga & Wellness with Nora Vega Marti', 'slug' => 'yoga', 'collection' => 'packages', 'snippet' => '…Kursleitung: Nora Vega Marti…'],
         ]);
 
         $decorator = new PlanEntryDecorator($generator);
@@ -334,7 +334,7 @@ class PlanEntriesJobTest extends TestCase
                                 'type' => 'function',
                                 'function' => [
                                     'name' => 'search_entry_content',
-                                    'arguments' => json_encode(['query' => 'Kursleitung: Claudia Eva Reinig']),
+                                    'arguments' => json_encode(['query' => 'Kursleitung: Nora Vega Marti']),
                                 ],
                             ]],
                         ],
@@ -351,7 +351,7 @@ class PlanEntriesJobTest extends TestCase
                                 'function' => [
                                     'name' => 'answer_question',
                                     'arguments' => json_encode([
-                                        'answer' => 'The entry "Yoga & Wellness mit Claudia Eva Reinig" (id caee315a) contains that phrase.',
+                                        'answer' => 'The entry "Yoga & Wellness with Nora Vega Marti" (id caee315a) contains that phrase.',
                                     ]),
                                 ],
                             ]],
@@ -372,7 +372,7 @@ class PlanEntriesJobTest extends TestCase
         $sid = $this->batch->initPlanningSession(
             'default',
             null,
-            'which entry contains: Kursleitung: Claudia Eva Reinig ?',
+            'which entry contains: Kursleitung: Nora Vega Marti ?',
             true,
             ['appendix' => '', 'warnings' => [], 'preferred' => new PreferredAssetPaths, 'appended_to_prompts' => false],
         );
@@ -635,13 +635,13 @@ class PlanEntriesJobTest extends TestCase
         $ai = $this->mockAi([
             $this->assistantEmpty(),
             $this->assistantToolCalls([$this->toolCall('c', 'create_entry_job', [
-                'collection' => 'pages', 'blueprint' => 'page', 'label' => 'Bankette',
-                'prompt' => 'Create a page based on https://www.eden-spiez.ch/hochzeiten-feiern/bankette',
+                'collection' => 'pages', 'blueprint' => 'page', 'label' => 'Banquets',
+                'prompt' => 'Create a page based on https://www.example.com/events/banquets',
             ])]),
             $this->assistantText('Done.'),
         ], $captured);
 
-        $sid = $this->initAgenticSession('erstelle mir eine neue seite basierend auf: https://www.eden-spiez.ch/hochzeiten-feiern/bankette');
+        $sid = $this->initAgenticSession('erstelle mir eine neue seite basierend auf: https://www.example.com/events/banquets');
         (new PlanEntriesJob($sid))->handle($this->batch, $this->makePlanner($ai, $generator), $generator, new PlanEntryDecorator($generator));
 
         $session = $this->batch->getSession($sid);
@@ -719,7 +719,7 @@ class PlanEntriesJobTest extends TestCase
             ['handle' => 'events', 'title' => 'Events', 'blueprints' => [['handle' => 'event', 'title' => 'Event']]],
         ]);
         $generator->method('findEntriesShortlist')->willReturn([
-            ['id' => 'evt-1', 'title' => 'Sommerfest', 'slug' => 'sommerfest', 'collection' => 'events'],
+            ['id' => 'evt-1', 'title' => 'Summer Fair', 'slug' => 'summer-fair', 'collection' => 'events'],
         ]);
 
         // Round 1: model wrongly bails on a read-only question without searching.
@@ -728,7 +728,7 @@ class PlanEntriesJobTest extends TestCase
         $ai = $this->mockAi([
             $this->assistantText('Cannot proceed: the user did not provide a title or topic in their last message.'),
             $this->assistantToolCalls([$this->toolCall('f1', 'find_entries', ['query' => 'events', 'collection' => 'events'])]),
-            $this->assistantToolCalls([$this->toolCall('a1', 'answer_question', ['answer' => 'The biggest Event entry is Sommerfest.'])]),
+            $this->assistantToolCalls([$this->toolCall('a1', 'answer_question', ['answer' => 'The biggest Event entry is Summer Fair.'])]),
         ], $captured);
 
         $sid = $this->initAgenticSession('which is the biggest entry in Event ?');
@@ -737,7 +737,7 @@ class PlanEntriesJobTest extends TestCase
         $session = $this->batch->getSession($sid);
         $this->assertSame('planned', $session['planning_status']);
         $this->assertNull($session['planner_error']);
-        $this->assertStringContainsString('Sommerfest', $session['planner_answer']);
+        $this->assertStringContainsString('Summer Fair', $session['planner_answer']);
 
         $turn = end($session['transcript']);
         $this->assertSame('answer', $turn['kind']);
@@ -753,10 +753,10 @@ class PlanEntriesJobTest extends TestCase
             ['handle' => 'news', 'title' => 'News', 'blueprints' => [['handle' => 'news', 'title' => 'News']]],
         ]);
         $generator->method('searchEntryContent')->willReturn([
-            ['id' => 'a005745a-5620-4209-919f-0e85c1cf1b96', 'title' => 'TOP-Ausbildungsbetrieb', 'slug' => 'top', 'collection' => 'news', 'snippet' => 'Long body…'],
+            ['id' => 'a005745a-5620-4209-919f-0e85c1cf1b96', 'title' => 'Extended Company Report', 'slug' => 'top', 'collection' => 'news', 'snippet' => 'Long body…'],
         ]);
 
-        $plainAnswer = 'answer_question:{"answer": "The longest entry is TOP-Ausbildungsbetrieb (id a005745a-5620-4209-919f-0e85c1cf1b96)."}';
+        $plainAnswer = 'answer_question:{"answer": "The longest entry is Extended Company Report (id a005745a-5620-4209-919f-0e85c1cf1b96)."}';
 
         $capturedMessages = [];
         $ai = $this->mockAi([
@@ -791,6 +791,75 @@ class PlanEntriesJobTest extends TestCase
         $turn = end($session['transcript']);
         $this->assertSame('answer', $turn['kind']);
         $this->assertStringContainsString('a005745a', $turn['text']);
+        Bus::assertNotDispatched(GeneratePlannedEntryJob::class);
+    }
+
+    public function test_bare_plain_text_answer_after_searching_is_an_answer_not_an_error(): void
+    {
+        Bus::fake();
+
+        // Regression: "do we have this on our website already?" — the model
+        // searched with find_entries, then answered as BARE plain text (no
+        // answer_question call, no "answer_question:{…}" format). That answer
+        // must surface as a successful answer turn, never as an error panel.
+        $generator = $this->createStub(EntryGeneratorService::class);
+        $generator->method('getCollectionsCatalog')->willReturn([
+            ['handle' => 'pages', 'title' => 'Pages', 'blueprints' => [['handle' => 'page', 'title' => 'Page']]],
+        ]);
+        $generator->method('findEntriesShortlist')->willReturn([
+            ['id' => '8da2a1d6', 'title' => 'Services & Pricing', 'slug' => 'services-pricing', 'collection' => 'pages'],
+        ]);
+
+        $captured = [];
+        $ai = $this->mockAi([
+            $this->assistantToolCalls([$this->toolCall('f1', 'find_entries', ['query' => 'Services'])]),
+            $this->assistantText('Yes — the page “Services & Pricing” already exists on your site (entry id 8da2a1d6).'),
+        ], $captured);
+
+        $sid = $this->initAgenticSession('do we have this on our website already ?');
+        $this->makePlanner($ai, $generator)->planAgentic($sid);
+
+        $session = $this->batch->getSession($sid);
+        $this->assertSame('planned', $session['planning_status']);
+        $this->assertNull($session['planner_error']);
+        $this->assertStringContainsString('8da2a1d6', $session['planner_answer']);
+
+        // No nudge round: the model DID use a tool, so its text is accepted directly.
+        $this->assertCount(2, $captured);
+
+        $turn = end($session['transcript']);
+        $this->assertSame('answer', $turn['kind']);
+        Bus::assertNotDispatched(GeneratePlannedEntryJob::class);
+    }
+
+    public function test_plain_text_answer_after_a_runner_tool_is_not_nudged(): void
+    {
+        Bus::fake();
+
+        // Regression: "how many assets do we have?" — the model used list_assets
+        // (a runner-registered read tool, NOT find_entries) and then answered in
+        // plain text. The premature-bail nudge must not fire ("you have not used
+        // any tools") — it discarded the good answer and surfaced the model's
+        // meta-reply ("I have already answered…") instead.
+        $captured = [];
+        $ai = $this->mockAi([
+            $this->assistantToolCalls([$this->toolCall('l1', 'list_assets', [])]),
+            $this->assistantText('We have 467 assets in total.'),
+        ], $captured);
+
+        $sid = $this->initAgenticSession('how many assets do we have in total ?');
+        $this->makePlanner($ai, $this->catalogStub())->planAgentic($sid);
+
+        $session = $this->batch->getSession($sid);
+        $this->assertSame('planned', $session['planning_status']);
+        $this->assertNull($session['planner_error']);
+        $this->assertStringContainsString('467', $session['planner_answer']);
+
+        // Exactly two rounds — no nudge round in between.
+        $this->assertCount(2, $captured);
+
+        $turn = end($session['transcript']);
+        $this->assertSame('answer', $turn['kind']);
         Bus::assertNotDispatched(GeneratePlannedEntryJob::class);
     }
 

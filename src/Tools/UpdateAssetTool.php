@@ -63,6 +63,7 @@ class UpdateAssetTool implements ChatTool
 
         $applied = [];
         $rejected = [];
+        $unchanged = [];
 
         foreach ($values as $handle => $value) {
             if (! is_string($handle) || ! in_array($handle, $allowed, true)) {
@@ -77,8 +78,27 @@ class UpdateAssetTool implements ChatTool
                 continue;
             }
 
+            // Writing the value a field already holds (including "" over an
+            // empty field) is a no-op — never save it or report it as a change.
+            $current = $asset->get($handle);
+            if ((string) ($current ?? '') === (string) ($value ?? '')) {
+                $unchanged[] = $handle;
+
+                continue;
+            }
+
             $asset->set($handle, $value);
             $applied[] = $handle;
+        }
+
+        if ($applied === [] && $unchanged !== []) {
+            return [
+                'ok' => true,
+                'updated' => false,
+                'ref' => $ref,
+                'unchanged' => $unchanged,
+                'note' => 'Every provided value matches what the asset already holds — nothing was written. To read current metadata, use list_assets.',
+            ];
         }
 
         if ($applied === []) {
@@ -94,6 +114,10 @@ class UpdateAssetTool implements ChatTool
         $asset->save();
 
         $result = ['ok' => true, 'updated' => true, 'ref' => $ref, 'applied' => $applied];
+
+        if ($unchanged !== []) {
+            $result['unchanged'] = $unchanged;
+        }
 
         if ($rejected !== []) {
             $result['rejected'] = $rejected;

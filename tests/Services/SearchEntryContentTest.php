@@ -18,7 +18,7 @@ class SearchEntryContentTest extends TestCase
         parent::setUp();
 
         $this->site = Site::default()->handle();
-        Entry::all()->each(fn ($e) => $e->delete());
+        $this->wipeEntries();
 
         Blueprint::make('package')->setNamespace('collections.packages')->setContents([
             'tabs' => ['main' => ['sections' => [['fields' => [
@@ -48,7 +48,7 @@ class SearchEntryContentTest extends TestCase
 
     public function test_finds_entry_by_a_phrase_split_across_rich_text_nodes(): void
     {
-        // Mirrors the real data: "Kursleitung:" and "Claudia Eva Reinig" live in
+        // Mirrors the real data: "Kursleitung:" and "Nora Vega Marti" live in
         // separate rich-text nodes, so the phrase is never stored contiguously.
         $this->makeEntry('yoga-id', 'Yoga & Wellness', ['body' => [
             [
@@ -57,7 +57,7 @@ class SearchEntryContentTest extends TestCase
                 'values' => [
                     'text' => [
                         ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Kursleitung:']]],
-                        ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => ' Claudia Eva Reinig']]],
+                        ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => ' Nora Vega Marti']]],
                     ],
                 ],
             ],
@@ -66,32 +66,32 @@ class SearchEntryContentTest extends TestCase
             ['type' => 'set', 'id' => 's', 'values' => ['text' => 'A relaxing day at the spa.']],
         ]]);
 
-        $results = $this->service()->searchEntryContent('packages', 'Kursleitung: Claudia Eva Reinig', 10);
+        $results = $this->service()->searchEntryContent('packages', 'Kursleitung: Nora Vega Marti', 10);
 
         $this->assertCount(1, $results);
         $this->assertSame('yoga-id', $results[0]['id']);
         $this->assertSame('Yoga & Wellness', $results[0]['title']);
-        $this->assertStringContainsString('Claudia', $results[0]['snippet']);
+        $this->assertStringContainsString('Nora', $results[0]['snippet']);
     }
 
     public function test_title_only_search_does_not_find_body_phrases(): void
     {
         // Proves why this tool is needed: find_entries (title/slug) cannot see it.
         $this->makeEntry('yoga-id', 'Yoga & Wellness', ['body' => [
-            ['type' => 'set', 'id' => 's', 'values' => ['text' => 'Kursleitung Claudia Eva Reinig']],
+            ['type' => 'set', 'id' => 's', 'values' => ['text' => 'Kursleitung Nora Vega Marti']],
         ]]);
 
-        $this->assertSame([], $this->service()->findEntriesShortlist('packages', 'Claudia Eva Reinig', 10));
-        $this->assertCount(1, $this->service()->searchEntryContent('packages', 'Claudia Eva Reinig', 10));
+        $this->assertSame([], $this->service()->findEntriesShortlist('packages', 'Nora Vega Marti', 10));
+        $this->assertCount(1, $this->service()->searchEntryContent('packages', 'Nora Vega Marti', 10));
     }
 
     public function test_requires_all_tokens_present_in_content(): void
     {
-        $this->makeEntry('a-id', 'A', ['body' => ['text' => 'Claudia teaches yoga.']]);
-        $this->makeEntry('b-id', 'B', ['body' => ['text' => 'Reinig is a surname.']]);
+        $this->makeEntry('a-id', 'A', ['body' => ['text' => 'Nora teaches yoga.']]);
+        $this->makeEntry('b-id', 'B', ['body' => ['text' => 'Marti is a surname.']]);
 
-        // Neither entry contains BOTH "Claudia" and "Reinig".
-        $this->assertSame([], $this->service()->searchEntryContent('packages', 'Claudia Reinig', 10));
+        // Neither entry contains BOTH "Nora" and "Marti".
+        $this->assertSame([], $this->service()->searchEntryContent('packages', 'Nora Marti', 10));
     }
 
     public function test_matching_is_case_and_diacritic_tolerant(): void

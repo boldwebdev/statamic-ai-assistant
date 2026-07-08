@@ -95,6 +95,12 @@ class ChatToolRunner
         return $this->counts[$name] ?? 0;
     }
 
+    /** Total dispatches across all registered tools this run. */
+    public function totalCalls(): int
+    {
+        return array_sum($this->counts);
+    }
+
     /**
      * Append `role: tool` replies for every call in an assistant turn. Registered
      * tools are dispatched here; unknown names fall to $fallback (which returns a

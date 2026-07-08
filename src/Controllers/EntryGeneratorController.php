@@ -136,6 +136,119 @@ class EntryGeneratorController
     }
 
     /**
+     * Resolve a single "@asset:" / "@folder:" reference to a compact preview
+     * payload for the chat hover card: a CP thumbnail plus a little metadata.
+     * The "small" preset (400px) keeps the download light, and the CP thumbnail
+     * route already falls back to a placeholder for oversized images.
+     */
+    public function assetPreview(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'ref' => 'required|string',
+            'kind' => 'nullable|in:asset,folder',
+        ]);
+
+        $kind = $data['kind'] ?? 'asset';
+        [$containerHandle, $path] = array_pad(explode('::', $data['ref'], 2), 2, '');
+        $container = \Statamic\Facades\AssetContainer::findByHandle(trim($containerHandle));
+
+        if (! $container || trim($path) === '') {
+            return response()->json(['ok' => false], 404);
+        }
+
+        if ($kind === 'folder') {
+            $folder = trim($path, '/');
+            $assets = $container->assets($folder !== '' ? $folder : '/', false);
+            $images = $assets->filter(fn ($a) => $a->isImage())->values();
+
+            return response()->json([
+                'ok' => true,
+                'kind' => 'folder',
+                'name' => $folder === '' ? (string) $container->title() : basename($folder),
+                'meta' => (string) $container->title(),
+                'count' => $assets->count(),
+                'thumbnails' => $images->take(9)
+                    ->map(fn ($a) => $a->thumbnailUrl('small'))
+                    ->filter()
+                    ->values()
+                    ->all(),
+            ]);
+        }
+
+        $asset = $container->asset(trim($path, '/'));
+
+        if (! $asset) {
+            return response()->json(['ok' => false], 404);
+        }
+
+        $folder = trim((string) $asset->folder(), '/');
+
+        return response()->json([
+            'ok' => true,
+            'kind' => 'asset',
+            'name' => $asset->basename(),
+            'meta' => (string) $container->title().($folder !== '' && $folder !== '.' ? ' · '.$folder : ''),
+            'is_image' => (bool) $asset->isImage(),
+            'thumbnail' => $asset->isImage() ? $asset->thumbnailUrl('small') : null,
+            'extension' => strtoupper((string) $asset->extension()),
+            'width' => $asset->isImage() ? $asset->width() : null,
+            'height' => $asset->isImage() ? $asset->height() : null,
+            'alt' => (string) ($asset->get('alt') ?? ''),
+        ]);
+    }
+
+    /**
+     * Bootstrap payload for Statamic's native asset browser (the same shape the
+     * assets fieldtype preloads), so the chat can open the CP asset selector to
+     * browse folders and insert "@asset:"/"@folder:" references.
+     */
+    public function assetBrowser(Request $request): JsonResponse
+    {
+        $containers = \Statamic\Facades\AssetContainer::all()->sortBy->title()->values();
+
+        if ($containers->isEmpty()) {
+            return response()->json(['ok' => false, 'error' => __('No asset containers configured.')], 404);
+        }
+
+        $requested = trim((string) $request->input('container', ''));
+        $container = $requested !== ''
+            ? $containers->first(fn ($c) => (string) $c->handle() === $requested)
+            : $containers->first();
+
+        if (! $container) {
+            return response()->json(['ok' => false, 'error' => __('Asset container not found.')], 404);
+        }
+
+        $user = \Statamic\Facades\User::current();
+
+        $columns = $container->blueprint()->columns()->map(fn ($column) => clone $column);
+        $columns->put('basename', \Statamic\CP\Column::make('basename')->label(__('File'))->visible(true)->defaultVisibility(true)->sortable(true)->required(true));
+        $columns->put('size', \Statamic\CP\Column::make('size')->label(__('Size'))->value('size_formatted')->visible(true)->defaultVisibility(true)->sortable(true));
+        $columns->put('last_modified', \Statamic\CP\Column::make('last_modified')->label(__('Last Modified'))->value('last_modified_relative')->visible(true)->defaultVisibility(true)->sortable(true));
+        $columns->setPreferred('assets.'.$container->handle().'.columns');
+
+        return response()->json([
+            'ok' => true,
+            'containers' => $containers->map(fn ($c) => ['handle' => (string) $c->handle(), 'title' => (string) $c->title()])->all(),
+            'container' => [
+                'id' => $container->id(),
+                'title' => $container->title(),
+                'edit_url' => $container->editUrl(),
+                'delete_url' => $container->deleteUrl(),
+                'blueprint_url' => cp_route('blueprints.asset-containers.edit', $container->handle()),
+                'can_view' => $user->can('view', $container),
+                'can_upload' => $user->can('store', [\Statamic\Contracts\Assets\Asset::class, $container]),
+                'can_edit' => $user->can('edit', $container),
+                'can_delete' => $user->can('delete', $container),
+                'can_create_folders' => $user->can('create', [\Statamic\Contracts\Assets\AssetFolder::class, $container]),
+                'sort_field' => $container->sortField(),
+                'sort_direction' => $container->sortDirection(),
+            ],
+            'columns' => $columns->rejectUnlisted()->values()->toArray(),
+        ]);
+    }
+
+    /**
      * Return the field schema for a given collection + blueprint.
      */
     public function blueprintFields(Request $request): JsonResponse
@@ -571,7 +684,7 @@ class EntryGeneratorController
 
             return $content;
         } catch (\Exception $e) {
-            Log::warning('PDF extraction failed', ['error' => $e->getMessage()]);
+            Log::warning('Attachment text extraction failed', ['extension' => $extension ?? null, 'error' => $e->getMessage()]);
 
             return null;
         }

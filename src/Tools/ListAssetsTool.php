@@ -25,9 +25,10 @@ class ListAssetsTool implements ChatTool
             'function' => [
                 'name' => 'list_assets',
                 'description' => 'Browse existing assets. Without arguments: lists asset containers and their top-level folders. '
-                    .'With container (and optional folder): lists that folder\'s files with metadata, plus subfolders. '
-                    .'Use it to resolve @folder:/@asset: references from the user. Asset references are "container::path". '
-                    .'The response includes the container\'s meta field handles (alt text etc.) for update_asset.',
+                    .'With container (and optional folder): lists that folder\'s files with their meta values (alt texts etc.), plus subfolders. '
+                    .'Use it to resolve @folder:/@asset: references from the user, and to READ current metadata — '
+                    .'questions like "does X have a French alt text?" are answered from the returned meta, never via update_asset. '
+                    .'Asset references are "container::path".',
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
@@ -86,16 +87,27 @@ class ListAssetsTool implements ChatTool
 
         $total = $assets->count();
 
-        $rows = $assets->take(self::MAX_ASSETS)->map(function ($asset) {
+        // Every blueprint meta field (alt, alt_text_fr, …) is readable per row —
+        // otherwise the model has no way to ANSWER "does X have a French alt
+        // text?" and resorts to probing with update_asset writes.
+        $metaFields = $container->blueprint()?->fields()->all()->keys()->values()->all() ?? [];
+
+        $rows = $assets->take(self::MAX_ASSETS)->map(function ($asset) use ($metaFields) {
             $row = [
                 'ref' => $asset->containerHandle().'::'.$asset->path(),
                 'filename' => $asset->basename(),
                 'is_image' => (bool) $asset->isImage(),
             ];
 
-            $alt = $asset->get('alt');
-            if (is_string($alt) && $alt !== '') {
-                $row['alt'] = $alt;
+            $meta = [];
+            foreach ($metaFields as $handle) {
+                $value = $asset->get($handle);
+                if (is_string($value) && trim($value) !== '') {
+                    $meta[$handle] = $value;
+                }
+            }
+            if ($meta !== []) {
+                $row['meta'] = $meta;
             }
 
             return $row;
@@ -113,7 +125,8 @@ class ListAssetsTool implements ChatTool
             'folder' => $folder,
             'assets' => $rows,
             'subfolders' => $subfolders,
-            'meta_fields' => $container->blueprint()?->fields()->all()->keys()->values()->all() ?? [],
+            'meta_fields' => $metaFields,
+            'meta_note' => 'Each asset row includes its non-empty meta values under "meta". A handle absent from "meta" is EMPTY for that asset — answer read-only questions from this, never by writing.',
         ];
 
         if ($total > self::MAX_ASSETS) {

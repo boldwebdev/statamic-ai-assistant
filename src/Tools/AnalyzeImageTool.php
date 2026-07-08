@@ -93,6 +93,6 @@ class AnalyzeImageTool implements ChatTool
 
     public function maxCalls(): ?int
     {
-        return max(1, (int) config('statamic-ai-assistant.entry_generator_tool_max_cms_reads', 12));
+        return max(1, (int) config('statamic-ai-assistant.entry_generator_tool_max_image_analyses', 40));
     }
 }

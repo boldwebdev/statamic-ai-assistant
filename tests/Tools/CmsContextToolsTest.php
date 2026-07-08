@@ -17,7 +17,7 @@ class CmsContextToolsTest extends TestCase
     {
         $set = GlobalSet::make('contact')->title('Contact');
         $set->save();
-        $set->in('default')->data(['phone' => '+41 33 000 00 00', 'email' => 'info@eden.ch'])->save();
+        $set->in('default')->data(['phone' => '+41 33 000 00 00', 'email' => 'info@example.com'])->save();
 
         $result = (new ReadGlobalsTool)->handle('{}', new ToolContext);
 
@@ -26,7 +26,7 @@ class CmsContextToolsTest extends TestCase
         $this->assertNotNull($contact);
         $this->assertSame('Contact', $contact['title']);
         $this->assertSame('+41 33 000 00 00', $contact['values']['phone']);
-        $this->assertSame('info@eden.ch', $contact['values']['email']);
+        $this->assertSame('info@example.com', $contact['values']['email']);
     }
 
     public function test_read_globals_unknown_handle_is_reported(): void

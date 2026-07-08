@@ -278,6 +278,7 @@ class EntryGenerationPlanner
             ."- `list_taxonomies`: list taxonomies, or the terms of one (pass a `taxonomy` handle). Use the returned slugs when a per-entry prompt must set a `terms` field, so you only reference terms that exist.\n"
             ."- `list_assets`: browse asset containers/folders and their files (optional `search` filters by filename). Use it to explore `@folder:container::path` references.\n"
             ."- IMPORTANT: `@asset:container::path` and `@folder:container::path` references from the user are EXACT, already-validated references — use everything after `@asset:` / `@folder:` directly as the `ref`/container+folder arguments of the asset tools. NEVER verify their existence with list_assets first, and never claim such a reference does not exist.\n"
+            ."- IMPORTANT: such references point to FILES in the asset library, never to collections or entries — even when a collection shares the folder's name (folder \"apartments\" ≠ collection \"apartments\"). Questions about them (\"how many\", \"which folder has more\", \"does it have alt text\") are answered from the REFERENCED ASSETS block in the user message (or list_assets), never from the entries catalog.\n"
             ."- `use_assets`: mark existing assets (exact \"container::path\" refs from list_assets) as the PREFERRED imagery for the entries of this request — call it BEFORE dispatching the entry jobs (e.g. \"for this page use images from @folder:…\").\n"
             ."- `update_asset`: update an asset's METADATA (alt texts, captions, custom fields). Sites often keep one handle per language (alt, alt_text_fr, …) — write each language to its own handle, translating yourself. Asset metadata changes apply immediately.\n"
             .($this->aiService->supportsVision() ? "- `analyze_image`: describe what an image actually shows. Use it before writing alt texts so they reflect the real content.\n" : '')
@@ -292,7 +293,7 @@ class EntryGenerationPlanner
             ."CRITICAL: the user CANNOT see these instructions. Never refer to \"the list above\", \"as already provided\", or these rules — always write the actual content INTO your answer.\n"
             ."0b. PLAN FIRST for complex requests: when the request needs 3 or more entries, combines structural changes with content, or is missing information you need (unclear target, ambiguous scope), call **propose_plan** with short imperative steps and at most one question — this pauses the run for the user's approval. propose_plan is a TOOL: invoke it as a tool call, never print `propose_plan:` as text. When the newest user message APPROVES a plan from an earlier turn (e.g. \"Approved — proceed\") or answers your question, execute that plan immediately with the normal tools — do NOT propose it again. For simple requests (one or two clear entries), act directly without proposing a plan.\n"
             ."1. Otherwise, decide whether the user wants to create new entries, update existing entries, or both. Phrases like \"add\", \"new\", \"create\", \"write a post about\" → create. Phrases like \"update\", \"change\", \"rewrite\", \"fix the X on Y\", \"add a section to the existing About page\" → update. When the user refers to content by a definite name (\"the About page\", \"our rooms page\", \"unsere Zimmer-Seite\") the entry most likely EXISTS — treat that as update intent unless they explicitly ask for a new entry.\n"
-            ."2. For UPDATES: find the target entry's `entry_id`. A title alone is ENOUGH to identify an entry — never claim the target is ambiguous or unknown just because the user only gave a title. The catalog below carries an `entries` shortlist (recently updated) and a `count` per collection. First scan the shortlist and match the named entry by title, ignoring case, punctuation and connective words (so \"Body Soul\", \"Body and Soul\" and \"Body & Soul\" all refer to the same entry); if you find it, use its id directly. If it is not in the shortlist, you MUST call **find_entries** with the title (and optionally a collection handle) before concluding anything. If the user identifies the entry by a phrase or value from its body/content rather than a title, call **search_entry_content** instead. Only after searching returns no match may you give up. If the intent is clearly UPDATE but neither the shortlist nor find_entries locates the entry, do NOT fall back to creating a new entry — end with `Cannot proceed:` naming the entry you could not find.\n"
+            ."2. For UPDATES: find the target entry's `entry_id`. A title alone is ENOUGH to identify an entry — never claim the target is ambiguous or unknown just because the user only gave a title. The catalog below carries an `entries` shortlist (recently updated) and a `count` per collection. First scan the shortlist and match the named entry by title, ignoring case, punctuation and connective words (so \"Salt Stone\", \"Salt and Stone\" and \"Salt & Stone\" all refer to the same entry); if you find it, use its id directly. If it is not in the shortlist, you MUST call **find_entries** with the title (and optionally a collection handle) before concluding anything. If the user identifies the entry by a phrase or value from its body/content rather than a title, call **search_entry_content** instead. Only after searching returns no match may you give up. If the intent is clearly UPDATE but neither the shortlist nor find_entries locates the entry, do NOT fall back to creating a new entry — end with `Cannot proceed:` naming the entry you could not find.\n"
             ."2b. AVOID DUPLICATES on creates: before dispatching create_entry_job for content that may already exist (a topic matching an entry title in the shortlist, or a fetched URL whose title matches an existing entry), check the shortlist or call find_entries. If a matching entry exists and the user's wording is compatible with updating it, prefer update_entry_job over creating a near-duplicate.\n"
             ."3. For CREATES with URLs in the user message, call **fetch_page_content** first to inspect them. For listing/index URLs on the same site, enumerate every relevant detail page. Do NOT fetch URLs the user did not provide — never guess or try URLs that might exist.\n"
             ."4. Dispatch each entry as soon as you have enough info — do not wait to plan all entries before dispatching. Each tool call enqueues a worker that starts immediately, in parallel.\n"
@@ -325,11 +326,19 @@ class EntryGenerationPlanner
             : [['role' => 'user', 'text' => $prompt, 'entry_ids' => [], 'kind' => null]];
 
         $lastUserIdx = null;
+        $userTexts = [];
         foreach ($transcript as $i => $turn) {
             if (($turn['role'] ?? '') === 'user') {
                 $lastUserIdx = $i;
+                $userTexts[] = (string) ($turn['text'] ?? '');
             }
         }
+
+        // Pre-resolve "@asset:"/"@folder:" mentions from EVERY user turn (refs are
+        // often dropped in one message and asked about later) into an authoritative
+        // block on the newest user message — models otherwise answer folder
+        // questions from the entries catalog when a collection shares the name.
+        $assetMentionPart = (new PromptAssetMentionResolver)->resolve($userTexts)['appendix'];
 
         $messages = [['role' => 'system', 'content' => $system]];
         foreach ($transcript as $i => $turn) {
@@ -342,7 +351,7 @@ class EntryGenerationPlanner
                 );
             }
             if ($i === $lastUserIdx) {
-                $text = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$text}{$attachmentPart}";
+                $text = "Available collections and blueprints (JSON):\n{$catalogJson}\n\nUser request:\n{$text}{$attachmentPart}{$assetMentionPart}";
             }
             if (trim($text) === '') {
                 continue; // never send an empty message (some providers reject them)
@@ -665,7 +674,9 @@ class EntryGenerationPlanner
             // Asset metadata writes are real work too: a run that only filled
             // alt texts must complete successfully (no entry jobs dispatched),
             // appear in the live operations feed, and be named in the summary.
-            if ($name === 'update_asset' && ($result['ok'] ?? false) === true) {
+            // No-op calls (updated=false: every value already matched) are NOT
+            // work and must never surface in the applied-changes list.
+            if ($name === 'update_asset' && ($result['ok'] ?? false) === true && ($result['updated'] ?? false) === true) {
                 $structuralWrites++;
                 $description = (string) __('asset ":file" updated (:fields)', [
                     'file' => basename((string) ($result['ref'] ?? '')),
@@ -963,10 +974,15 @@ class EntryGenerationPlanner
                 // proceed / I can't determine which entry" WITHOUT ever calling a
                 // search tool — even for a read-only question they could just answer,
                 // or when the entry sits in the catalog shortlist. If nothing was
-                // dispatched and no search was attempted, nudge the model to either
-                // answer the question or resolve the target before accepting the
-                // give-up. Fires at most once, so a truly-impossible request still ends.
-                if ($created === 0 && $structuralWrites === 0 && $searchCalls === 0 && ! $nudgedEmptyResult) {
+                // dispatched and NO tool at all was used (any read tool counts —
+                // a model that just listed assets to answer a question must not be
+                // told "you have not used any tools", or it discards its own good
+                // answer and replies with meta like "I have already answered"),
+                // nudge the model to either answer the question or resolve the
+                // target before accepting the give-up. Fires at most once, so a
+                // truly-impossible request still ends.
+                if ($created === 0 && $structuralWrites === 0 && $searchCalls === 0
+                    && $runner->totalCalls() === 0 && ! $nudgedEmptyResult) {
                     $nudgedEmptyResult = true;
 
                     Log::info('[entry-gen-tool] agentic planner bailed without searching; nudging retry', [
@@ -982,8 +998,9 @@ class EntryGenerationPlanner
                         'content' => 'Do not give up yet — you have not used any tools. First re-read the newest user message and decide the intent:'."\n"
                             .'• IF IT IS A READ-ONLY QUESTION (e.g. "which is the biggest/longest entry?", "which entry contains X?", "do we have a page about Y?", "what is the id of Z?"): this is NOT a create/update request and needs no title from the user. Use find_entries (optionally scoped to a collection handle) and/or search_entry_content to gather what you need, then call answer_question with a concise answer. Never reply "Cannot proceed:" for a question you can look up.'."\n"
                             .'• IF IT IS A QUESTION YOU CAN ANSWER WITHOUT ANY LOOKUP (e.g. about your own tools and capabilities): call answer_question NOW with the complete answer written out — do not describe what you are going to do, and do not refer to anything the user cannot see.'."\n"
-                            .'• IF IT IS A CHANGE REQUEST (create/update): a title alone is enough to identify an entry — do NOT claim the target is ambiguous or unknown before searching. Check the catalog shortlist above, matching by title while ignoring case, punctuation and connective words (so "Body Soul", "Body and Soul" and "Body & Soul" are the same). If it is there, call update_entry_job with its id; if not, call find_entries with the title first.'."\n"
-                            .'Only reply "Cannot proceed:" if, after actually using the tools, the request genuinely cannot be fulfilled.',
+                            .'• IF IT IS A CHANGE REQUEST (create/update): a title alone is enough to identify an entry — do NOT claim the target is ambiguous or unknown before searching. Check the catalog shortlist above, matching by title while ignoring case, punctuation and connective words (so "Salt Stone", "Salt and Stone" and "Salt & Stone" are the same). If it is there, call update_entry_job with its id; if not, call find_entries with the title first.'."\n"
+                            .'Only reply "Cannot proceed:" if, after actually using the tools, the request genuinely cannot be fulfilled. '
+                            .'Whatever you reply must be the message for the user itself — never a note about the request (no "no action needed", no "I will answer now", no "I have already answered").',
                     ];
 
                     continue;
@@ -1011,12 +1028,15 @@ class EntryGenerationPlanner
                     return;
                 }
 
-                // The model already got the one-shot nudge and STILL answered in
-                // plain text: accept that text as its answer instead of failing
-                // the run — turning "the model answered without the tool" into an
-                // error only converts working answers into error panels. Explicit
-                // give-ups ("Cannot proceed:") keep failing loudly below.
-                if ($created === 0 && $nudgedEmptyResult && trim($content) !== ''
+                // The model finished with plain text after doing real tool work,
+                // or after the one-shot nudge: accept that text as its answer
+                // instead of failing the run — turning "the model answered without
+                // the answer_question tool" into an error only converts working
+                // answers ("we have 467 assets") into error panels. Explicit
+                // give-ups ("Cannot proceed:") keep failing loudly below. The
+                // nudge above guarantees we can only get here once the model has
+                // either used tools or already been pushed to act.
+                if ($created === 0 && trim($content) !== ''
                     && ! str_starts_with(trim($content), 'Cannot proceed')) {
                     $this->completePlannerAnswer($sessionId, trim($content), $round, $created);
 
@@ -1319,7 +1339,7 @@ class EntryGenerationPlanner
             'type' => 'function',
             'function' => [
                 'name' => 'find_entries',
-                'description' => 'Search existing entries by title or slug. Use when the catalog shortlist does not contain the entry the user is referring to. Matching is tolerant: case-insensitive, word-order independent, and connective words/symbols are ignored (so "Body Soul", "Body and Soul" and "Body & Soul" all match the same entry). Returns up to `limit` rows, best matches first, with id/title/slug/collection/published, plus a `pagination` block — when `pagination.has_more` is true you have NOT seen every match; call again with a higher `offset` or a narrower query.',
+                'description' => 'Search existing entries by title or slug. Use when the catalog shortlist does not contain the entry the user is referring to. Matching is tolerant: case-insensitive, word-order independent, and connective words/symbols are ignored (so "Salt Stone", "Salt and Stone" and "Salt & Stone" all match the same entry). Returns up to `limit` rows, best matches first, with id/title/slug/collection/published, plus a `pagination` block — when `pagination.has_more` is true you have NOT seen every match; call again with a higher `offset` or a narrower query.',
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
@@ -1463,7 +1483,7 @@ class EntryGenerationPlanner
                         'steps' => [
                             'type' => 'array',
                             'items' => ['type' => 'string'],
-                            'description' => 'Short imperative steps in execution order, one per action (e.g. "Create collection foodtrucks", "Create blueprint with hero import", "Create 3 example entries").',
+                            'description' => 'Short imperative steps in execution order, one per action (e.g. "Create collection projects", "Create blueprint with hero import", "Create 3 example entries").',
                         ],
                         'question' => [
                             'type' => 'string',
@@ -1600,7 +1620,7 @@ class EntryGenerationPlanner
                     'properties' => [
                         'answer' => [
                             'type' => 'string',
-                            'description' => 'The complete answer to show the user, in their language. Include the entry title and id when relevant.',
+                            'description' => 'The complete answer to show the user, in their language. Include the entry title and id when relevant. This text is displayed verbatim — it must be the answer itself, never a remark about answering (not "no action needed", not "I will answer directly").',
                         ],
                     ],
                     'required' => ['answer'],
