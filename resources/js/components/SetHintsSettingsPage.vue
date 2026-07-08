@@ -62,7 +62,7 @@
         </p>
         <textarea
           v-model="siteInstructions"
-          class="sh-instructions__textarea"
+          class="sh-textarea"
           rows="8"
           maxlength="8000"
           :placeholder="__('e.g. Address readers informally. Never invent prices. Events always mention the location in the lead paragraph.')"
@@ -956,6 +956,10 @@ export default {
   padding-bottom: 3rem;
 }
 
+.sh-instructions {
+  margin-bottom: 1.25rem;
+}
+
 .sh-figma {
   margin-bottom: 1.25rem;
 }
@@ -978,17 +982,6 @@ export default {
   margin: 0 0 1rem;
 }
 
-.sh-instructions__textarea {
-  width: 100%;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid var(--c-border);
-  border-radius: 0.5rem;
-  background: var(--c-surface);
-  color: inherit;
-  font-size: 0.875rem;
-  line-height: 1.5;
-  resize: vertical;
-}
 .sh-figma__credentials-hint {
   font-size: 0.875rem;
   color: var(--tp-text-muted);
