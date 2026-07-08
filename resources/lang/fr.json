@@ -447,5 +447,14 @@
   "Term not found: :id": "Terme introuvable : :id",
   "Translation failed for term :title: :error": "Échec de la traduction du terme :title : :error",
   "This taxonomy does not support multiple languages.": "Cette taxonomie ne prend pas en charge plusieurs langues.",
-  "Taxonomy not found.": "Taxonomie introuvable."
+  "Taxonomy not found.": "Taxonomie introuvable.",
+  "active": "actif",
+  "Enable advanced structure tools?": "Activer les outils de structure avancés ?",
+  "This gives the AI agent direct access to create and modify collections, blueprints, fieldsets and taxonomies.": "Cela donne à l'agent IA un accès direct pour créer et modifier des collections, blueprints, fieldsets et taxonomies.",
+  "Structural changes apply immediately — there is no draft or review step.": "Les modifications structurelles s'appliquent immédiatement – il n'y a pas d'étape de brouillon ou de validation.",
+  "The AI can make mistakes. Always verify what was changed before committing the code changes.": "L'IA peut faire des erreurs. Vérifiez toujours ce qui a été modifié avant de committer les changements de code.",
+  "Not recommended on production sites — test structural changes locally first.": "Déconseillé sur les sites en production – testez d'abord les modifications structurelles en local.",
+  "Enable advanced tools": "Activer les outils avancés",
+  "Advanced structure tools enabled. Verify every structural change before committing.": "Outils de structure avancés activés. Vérifiez chaque modification structurelle avant de committer.",
+  "Could not save the advanced tools setting.": "Impossible d'enregistrer le réglage des outils avancés."
 }

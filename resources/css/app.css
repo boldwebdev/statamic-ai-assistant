@@ -3591,6 +3591,46 @@ html.dark .translation-progress__entry-error {
     opacity: 0.75;
 }
 
+/* ── Drawer top bar: advanced-tools opt-in ── */
+
+.eg-chat__topbar {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: flex-end;
+    padding: 0.35rem 0.75rem;
+    border-bottom: 1px solid var(--c-border);
+    background: var(--c-surface);
+}
+
+.eg-topbar-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    opacity: 0.75;
+}
+
+.eg-topbar-toggle--on {
+    opacity: 1;
+}
+
+.eg-topbar-toggle__input {
+    accent-color: var(--theme-color-warning, #d97706);
+}
+
+.eg-topbar-toggle__badge {
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--theme-color-warning, #d97706);
+    background: color-mix(in srgb, var(--theme-color-warning, #d97706) 12%, var(--c-surface));
+    border: 1px solid color-mix(in srgb, var(--theme-color-warning, #d97706) 30%, var(--c-border));
+}
+
 /* Completed non-entry operations (structural changes) during a live turn. */
 .eg-chat__ops {
     margin: 0.5rem 0 0;

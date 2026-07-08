@@ -70,6 +70,27 @@ class AgentAccess
         return false;
     }
 
+    /** Statamic user-preference key for the per-user advanced-tools opt-in. */
+    public const ADVANCED_TOOLS_PREFERENCE = 'statamic_ai_assistant_advanced_tools';
+
+    /**
+     * Whether the advanced structure tools are ACTIVE for a user: the user must
+     * hold the 'advanced_tools' access grant AND have opted in via the toggle
+     * in the agent UI (a per-user preference, default OFF). The explicit opt-in
+     * exists because structural changes apply immediately — on a production
+     * site even a fully-granted super admin should have to arm them first.
+     */
+    public static function advancedToolsActive(?UserContract $user = null): bool
+    {
+        $user ??= User::current();
+
+        if (! $user || ! self::allows('advanced_tools', $user)) {
+            return false;
+        }
+
+        return (bool) $user->getPreference(self::ADVANCED_TOOLS_PREFERENCE);
+    }
+
     /**
      * Whether the current user may VIEW/EDIT the access configuration.
      * Always super-only — granting access is a super-admin responsibility.

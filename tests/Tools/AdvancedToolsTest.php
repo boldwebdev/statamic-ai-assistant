@@ -378,6 +378,29 @@ class AdvancedToolsTest extends TestCase
         $this->assertStringContainsString('snake_case', $result['error']);
     }
 
+    public function test_advanced_tools_require_grant_and_explicit_user_opt_in(): void
+    {
+        $user = \Statamic\Facades\User::make()->email('adv-super@test.dev')->makeSuper();
+        $user->save();
+
+        try {
+            // Granted (super) but NOT opted in → inactive. The opt-in toggle is
+            // the safety catch for production sites.
+            $this->assertTrue(\BoldWeb\StatamicAiAssistant\Support\AgentAccess::allows('advanced_tools', $user));
+            $this->assertFalse(\BoldWeb\StatamicAiAssistant\Support\AgentAccess::advancedToolsActive($user));
+
+            // Opted in → active.
+            $user->setPreference(\BoldWeb\StatamicAiAssistant\Support\AgentAccess::ADVANCED_TOOLS_PREFERENCE, true)->save();
+            $this->assertTrue(\BoldWeb\StatamicAiAssistant\Support\AgentAccess::advancedToolsActive($user));
+
+            // Opted out again → inactive.
+            $user->setPreference(\BoldWeb\StatamicAiAssistant\Support\AgentAccess::ADVANCED_TOOLS_PREFERENCE, false)->save();
+            $this->assertFalse(\BoldWeb\StatamicAiAssistant\Support\AgentAccess::advancedToolsActive($user));
+        } finally {
+            $user->delete();
+        }
+    }
+
     public function test_toolset_gating_follows_session_flag_and_config(): void
     {
         $this->assertTrue(AdvancedToolset::enabledForSession(['advanced_tools' => true]));

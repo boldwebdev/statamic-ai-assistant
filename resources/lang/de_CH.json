@@ -455,5 +455,14 @@
   "Term not found: :id": "Begriff nicht gefunden: :id",
   "Translation failed for term :title: :error": "Übersetzung fehlgeschlagen für Begriff :title: :error",
   "This taxonomy does not support multiple languages.": "Diese Taxonomie unterstützt keine mehreren Sprachen.",
-  "Taxonomy not found.": "Taxonomie nicht gefunden."
+  "Taxonomy not found.": "Taxonomie nicht gefunden.",
+  "active": "aktiv",
+  "Enable advanced structure tools?": "Erweiterte Struktur-Werkzeuge aktivieren?",
+  "This gives the AI agent direct access to create and modify collections, blueprints, fieldsets and taxonomies.": "Damit erhält der KI-Agent direkten Zugriff, um Collections, Blueprints, Fieldsets und Taxonomien zu erstellen und zu ändern.",
+  "Structural changes apply immediately — there is no draft or review step.": "Strukturänderungen werden sofort angewendet – es gibt keinen Entwurfs- oder Prüfschritt.",
+  "The AI can make mistakes. Always verify what was changed before committing the code changes.": "Die KI kann Fehler machen. Überprüfen Sie immer, was geändert wurde, bevor Sie die Code-Änderungen committen.",
+  "Not recommended on production sites — test structural changes locally first.": "Auf Produktions-Websites nicht empfohlen – testen Sie Strukturänderungen zuerst lokal.",
+  "Enable advanced tools": "Erweiterte Werkzeuge aktivieren",
+  "Advanced structure tools enabled. Verify every structural change before committing.": "Erweiterte Struktur-Werkzeuge aktiviert. Überprüfen Sie jede Strukturänderung vor dem Commit.",
+  "Could not save the advanced tools setting.": "Die Einstellung für erweiterte Werkzeuge konnte nicht gespeichert werden."
 }

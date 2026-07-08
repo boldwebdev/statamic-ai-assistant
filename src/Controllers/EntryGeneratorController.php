@@ -222,12 +222,13 @@ class EntryGeneratorController
         $collectionHandle = $autoResolve ? null : (string) $request->input('collection');
         $blueprintHandle = $autoResolve ? null : (string) ($request->input('blueprint') ?? '');
 
-        // Resolve the per-request entry cap and the advanced-tools grant HERE,
+        // Resolve the per-request entry cap and the advanced-tools state HERE,
         // while the CP user is known — the planner runs in a queued job with no
         // authenticated user, so it reads these off the session instead of
-        // re-checking permissions.
+        // re-checking permissions. Advanced tools require the access grant AND
+        // the user's explicit opt-in toggle.
         $maxPlanEntries = EntryCreationPolicy::maxPlanEntries();
-        $advancedTools = AgentAccess::allows('advanced_tools');
+        $advancedTools = AgentAccess::advancedToolsActive();
 
         return response()->stream(function () use ($data, $attachmentContent, $autoResolve, $locale, $collectionHandle, $blueprintHandle, $maxPlanEntries, $advancedTools) {
             $emit = static function (array $payload): void {
@@ -415,10 +416,10 @@ class EntryGeneratorController
             return response()->json(['error' => $err], 422);
         }
 
-        // Re-resolve the per-request cap and advanced-tools grant here, where
+        // Re-resolve the per-request cap and advanced-tools state here, where
         // the CP user is known (the queued planner has no authenticated user).
         $maxPlanEntries = EntryCreationPolicy::maxPlanEntries();
-        $advancedTools = AgentAccess::allows('advanced_tools');
+        $advancedTools = AgentAccess::advancedToolsActive();
 
         if (! $this->entryBatch->reopenForFollowUp($sessionId, (string) $data['prompt'], $maxPlanEntries, $advancedTools)) {
             return response()->json(['error' => __('This chat has expired. Start a new request.')], 404);
@@ -427,6 +428,41 @@ class EntryGeneratorController
         PlanEntriesJob::dispatch($sessionId);
 
         return response()->json(['ok' => true, 'session_id' => $sessionId]);
+    }
+
+    /**
+     * Current advanced-tools state for the agent UI toggle: whether the user
+     * holds the access grant at all (toggle hidden otherwise) and whether they
+     * have opted in.
+     */
+    public function advancedToolsPreference(): JsonResponse
+    {
+        return response()->json([
+            'granted' => AgentAccess::allows('advanced_tools'),
+            'enabled' => AgentAccess::advancedToolsActive(),
+        ]);
+    }
+
+    /**
+     * Persist the per-user advanced-tools opt-in (survives sessions — it is a
+     * Statamic user preference). The grant itself is still required; the
+     * preference alone activates nothing.
+     */
+    public function saveAdvancedToolsPreference(\Illuminate\Http\Request $request): JsonResponse
+    {
+        $data = $request->validate(['enabled' => 'required|boolean']);
+
+        $user = \Statamic\Facades\User::current();
+        if (! $user || ! AgentAccess::allows('advanced_tools')) {
+            return response()->json(['error' => __('Not allowed.')], 403);
+        }
+
+        $user->setPreference(AgentAccess::ADVANCED_TOOLS_PREFERENCE, (bool) $data['enabled'])->save();
+
+        return response()->json([
+            'granted' => true,
+            'enabled' => AgentAccess::advancedToolsActive($user),
+        ]);
     }
 
     /**

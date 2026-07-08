@@ -24,6 +24,8 @@ Route::prefix('ai-generate')->name('statamic-ai-assistant.generate.')
     Route::get('/generate-progress/{sessionId}', [EntryGeneratorController::class, 'generateBatchProgress'])->name('generate-progress');
     Route::post('/generate-cancel/{sessionId}', [EntryGeneratorController::class, 'generateBatchCancel'])->name('generate-cancel');
     Route::post('/generate-continue/{sessionId}', [EntryGeneratorController::class, 'generateContinue'])->name('generate-continue');
+    Route::get('/advanced-tools', [EntryGeneratorController::class, 'advancedToolsPreference'])->name('advanced-tools');
+    Route::post('/advanced-tools', [EntryGeneratorController::class, 'saveAdvancedToolsPreference'])->name('advanced-tools.save');
     Route::post('/create-entry', [EntryGeneratorController::class, 'createEntry'])->name('create-entry');
     Route::post('/regenerate-field', [EntryGeneratorController::class, 'regenerateField'])->name('regenerate-field');
 });

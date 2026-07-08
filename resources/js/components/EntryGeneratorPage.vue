@@ -1,6 +1,56 @@
 <template>
   <!-- ═══ Agentic chat (drawer) — Claude-style flat layout ═══ -->
   <div v-if="drawer" ref="chatRoot" class="eg-chat">
+    <!-- Top bar: advanced-tools opt-in (only for users holding the grant) -->
+    <div v-if="advancedTools.granted" class="eg-chat__topbar">
+      <label class="eg-topbar-toggle" :class="{ 'eg-topbar-toggle--on': advancedTools.enabled }">
+        <input
+          type="checkbox"
+          class="eg-topbar-toggle__input"
+          :checked="advancedTools.enabled"
+          :disabled="advancedTools.saving"
+          @change="onAdvancedToolsToggle($event)"
+        />
+        <span class="eg-topbar-toggle__label">{{ __('Advanced structure tools') }}</span>
+        <span v-if="advancedTools.enabled" class="eg-topbar-toggle__badge">{{ __('active') }}</span>
+      </label>
+    </div>
+
+    <!-- Enable confirmation: informed consent before arming structural tools -->
+    <div
+      v-if="advancedToolsModalOpen"
+      class="translation-page__modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      @click.self="cancelAdvancedTools"
+    >
+      <div class="translation-page__modal">
+        <h3 class="translation-page__modal-title">{{ __('Enable advanced structure tools?') }}</h3>
+        <p class="translation-page__modal-text">
+          {{ __('This gives the AI agent direct access to create and modify collections, blueprints, fieldsets and taxonomies.') }}
+        </p>
+        <ul class="translation-page__modal-list">
+          <li>{{ __('Structural changes apply immediately — there is no draft or review step.') }}</li>
+          <li>{{ __('The AI can make mistakes. Always verify what was changed before committing the code changes.') }}</li>
+          <li>{{ __('Not recommended on production sites — test structural changes locally first.') }}</li>
+        </ul>
+        <div class="translation-page__modal-actions">
+          <Button
+            variant="default"
+            :disabled="advancedTools.saving"
+            :text="__('Cancel')"
+            @click="cancelAdvancedTools"
+          />
+          <Button
+            variant="primary"
+            :disabled="advancedTools.saving"
+            :text="__('Enable advanced tools')"
+            @click="confirmAdvancedTools"
+          />
+        </div>
+      </div>
+    </div>
+
     <div
       ref="chatStream"
       class="eg-chat__stream"
@@ -509,6 +559,11 @@ export default {
     return {
       // Local UI-only state. Generation/composer state lives in the store.
       step: 1,
+      // Advanced structure tools: per-user opt-in (Statamic preference). The
+      // toggle only renders when the user holds the access grant; enabling
+      // requires confirming the warning modal.
+      advancedTools: { granted: false, enabled: false, saving: false },
+      advancedToolsModalOpen: false,
       collections: [],
       selectedCollection: '',
       selectedBlueprint: '',
@@ -782,6 +837,57 @@ export default {
       if (this.drawer) {
         // Drawer always lands on the composer or the cards (driven by renderedStep).
         this.step = 2;
+        this.loadAdvancedToolsPreference();
+      }
+    },
+
+    async loadAdvancedToolsPreference() {
+      try {
+        const { data } = await axios.get('/cp/ai-generate/advanced-tools');
+        this.advancedTools.granted = !!data.granted;
+        this.advancedTools.enabled = !!data.enabled;
+      } catch (error) {
+        // Toggle simply stays hidden when the state can't be loaded.
+      }
+    },
+
+    onAdvancedToolsToggle(event) {
+      const wantsEnabled = !!event.target.checked;
+      // Keep the checkbox reflecting persisted state until confirmed/saved.
+      event.target.checked = this.advancedTools.enabled;
+
+      if (wantsEnabled && !this.advancedTools.enabled) {
+        this.advancedToolsModalOpen = true;
+        return;
+      }
+
+      if (!wantsEnabled && this.advancedTools.enabled) {
+        this.saveAdvancedToolsPreference(false);
+      }
+    },
+
+    cancelAdvancedTools() {
+      if (this.advancedTools.saving) return;
+      this.advancedToolsModalOpen = false;
+    },
+
+    confirmAdvancedTools() {
+      this.saveAdvancedToolsPreference(true);
+    },
+
+    async saveAdvancedToolsPreference(enabled) {
+      this.advancedTools.saving = true;
+      try {
+        const { data } = await axios.post('/cp/ai-generate/advanced-tools', { enabled });
+        this.advancedTools.enabled = !!data.enabled;
+        this.advancedToolsModalOpen = false;
+        if (enabled && data.enabled) {
+          Statamic.$toast?.success?.(this.__('Advanced structure tools enabled. Verify every structural change before committing.'));
+        }
+      } catch (error) {
+        Statamic.$toast?.error?.(this.__('Could not save the advanced tools setting.'));
+      } finally {
+        this.advancedTools.saving = false;
       }
     },
 
