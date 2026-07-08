@@ -68,6 +68,18 @@
             <p><strong>{{ __('Something went wrong') }}</strong></p>
             <p v-html="chatHtml(turn.text)"></p>
           </div>
+          <div v-else-if="turn.kind === 'plan'" class="eg-chat__plan">
+            <p v-html="chatHtml(turn.text)"></p>
+            <div
+              v-if="turn.key === latestTurnKey && !store.generating && !store.planning"
+              class="eg-chat__plan-actions"
+            >
+              <Button variant="primary" :text="__('Approve plan')" @click="approvePlan" />
+            </div>
+            <p v-if="turn.key === latestTurnKey" class="eg-chat__plan-hint">
+              {{ __('Approve to proceed, or reply below to adjust the plan or answer the question.') }}
+            </p>
+          </div>
           <p v-else v-html="chatHtml(turn.text)"></p>
 
           <div v-if="turn.cards.length" class="eg-chat__cards">
@@ -95,6 +107,16 @@
           </div>
           <p class="eg-chat__stream-panel__title">{{ __('Working out a plan…') }}</p>
           <p class="eg-chat__stream-panel__hint">{{ __('Figuring out how many entries to create and where each one fits.') }}</p>
+
+          <!-- Non-entry operations already completed this turn (structural
+               changes etc.) — a stable checklist, unlike the scrolling feed. -->
+          <ul v-if="store.operations && store.operations.length" class="eg-chat__ops" :aria-label="__('Changes applied')">
+            <li v-for="op in store.operations" :key="op.id" class="eg-chat__ops-line">
+              <span class="eg-chat__ops-check" aria-hidden="true">✓</span>
+              <span>{{ op.label }}</span>
+            </li>
+          </ul>
+
           <div
             v-if="planningActivityLog.length"
             ref="activityScrollPlanning"
@@ -597,6 +619,12 @@ export default {
       }));
     },
 
+    /** Key of the newest transcript turn — a plan's approve action is only offered while it is the latest word. */
+    latestTurnKey() {
+      const turns = this.chatTurns;
+      return turns.length ? turns[turns.length - 1].key : null;
+    },
+
     /**
      * Cards for the in-flight turn — not yet claimed by any transcript turn
      * (the assistant summary turn is appended only once the turn completes).
@@ -1003,6 +1031,12 @@ export default {
       this.mention.results = [];
       this.mention.query = '';
       this.mention.activeIndex = 0;
+    },
+
+    approvePlan() {
+      if (this.store.generating || this.store.planning || !this.store.chatSessionId) return;
+      continueGeneration(this.__('Approved — proceed with the proposed plan.'));
+      this.chatStickToBottom = true;
     },
 
     handleComposerSend() {

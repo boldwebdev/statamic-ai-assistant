@@ -152,6 +152,7 @@ export default {
         { key: 'agent', label: this.__('BOLD agent'), description: this.__('Generate and chat with the agent to create or update entries.') },
         { key: 'bulk_translations', label: this.__('Bulk translations'), description: this.__('Translate many entries at once from the Bulk translations tool.') },
         { key: 'agent_settings', label: this.__('BOLD agent settings'), description: this.__('Edit the block and field hints on the BOLD agent settings page.') },
+        { key: 'advanced_tools', label: this.__('Advanced structure tools'), description: this.__('Let the agent create and modify collections, blueprints and taxonomies. Structural changes are applied immediately — grant with care.') },
       ];
     },
 
@@ -178,6 +179,7 @@ export default {
         agent: { roles: [], users: [], limits: { default: 1, roles: {}, users: {} } },
         bulk_translations: { roles: [], users: [] },
         agent_settings: { roles: [], users: [] },
+        advanced_tools: { roles: [], users: [] },
       };
     },
 
@@ -198,6 +200,7 @@ export default {
         },
         bulk_translations: feat('bulk_translations'),
         agent_settings: feat('agent_settings'),
+        advanced_tools: feat('advanced_tools'),
       };
     },
 

@@ -3565,6 +3565,55 @@ html.dark .translation-progress__entry-error {
     text-underline-offset: 2px;
 }
 
+/* Proposed plan turn: framed like a notice, with the approve action beneath. */
+.eg-chat__plan {
+    margin-top: 0.55rem;
+    padding: 0.55rem 0.7rem;
+    border-radius: 0.5rem;
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    background: color-mix(in srgb, var(--theme-color-ui-accent, #2563eb) 6%, var(--c-surface));
+    border: 1px solid color-mix(in srgb, var(--theme-color-ui-accent, #2563eb) 22%, var(--c-border));
+}
+
+.eg-chat__plan p {
+    margin: 0 0 0.5rem;
+    white-space: pre-line;
+}
+
+.eg-chat__plan-actions {
+    margin-top: 0.35rem;
+}
+
+.eg-chat__plan-hint {
+    margin-top: 0.45rem;
+    font-size: 0.75rem;
+    opacity: 0.75;
+}
+
+/* Completed non-entry operations (structural changes) during a live turn. */
+.eg-chat__ops {
+    margin: 0.5rem 0 0;
+    padding: 0.4rem 0.6rem;
+    list-style: none;
+    border-radius: 0.5rem;
+    background: color-mix(in srgb, var(--theme-color-success, #16a34a) 6%, var(--c-surface));
+    border: 1px solid color-mix(in srgb, var(--theme-color-success, #16a34a) 20%, var(--c-border));
+    font-size: 0.78rem;
+    line-height: 1.5;
+}
+
+.eg-chat__ops-line {
+    display: flex;
+    gap: 0.4rem;
+    align-items: baseline;
+}
+
+.eg-chat__ops-check {
+    color: var(--theme-color-success, #16a34a);
+    font-weight: 700;
+}
+
 /* ── Bottom bar ── */
 
 .eg-chat__bar {

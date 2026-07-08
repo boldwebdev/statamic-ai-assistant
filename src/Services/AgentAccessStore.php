@@ -24,7 +24,7 @@ use Statamic\Facades\YAML;
 class AgentAccessStore
 {
     /** Gated capabilities. `agent` additionally carries entry-generation limits. */
-    public const FEATURES = ['agent', 'bulk_translations', 'agent_settings'];
+    public const FEATURES = ['agent', 'bulk_translations', 'agent_settings', 'advanced_tools'];
 
     /** @var array<string, mixed>|null */
     private ?array $cache = null;

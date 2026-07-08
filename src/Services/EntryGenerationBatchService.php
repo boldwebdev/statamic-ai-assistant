@@ -53,6 +53,7 @@ class EntryGenerationBatchService
         ?string $collectionHandle = null,
         ?string $blueprintHandle = null,
         ?int $maxPlanEntries = null,
+        bool $advancedTools = false,
     ): string {
         $id = (string) Str::uuid();
         $preferred = $urlAugmentation['preferred'] ?? new PreferredAssetPaths;
@@ -84,6 +85,10 @@ class EntryGenerationBatchService
             // at request time (see EntryCreationPolicy). Null → planner falls
             // back to the configured cap. Non-super users get 1 when limited.
             'max_plan_entries' => $maxPlanEntries !== null ? max(1, $maxPlanEntries) : null,
+            // Whether the requesting CP user holds the 'advanced_tools' access
+            // feature, resolved at request time like max_plan_entries — the
+            // queued planner has no authenticated user to check against.
+            'advanced_tools' => $advancedTools,
             'locale' => $locale,
             'attachment_content' => $attachmentContent,
             'plan_warnings' => [],
@@ -95,6 +100,8 @@ class EntryGenerationBatchService
             ],
             'entry_order' => [],
             'entries' => [],
+            // Non-entry operations (structural changes etc.) completed this turn.
+            'operations' => [],
             'counts' => [
                 'pending' => 0,
                 'running' => 0,
@@ -216,19 +223,21 @@ class EntryGenerationBatchService
      * and all prior entries. Recovers a 'completed' or 'cancelled' session.
      * Returns false if the session no longer exists (expired/unknown).
      */
-    public function reopenForFollowUp(string $sessionId, string $prompt, ?int $maxPlanEntries): bool
+    public function reopenForFollowUp(string $sessionId, string $prompt, ?int $maxPlanEntries, bool $advancedTools = false): bool
     {
         $found = false;
 
-        $this->update($sessionId, function (array $session) use ($prompt, $maxPlanEntries, &$found): array {
+        $this->update($sessionId, function (array $session) use ($prompt, $maxPlanEntries, $advancedTools, &$found): array {
             $found = true;
 
             $session['status'] = 'running';
             $session['planning_status'] = 'planning';
             $session['planner_error'] = null;
             $session['planner_answer'] = null;
+            $session['operations'] = [];
             $session['prompt'] = $prompt;
             $session['max_plan_entries'] = $maxPlanEntries !== null ? max(1, $maxPlanEntries) : null;
+            $session['advanced_tools'] = $advancedTools;
 
             $transcript = is_array($session['transcript'] ?? null) ? $session['transcript'] : [];
             $transcript[] = ['role' => 'user', 'text' => $prompt, 'entry_ids' => [], 'kind' => null];
@@ -315,6 +324,31 @@ class EntryGenerationBatchService
             $buffer[] = $line;
             // Bound the buffer in case the frontend is not polling (e.g. drawer closed).
             $session['planner_activity_buffer'] = array_slice($buffer, -100);
+
+            return $session;
+        });
+    }
+
+    /**
+     * Record one completed non-entry operation (structural changes like
+     * collections/blueprints/taxonomies today; any tool can report one). Unlike
+     * the drained activity feed, operations persist for the whole turn so the
+     * CP can render a stable "what has been done" checklist while the run
+     * continues. Reset on every new turn.
+     */
+    public function appendOperation(string $sessionId, string $kind, string $label): void
+    {
+        if (trim($label) === '') {
+            return;
+        }
+        $this->update($sessionId, function (array $session) use ($kind, $label): array {
+            $ops = is_array($session['operations'] ?? null) ? $session['operations'] : [];
+            $ops[] = [
+                'id' => 'op-'.(count($ops) + 1).'-'.substr(md5($kind.$label.count($ops)), 0, 8),
+                'kind' => $kind,
+                'label' => $label,
+            ];
+            $session['operations'] = array_slice($ops, -50);
 
             return $session;
         });
@@ -556,6 +590,7 @@ class EntryGenerationBatchService
                 'entries' => $entriesOut,
                 'warnings' => $session['plan_warnings'] ?? [],
                 'planner_activity' => array_values($activity),
+                'operations' => array_values(is_array($session['operations'] ?? null) ? $session['operations'] : []),
             ];
 
             return $session;

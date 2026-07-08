@@ -37,6 +37,7 @@ export const state = reactive({
   entries: [],              // list of card states
   generationError: null,    // fatal pre-plan error (current turn only)
   plannerAnswer: null,      // read-only answer to a question (current turn only)
+  operations: [],           // completed non-entry operations this turn: [{id,kind,label}]
   transcript: [],           // full chat history from the server: [{role,text,entry_ids,kind}]
   chatSessionId: null,      // durable session id across turns (NOT cleared at poll-terminal)
   bulkSaving: false,
@@ -290,6 +291,12 @@ function applyBatchProgressSnapshot(data) {
   // is drained server-side on each poll, so every line here is new — just append.
   for (const line of (data.planner_activity || [])) {
     pushActivityLine(line, null);
+  }
+
+  // Completed non-entry operations (structural changes, …) — persistent per
+  // turn, server is the source of truth. Rendered as a checklist in the panel.
+  if (Array.isArray(data.operations)) {
+    state.operations = data.operations;
   }
 
   const rows = data.entries || [];
@@ -649,6 +656,7 @@ export async function continueGeneration(prompt) {
   // Clear only the CURRENT-turn scratch — history + prior cards stay.
   state.generationError = null;
   state.plannerAnswer = null;
+  state.operations = [];
   state.generating = true;
   state.planning = true;
   state.generationPlanningStatus = 'planning';
@@ -940,6 +948,7 @@ function resetGenerationOnly() {
   state.entries = [];
   state.generationError = null;
   state.plannerAnswer = null;
+  state.operations = [];
   state.transcript = [];
   state.chatSessionId = null;
   state.planning = false;

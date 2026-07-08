@@ -378,6 +378,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | BOLD agent — advanced structure tools
+    |--------------------------------------------------------------------------
+    |
+    | Structural tools (create/configure collections, blueprints, taxonomies)
+    | for the agent. Per-user access is managed in the CP under BOLD agent
+    | access ('advanced_tools' feature, default-deny, supers always pass);
+    | this switch lets a site disable the whole pack regardless of grants.
+    | Structural writes apply immediately (no draft/review step), so each
+    | WRITE tool also gets a small per-request call budget.
+    |
+    */
+    'advanced_tools' => (bool) env('STATAMIC_AI_ASSISTANT_ADVANCED_TOOLS', true),
+    'entry_generator_tool_max_structural_writes' => max(1, min(20, (int) env('STATAMIC_AI_ASSISTANT_ENTRY_GENERATOR_TOOL_MAX_STRUCTURAL_WRITES', 6))),
+
+    /*
+    |--------------------------------------------------------------------------
     | BOLD agent — multi-entry plan cap
     |--------------------------------------------------------------------------
     |

@@ -7,6 +7,7 @@ use BoldWeb\StatamicAiAssistant\Services\AbstractAiService;
 use BoldWeb\StatamicAiAssistant\Services\EntryGenerationBatchService;
 use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorService;
 use BoldWeb\StatamicAiAssistant\Services\PreferredAssetPaths;
+use BoldWeb\StatamicAiAssistant\Support\AgentAccess;
 use BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -221,12 +222,14 @@ class EntryGeneratorController
         $collectionHandle = $autoResolve ? null : (string) $request->input('collection');
         $blueprintHandle = $autoResolve ? null : (string) ($request->input('blueprint') ?? '');
 
-        // Resolve the per-request entry cap HERE, while the CP user is known —
-        // the planner runs in a queued job with no authenticated user, so it
-        // reads this value off the session instead of re-checking permissions.
+        // Resolve the per-request entry cap and the advanced-tools grant HERE,
+        // while the CP user is known — the planner runs in a queued job with no
+        // authenticated user, so it reads these off the session instead of
+        // re-checking permissions.
         $maxPlanEntries = EntryCreationPolicy::maxPlanEntries();
+        $advancedTools = AgentAccess::allows('advanced_tools');
 
-        return response()->stream(function () use ($data, $attachmentContent, $autoResolve, $locale, $collectionHandle, $blueprintHandle, $maxPlanEntries) {
+        return response()->stream(function () use ($data, $attachmentContent, $autoResolve, $locale, $collectionHandle, $blueprintHandle, $maxPlanEntries, $advancedTools) {
             $emit = static function (array $payload): void {
                 echo json_encode($payload, JSON_UNESCAPED_UNICODE)."\n";
                 if (ob_get_level() > 0) {
@@ -258,6 +261,7 @@ class EntryGeneratorController
                     $collectionHandle,
                     $blueprintHandle,
                     $maxPlanEntries,
+                    $advancedTools,
                 );
 
                 PlanEntriesJob::dispatch($sessionId);
@@ -411,11 +415,12 @@ class EntryGeneratorController
             return response()->json(['error' => $err], 422);
         }
 
-        // Re-resolve the per-request cap here, where the CP user is known (the
-        // queued planner has no authenticated user).
+        // Re-resolve the per-request cap and advanced-tools grant here, where
+        // the CP user is known (the queued planner has no authenticated user).
         $maxPlanEntries = EntryCreationPolicy::maxPlanEntries();
+        $advancedTools = AgentAccess::allows('advanced_tools');
 
-        if (! $this->entryBatch->reopenForFollowUp($sessionId, (string) $data['prompt'], $maxPlanEntries)) {
+        if (! $this->entryBatch->reopenForFollowUp($sessionId, (string) $data['prompt'], $maxPlanEntries, $advancedTools)) {
             return response()->json(['error' => __('This chat has expired. Start a new request.')], 404);
         }
 

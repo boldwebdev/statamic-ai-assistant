@@ -128,4 +128,36 @@ class FindEntriesShortlistTest extends TestCase
 
         $this->assertCount(2, $this->titles('packages', '   '));
     }
+
+    public function test_find_entries_reports_pagination_and_pages_through_matches(): void
+    {
+        $this->makeEntry('Spa Day One', 'spa-day-one');
+        $this->makeEntry('Spa Day Two', 'spa-day-two');
+        $this->makeEntry('Spa Day Three', 'spa-day-three');
+
+        $page1 = $this->service()->findEntries('packages', 'Spa Day', 2, 0);
+
+        $this->assertCount(2, $page1['results']);
+        $this->assertSame(3, $page1['pagination']['total']);
+        $this->assertTrue($page1['pagination']['has_more']);
+
+        $page2 = $this->service()->findEntries('packages', 'Spa Day', 2, 2);
+
+        $this->assertCount(1, $page2['results']);
+        $this->assertFalse($page2['pagination']['has_more']);
+
+        // Paging never returns the same entry twice.
+        $ids = array_column(array_merge($page1['results'], $page2['results']), 'id');
+        $this->assertCount(3, array_unique($ids));
+    }
+
+    public function test_result_rows_carry_the_published_state(): void
+    {
+        $this->makeEntry('Body & Soul', 'body-soul');
+
+        $rows = $this->service()->findEntriesShortlist('packages', 'Body Soul', 5);
+
+        $this->assertArrayHasKey('published', $rows[0]);
+        $this->assertIsBool($rows[0]['published']);
+    }
 }

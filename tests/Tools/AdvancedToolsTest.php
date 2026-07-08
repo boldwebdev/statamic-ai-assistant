@@ -1,0 +1,241 @@
+<?php
+
+namespace BoldWeb\StatamicAiAssistant\Tests\Tools;
+
+use BoldWeb\StatamicAiAssistant\Tests\TestCase;
+use BoldWeb\StatamicAiAssistant\Tools\Advanced\AdvancedToolset;
+use BoldWeb\StatamicAiAssistant\Tools\Advanced\ConfigureCollectionTool;
+use BoldWeb\StatamicAiAssistant\Tools\Advanced\CreateBlueprintTool;
+use BoldWeb\StatamicAiAssistant\Tools\Advanced\CreateCollectionTool;
+use BoldWeb\StatamicAiAssistant\Tools\Advanced\CreateTaxonomyTool;
+use BoldWeb\StatamicAiAssistant\Tools\Advanced\ReadBlueprintTool;
+use BoldWeb\StatamicAiAssistant\Tools\Advanced\UpdateBlueprintTool;
+use BoldWeb\StatamicAiAssistant\Tools\ToolContext;
+use Statamic\Facades\Blueprint;
+use Statamic\Facades\Collection;
+use Statamic\Facades\Taxonomy;
+
+class AdvancedToolsTest extends TestCase
+{
+    /** Handles created during a test; removed again in tearDown so no fixture files linger. */
+    private const COLLECTION = 'adv_events';
+
+    private const TAXONOMY = 'adv_topics';
+
+    protected function tearDown(): void
+    {
+        foreach (Blueprint::in('collections.'.self::COLLECTION)->all() as $bp) {
+            $bp->delete();
+        }
+        Collection::find(self::COLLECTION)?->delete();
+        Taxonomy::find(self::TAXONOMY)?->delete();
+        \Statamic\Facades\Fieldset::find('adv_hero')?->delete();
+
+        parent::tearDown();
+    }
+
+    private function invokeTool(object $tool, array $args): array
+    {
+        return $tool->handle(json_encode($args), new ToolContext);
+    }
+
+    /**
+     * All field rows of a blueprint `structure`, whether stored flat or
+     * normalized into tabs → sections by Statamic.
+     */
+    private function structureFieldRows(array $structure): array
+    {
+        if (isset($structure['fields']) && is_array($structure['fields'])) {
+            return $structure['fields'];
+        }
+
+        return collect($structure['tabs'] ?? [])
+            ->flatMap(fn ($tab) => collect($tab['sections'] ?? [])->flatMap(fn ($s) => $s['fields'] ?? []))
+            ->values()
+            ->all();
+    }
+
+    public function test_full_structural_workflow(): void
+    {
+        // 1. Taxonomy.
+        $result = $this->invokeTool(new CreateTaxonomyTool, ['handle' => self::TAXONOMY, 'title' => 'Adv Topics']);
+        $this->assertTrue($result['ok'], $result['error'] ?? '');
+        $this->assertNotNull(Taxonomy::find(self::TAXONOMY));
+
+        // 2. Collection referencing the taxonomy.
+        $result = $this->invokeTool(new CreateCollectionTool, [
+            'handle' => self::COLLECTION,
+            'title' => 'Adv Events',
+            'dated' => true,
+            'taxonomies' => [self::TAXONOMY],
+        ]);
+        $this->assertTrue($result['ok'], $result['error'] ?? '');
+        $this->assertStringContainsString('create_blueprint', $result['next_step']);
+
+        $collection = Collection::find(self::COLLECTION);
+        $this->assertNotNull($collection);
+        $this->assertTrue($collection->dated());
+        $this->assertSame([self::TAXONOMY], $collection->taxonomies()->map->handle()->values()->all());
+
+        // 3. Blueprint for it.
+        $result = $this->invokeTool(new CreateBlueprintTool, [
+            'handle' => 'event',
+            'collection' => self::COLLECTION,
+            'fields' => [
+                ['handle' => 'title', 'field' => ['type' => 'text', 'display' => 'Title']],
+                ['handle' => 'date', 'field' => ['type' => 'date']],
+            ],
+        ]);
+        $this->assertTrue($result['ok'], $result['error'] ?? '');
+        $this->assertSame(['title', 'date'], $result['fields']);
+
+        // 4. Read it back.
+        $result = $this->invokeTool(new ReadBlueprintTool, ['handle' => 'event', 'collection' => self::COLLECTION]);
+        $this->assertTrue($result['ok'], $result['error'] ?? '');
+        $this->assertSame(['title', 'date'], array_column($result['fields'], 'handle'));
+
+        // 5. Merge-update: change one field, add one — existing fields survive.
+        $result = $this->invokeTool(new UpdateBlueprintTool, [
+            'handle' => 'event',
+            'collection' => self::COLLECTION,
+            'fields' => [
+                ['handle' => 'title', 'field' => ['type' => 'text', 'display' => 'Event name']],
+                ['handle' => 'location', 'field' => ['type' => 'text']],
+            ],
+        ]);
+        $this->assertTrue($result['ok'], $result['error'] ?? '');
+        $this->assertEqualsCanonicalizing(['title', 'date', 'location'], $result['fields']);
+
+        $read = $this->invokeTool(new ReadBlueprintTool, ['handle' => 'event', 'collection' => self::COLLECTION]);
+        $byHandle = array_column($read['fields'], null, 'handle');
+        $this->assertSame('Event name', $byHandle['title']['display']);
+        $this->assertArrayHasKey('date', $byHandle);
+
+        // 6. Configure: valid keys applied, unknown keys reported as ignored.
+        $result = $this->invokeTool(new ConfigureCollectionTool, [
+            'handle' => self::COLLECTION,
+            'settings' => ['title' => 'Adv Events 2', 'nonsense_key' => 'x'],
+        ]);
+        $this->assertTrue($result['ok'], $result['error'] ?? '');
+        $this->assertSame(['title'], $result['applied']);
+        $this->assertSame(['nonsense_key'], $result['ignored']);
+        $this->assertSame('Adv Events 2', Collection::find(self::COLLECTION)->title());
+    }
+
+    public function test_create_collection_refuses_existing_handle_and_unknown_taxonomy(): void
+    {
+        $this->invokeTool(new CreateCollectionTool, ['handle' => self::COLLECTION, 'title' => 'Adv Events']);
+
+        $dupe = $this->invokeTool(new CreateCollectionTool, ['handle' => self::COLLECTION, 'title' => 'Again']);
+        $this->assertFalse($dupe['ok']);
+        $this->assertStringContainsString('already exists', $dupe['error']);
+
+        $badTax = $this->invokeTool(new CreateCollectionTool, ['handle' => 'adv_other', 'title' => 'X', 'taxonomies' => ['ghost_tax']]);
+        $this->assertFalse($badTax['ok']);
+        $this->assertStringContainsString('ghost_tax', $badTax['error']);
+        $this->assertNull(Collection::find('adv_other'));
+    }
+
+    public function test_create_blueprint_requires_existing_collection_and_valid_fields(): void
+    {
+        $missing = $this->invokeTool(new CreateBlueprintTool, [
+            'handle' => 'event',
+            'collection' => 'ghost_collection',
+            'fields' => [['handle' => 'title', 'field' => ['type' => 'text']]],
+        ]);
+        $this->assertFalse($missing['ok']);
+        $this->assertStringContainsString('create_collection', $missing['error']);
+
+        $this->invokeTool(new CreateCollectionTool, ['handle' => self::COLLECTION, 'title' => 'Adv Events']);
+
+        $badFields = $this->invokeTool(new CreateBlueprintTool, [
+            'handle' => 'event',
+            'collection' => self::COLLECTION,
+            'fields' => [['handle' => 'title', 'type' => 'text']],
+        ]);
+        $this->assertFalse($badFields['ok']);
+        $this->assertStringContainsString('"type" at the top level', $badFields['error']);
+    }
+
+    public function test_blueprint_can_import_a_fieldset_and_updates_do_not_duplicate_the_import(): void
+    {
+        \Statamic\Facades\Fieldset::make('adv_hero')->setContents([
+            'title' => 'Adv Hero',
+            'fields' => [
+                ['handle' => 'hero_title', 'field' => ['type' => 'text']],
+                ['handle' => 'hero_image', 'field' => ['type' => 'assets', 'max_files' => 1]],
+            ],
+        ])->save();
+
+        $this->invokeTool(new CreateCollectionTool, ['handle' => self::COLLECTION, 'title' => 'Adv Events']);
+
+        $created = $this->invokeTool(new CreateBlueprintTool, [
+            'handle' => 'event',
+            'collection' => self::COLLECTION,
+            'fields' => [
+                ['import' => 'adv_hero'],
+                ['handle' => 'title', 'field' => ['type' => 'text']],
+            ],
+        ]);
+        $this->assertTrue($created['ok'], $created['error'] ?? '');
+        $this->assertContains('import:adv_hero', $created['fields']);
+
+        // Statamic resolves the import: the fieldset's fields exist on the blueprint.
+        $read = $this->invokeTool(new ReadBlueprintTool, ['handle' => 'event', 'collection' => self::COLLECTION]);
+        $this->assertEqualsCanonicalizing(
+            ['hero_title', 'hero_image', 'title'],
+            array_column($read['fields'], 'handle'),
+        );
+
+        // The raw structure keeps the reference (not inlined copies) …
+        $this->assertContains(['import' => 'adv_hero'], $this->structureFieldRows($read['structure']));
+
+        // … and re-sending the same import on update does not duplicate it.
+        $updated = $this->invokeTool(new UpdateBlueprintTool, [
+            'handle' => 'event',
+            'collection' => self::COLLECTION,
+            'fields' => [
+                ['import' => 'adv_hero'],
+                ['handle' => 'location', 'field' => ['type' => 'text']],
+            ],
+        ]);
+        $this->assertTrue($updated['ok'], $updated['error'] ?? '');
+
+        $reread = $this->invokeTool(new ReadBlueprintTool, ['handle' => 'event', 'collection' => self::COLLECTION]);
+        $importRows = array_filter($this->structureFieldRows($reread['structure']), fn ($row) => ($row['import'] ?? null) === 'adv_hero');
+        $this->assertCount(1, $importRows);
+        $this->assertContains('location', array_column($reread['fields'], 'handle'));
+    }
+
+    public function test_invalid_handles_are_rejected(): void
+    {
+        $result = $this->invokeTool(new CreateCollectionTool, ['handle' => 'Adv Events!', 'title' => 'X']);
+
+        $this->assertFalse($result['ok']);
+        $this->assertStringContainsString('snake_case', $result['error']);
+    }
+
+    public function test_toolset_gating_follows_session_flag_and_config(): void
+    {
+        $this->assertTrue(AdvancedToolset::enabledForSession(['advanced_tools' => true]));
+        $this->assertFalse(AdvancedToolset::enabledForSession(['advanced_tools' => false]));
+        $this->assertFalse(AdvancedToolset::enabledForSession([]));
+
+        config(['statamic-ai-assistant.advanced_tools' => false]);
+        $this->assertFalse(AdvancedToolset::enabledForSession(['advanced_tools' => true]));
+        config(['statamic-ai-assistant.advanced_tools' => true]);
+    }
+
+    public function test_every_advanced_tool_has_a_unique_name_and_definition(): void
+    {
+        $names = array_map(fn ($tool) => $tool->name(), AdvancedToolset::tools());
+
+        $this->assertSame($names, array_unique($names));
+
+        foreach (AdvancedToolset::tools() as $tool) {
+            $def = $tool->definition();
+            $this->assertSame($tool->name(), $def['function']['name']);
+            $this->assertIsArray($def['function']['parameters']['properties']);
+        }
+    }
+}

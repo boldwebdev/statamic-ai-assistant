@@ -86,6 +86,30 @@ class EntryGenerationBatchServiceTest extends TestCase
         );
     }
 
+    public function test_operations_persist_across_polls_and_reset_on_follow_up(): void
+    {
+        $sid = $this->initSession();
+
+        $this->batch->appendOperation($sid, 'collection', 'new collection "candies"');
+        $this->batch->appendOperation($sid, 'blueprint', 'new blueprint "candy"');
+        $this->batch->appendOperation($sid, 'noop', '   '); // blank labels are ignored
+
+        $snap = $this->batch->snapshotForProgress($sid);
+        $this->assertSame(
+            ['new collection "candies"', 'new blueprint "candy"'],
+            array_column($snap['operations'], 'label'),
+        );
+        $this->assertSame('collection', $snap['operations'][0]['kind']);
+
+        // Unlike the drained activity feed, operations survive repeated polls…
+        $again = $this->batch->snapshotForProgress($sid);
+        $this->assertCount(2, $again['operations']);
+
+        // …but a follow-up turn starts with a clean list.
+        $this->batch->reopenForFollowUp($sid, 'And now add one more thing please.', null);
+        $this->assertSame([], $this->batch->snapshotForProgress($sid)['operations']);
+    }
+
     public function test_init_planning_session_seeds_transcript_with_first_user_turn(): void
     {
         $sid = $this->initSession('Which entry contains X?');

@@ -7,6 +7,7 @@ use BoldWeb\StatamicAiAssistant\Support\JsonObjectExtractor;
 use BoldWeb\StatamicAiAssistant\Tools\ChatToolRunner;
 use BoldWeb\StatamicAiAssistant\Tools\ListTaxonomiesTool;
 use BoldWeb\StatamicAiAssistant\Tools\ReadEntryStructureTool;
+use BoldWeb\StatamicAiAssistant\Tools\ReadEntryTool;
 use BoldWeb\StatamicAiAssistant\Tools\ReadGlobalsTool;
 use BoldWeb\StatamicAiAssistant\Tools\ReadNavTreeTool;
 use BoldWeb\StatamicAiAssistant\Tools\SaveImageTool;
@@ -34,7 +35,7 @@ class EntryGeneratorService
 
     private const GEN_HTML_TYPES = ['bard'];
 
-    private const GEN_CHOICE_TYPES = ['select', 'button_group'];
+    private const GEN_CHOICE_TYPES = ['select', 'button_group', 'radio', 'checkboxes'];
 
     private const GEN_BOOLEAN_TYPES = ['toggle'];
 
@@ -329,6 +330,9 @@ class EntryGeneratorService
             $this->structureSerializer,
             fn (?string $collection, string $query, int $limit) => $this->findEntriesShortlist($collection, $query, $limit),
         );
+        $toolset[] = new ReadEntryTool(
+            fn (?string $collection, string $query, int $limit) => $this->findEntriesShortlist($collection, $query, $limit),
+        );
         $toolset[] = new ReadGlobalsTool;
         $toolset[] = new ReadNavTreeTool;
         $toolset[] = new ListTaxonomiesTool;
@@ -360,6 +364,10 @@ class EntryGeneratorService
             $toolChoice = $forceTool
                 ? ['type' => 'function', 'function' => ['name' => 'fetch_page_content']]
                 : 'auto';
+
+            // Drop stale bulky tool results from the conversation before paying
+            // for them again (see ChatToolRunner::compactToolMessages).
+            ChatToolRunner::compactToolMessages($working);
 
             $data = $this->aiService->createChatCompletion($working, $maxTokens, $runner->definitions(), $toolChoice, $streamHeartbeat);
             $choice = $data['choices'][0] ?? null;
@@ -523,14 +531,32 @@ class EntryGeneratorService
     }
 
     /**
-     * Search entries by title/slug for the agentic planner's `find_entries` tool.
-     * Kept in this service so it can reuse the same query path as the catalog shortlist.
+     * Search entries by title/slug — rows only, no pagination info. Convenience
+     * wrapper for callers that just need a shortlist (entry finder closures).
      *
-     * @return array<int, array{id: string, title: string, slug: string, collection: string}>
+     * @return array<int, array{id: string, title: string, slug: string, collection: string, published: bool}>
      */
     public function findEntriesShortlist(?string $collectionHandle, string $query, int $limit): array
     {
+        return $this->findEntries($collectionHandle, $query, $limit)['results'];
+    }
+
+    /**
+     * Search entries by title/slug for the agentic planner's `find_entries` tool.
+     * Kept in this service so it can reuse the same query path as the catalog shortlist.
+     *
+     * The `pagination` block ({total, limit, offset, has_more} — same contract as
+     * cboxdk/statamic-mcp list responses) tells the model when it has NOT seen
+     * every match, so it pages or narrows instead of assuming completeness. When
+     * ranking had to stop at the scan cap, a `note` says so explicitly — a capped
+     * result must never silently read as exhaustive.
+     *
+     * @return array{results: array<int, array{id: string, title: string, slug: string, collection: string, published: bool}>, pagination: array{total: int, limit: int, offset: int, has_more: bool}, note?: string}
+     */
+    public function findEntries(?string $collectionHandle, string $query, int $limit, int $offset = 0): array
+    {
         $limit = max(1, min(50, $limit));
+        $offset = max(0, $offset);
         $siteHandle = Site::selected()?->handle() ?? Site::default()->handle();
 
         // A fresh base query per attempt — Statamic's query builder is stateful,
@@ -548,9 +574,20 @@ class EntryGeneratorService
 
         // No meaningful search terms: preserve the old "most recent" behaviour.
         if ($tokens === []) {
-            return $this->mapEntryRows(
-                $makeBase()->orderBy('updated_at', 'desc')->limit($limit)->get()
+            $total = (int) $makeBase()->count();
+            $rows = $this->mapEntryRows(
+                $makeBase()->orderBy('updated_at', 'desc')->offset($offset)->limit($limit)->get()
             );
+
+            return [
+                'results' => $rows,
+                'pagination' => [
+                    'total' => $total,
+                    'limit' => $limit,
+                    'offset' => $offset,
+                    'has_more' => $offset + count($rows) < $total,
+                ],
+            ];
         }
 
         // Primary narrowing: every token must appear in the title OR slug. This is
@@ -582,7 +619,24 @@ class EntryGeneratorService
             $candidates = $orQuery->orderBy('updated_at', 'desc')->limit(self::SEARCH_SCAN_LIMIT)->get();
         }
 
-        return $this->rankAndMapEntries($candidates, $query, $tokens, $limit);
+        $total = $candidates->count();
+        $rows = $this->rankAndMapEntries($candidates, $query, $tokens, $limit, $offset);
+
+        $out = [
+            'results' => $rows,
+            'pagination' => [
+                'total' => $total,
+                'limit' => $limit,
+                'offset' => $offset,
+                'has_more' => $offset + count($rows) < $total,
+            ],
+        ];
+
+        if ($total >= self::SEARCH_SCAN_LIMIT) {
+            $out['note'] = 'Only the '.self::SEARCH_SCAN_LIMIT.' most recently updated matches were ranked; older entries may exist. Narrow the query or pass a collection handle.';
+        }
+
+        return $out;
     }
 
     /**
@@ -620,15 +674,16 @@ class EntryGeneratorService
     }
 
     /**
-     * Rank candidate entries by how well they match the query, then map the top
-     * $limit to the tool's row shape. Exact title beats full-phrase-in-title beats
-     * per-token coverage; ties keep the incoming (recency) order.
+     * Rank candidate entries by how well they match the query, then map the
+     * requested page ($offset/$limit over the ranked order) to the tool's row
+     * shape. Exact title beats full-phrase-in-title beats per-token coverage;
+     * ties keep the incoming (recency) order.
      *
      * @param  \Illuminate\Support\Collection<int, StatamicEntry>  $candidates
      * @param  array<int, string>  $tokens
-     * @return array<int, array{id: string, title: string, slug: string, collection: string}>
+     * @return array<int, array{id: string, title: string, slug: string, collection: string, published: bool}>
      */
-    private function rankAndMapEntries($candidates, string $query, array $tokens, int $limit): array
+    private function rankAndMapEntries($candidates, string $query, array $tokens, int $limit, int $offset = 0): array
     {
         $queryFold = $this->foldForCompare($query);
         $tokensFold = array_values(array_filter(array_map(fn ($t) => $this->foldForCompare($t), $tokens)));
@@ -661,7 +716,7 @@ class EntryGeneratorService
                 return ['entry' => $entry, 'score' => $score];
             })
             ->sortByDesc('score') // stable in PHP 8: equal scores keep recency order
-            ->take($limit)
+            ->slice($offset, $limit)
             ->pluck('entry');
 
         return $this->mapEntryRows($ranked);
@@ -681,7 +736,7 @@ class EntryGeneratorService
 
     /**
      * @param  \Illuminate\Support\Collection<int, StatamicEntry>|iterable<StatamicEntry>  $entries
-     * @return array<int, array{id: string, title: string, slug: string, collection: string}>
+     * @return array<int, array{id: string, title: string, slug: string, collection: string, published: bool}>
      */
     private function mapEntryRows($entries): array
     {
@@ -691,6 +746,7 @@ class EntryGeneratorService
                 'title' => (string) ($e->value('title') ?? ''),
                 'slug' => (string) ($e->slug() ?? ''),
                 'collection' => (string) ($e->collectionHandle() ?? ''),
+                'published' => (bool) $e->published(),
             ])
             ->values()
             ->all();
@@ -1627,6 +1683,14 @@ class EntryGeneratorService
             return $this->finalizeSchemaEntry($field, $entry);
         }
 
+        if ($type === 'markdown') {
+            $entry['type'] = 'markdown';
+            $entry['description'] = ($instructions ? $instructions.' ' : '')
+                .'Plain markdown string (**bold**, *italic*, [links](url), lists, ## headings). Do NOT return HTML tags or a JSON node tree — a string only.';
+
+            return $this->finalizeSchemaEntry($field, $entry);
+        }
+
         if (in_array($type, self::GEN_HTML_TYPES)) {
             $entry['type'] = 'html';
             $entry['description'] = ($instructions ? $instructions.' ' : '')
@@ -1636,14 +1700,13 @@ class EntryGeneratorService
         }
 
         if (in_array($type, self::GEN_CHOICE_TYPES)) {
-            $entry['type'] = 'select';
-            $options = $config['options'] ?? [];
-
-            if (is_array($options)) {
-                $entry['options'] = array_values(
-                    array_map(fn ($v) => is_array($v) ? ($v['value'] ?? $v['label'] ?? $v['key'] ?? '') : (string) $v, $options)
-                );
-            }
+            $multiple = $this->choiceFieldIsMultiple($field);
+            $entry['type'] = $multiple ? 'multi_select' : 'select';
+            $entry['options'] = $this->choiceFieldOptionValues($field);
+            $entry['description'] = ($instructions ? $instructions.' ' : '')
+                .($multiple
+                    ? 'Return an ARRAY of values copied EXACTLY from "options" (the stored values, not display labels).'
+                    : 'Return ONE value copied EXACTLY from "options" (the stored value, not a display label).');
 
             return $this->finalizeSchemaEntry($field, $entry);
         }
@@ -1658,6 +1721,31 @@ class EntryGeneratorService
             $entry['type'] = 'date';
             $entry['description'] = ($instructions ? $instructions.' ' : '')
                 .$this->statamicDateFieldSchemaDescriptionSuffix();
+
+            return $this->finalizeSchemaEntry($field, $entry);
+        }
+
+        if ($type === 'integer' || $type === 'float') {
+            $entry['type'] = 'number';
+            $entry['description'] = ($instructions ? $instructions.' ' : '')
+                .($type === 'integer' ? 'Whole number as a JSON number (no quotes).' : 'Number as a JSON number (no quotes).');
+
+            return $this->finalizeSchemaEntry($field, $entry);
+        }
+
+        if ($type === 'time') {
+            $entry['type'] = 'time';
+            $entry['description'] = ($instructions ? $instructions.' ' : '')
+                .'24-hour time string "HH:MM".';
+
+            return $this->finalizeSchemaEntry($field, $entry);
+        }
+
+        if ($type === 'table') {
+            $entry['type'] = 'table';
+            $entry['description'] = ($instructions ? $instructions.' ' : '')
+                .'Array of rows; EACH row is {"cells": [...]} with plain string/number cell values in column order (first row = header row when the table has one). '
+                .'Do NOT wrap cells as {"value": ...} objects and do NOT omit the "cells" key.';
 
             return $this->finalizeSchemaEntry($field, $entry);
         }
@@ -1820,7 +1908,7 @@ class EntryGeneratorService
 
             if ($t === 'assets') {
                 $tags['images'] = 'images / visual';
-            } elseif (in_array($t, self::GEN_HTML_TYPES, true)) {
+            } elseif (in_array($t, self::GEN_HTML_TYPES, true) || $t === 'markdown') {
                 $tags['html'] = 'rich text';
             } elseif (in_array($t, self::GEN_TEXT_TYPES, true)) {
                 $tags['text'] = 'short text';
@@ -1949,7 +2037,25 @@ class EntryGeneratorService
             ."- Field-level editorial guidance: when a field in the schema carries \"ai_description\" (what the field is and how it renders on the page) and/or \"writing_guidelines\" (concrete authoring rules such as length, tone, or structure), treat them as binding editorial instructions for THAT field's content — they override generic assumptions you would otherwise make from the handle alone.\n"
             ."- Every field in the schema that includes \"required\": true must have a non-empty, valid value for its type. Never omit those keys, never use empty strings for them, and never use HTML with no visible text. If the user is vague, says to do nothing, or gives minimal instructions, you must still invent sensible placeholder content so the entry would pass blueprint validation.\n"
             ."- For fields without \"required\": true, if you cannot determine content, use an empty string when appropriate.\n"
-            ."- Generate meaningful, high-quality content that is relevant to the user's request.";
+            ."- Generate meaningful, high-quality content that is relevant to the user's request."
+            .$this->siteInstructionsPromptBlock();
+    }
+
+    /**
+     * Editor-maintained site-wide instructions (BOLD agent settings), appended
+     * to every generation prompt. Length-capped so a very long document cannot
+     * crowd out the field schema.
+     */
+    private function siteInstructionsPromptBlock(): string
+    {
+        $instructions = $this->setHints->siteInstructions();
+
+        if ($instructions === '') {
+            return '';
+        }
+
+        return "\n\nSITE INSTRUCTIONS (set by this site's editors — always follow them):\n"
+            .Str::limit($instructions, 4000);
     }
 
     /**
@@ -1969,7 +2075,7 @@ class EntryGeneratorService
      */
     private function statamicDateFieldSchemaDescriptionSuffix(): string
     {
-        return 'Value: JSON string `YYYY-MM-DD` only (Statamic date / PHP Y-m-d). No time portion, no regional numeric dates, no "today" — normalize from source text if needed.';
+        return 'Value: JSON string `YYYY-MM-DD` (append ` HH:MM` only when a time matters). No regional numeric dates, no "today" — normalize from source text if needed.';
     }
 
     /**
@@ -2264,17 +2370,43 @@ class EntryGeneratorService
         }
 
         if (in_array($type, self::GEN_CHOICE_TYPES)) {
-            $options = $field->config()['options'] ?? [];
-            $validValues = [];
+            $validValues = $this->choiceFieldOptionValues($field);
 
-            if (is_array($options)) {
-                foreach ($options as $key => $opt) {
-                    if (is_array($opt)) {
-                        $validValues[] = $opt['value'] ?? $opt['key'] ?? (string) $key;
-                    } else {
-                        $validValues[] = (string) $key;
-                    }
+            if ($this->choiceFieldIsMultiple($field)) {
+                // LLMs regularly send a bare string where an array is expected —
+                // wrap it instead of dropping the field (same coercion the
+                // statamic-mcp addon applies to relationship-style values).
+                $values = is_array($value) ? array_values($value) : (is_scalar($value) ? [$value] : null);
+
+                if ($values === null) {
+                    $this->warnNonScalarDrop($field, $warnings);
+
+                    return null;
                 }
+
+                $picked = [];
+
+                foreach ($values as $v) {
+                    if (! is_scalar($v)) {
+                        continue;
+                    }
+                    $sv = (string) $v;
+
+                    if ($validValues !== [] && ! in_array($sv, $validValues, true)) {
+                        $warnings[] = __(':field: AI selected ":value" which is not a valid option. Value skipped.', [
+                            'field' => $field->display(),
+                            'value' => $sv,
+                        ]);
+
+                        continue;
+                    }
+
+                    $picked[] = $sv;
+                }
+
+                $picked = array_values(array_unique($picked));
+
+                return $picked === [] ? null : $picked;
             }
 
             if (! is_scalar($value)) {
@@ -2283,7 +2415,7 @@ class EntryGeneratorService
             }
             $strValue = (string) $value;
 
-            if (! empty($validValues) && ! in_array($strValue, $validValues)) {
+            if ($validValues !== [] && ! in_array($strValue, $validValues, true)) {
                 $warnings[] = __(':field: AI selected ":value" which is not a valid option. Field left empty.', [
                     'field' => $field->display(),
                     'value' => $strValue,
@@ -2300,23 +2432,67 @@ class EntryGeneratorService
         }
 
         if (in_array($type, self::GEN_DATE_TYPES)) {
-            if (! is_scalar($value)) {
-                $this->warnNonScalarDrop($field, $warnings);
-                return null;
-            }
-            $strValue = (string) $value;
-            $date = \DateTime::createFromFormat('Y-m-d', $strValue);
+            $date = $this->carbonFromLlmDateValue($value);
 
-            if (! $date || $date->format('Y-m-d') !== $strValue) {
+            if ($date === null) {
                 $warnings[] = __(':field: AI provided invalid date ":value". Field left empty.', [
                     'field' => $field->display(),
-                    'value' => $strValue,
+                    'value' => is_scalar($value) ? (string) $value : get_debug_type($value),
                 ]);
 
                 return null;
             }
 
-            return $strValue;
+            // Store in the shape the field keeps: time-enabled fields keep H:i,
+            // plain date fields stay Y-m-d (any parsed time is dropped).
+            return (bool) ($field->config()['time_enabled'] ?? false)
+                ? $date->format('Y-m-d H:i')
+                : $date->format('Y-m-d');
+        }
+
+        if ($type === 'markdown') {
+            if (! is_scalar($value)) {
+                $this->warnNonScalarDrop($field, $warnings);
+
+                return null;
+            }
+
+            return $this->aiService->cleanResult((string) $value);
+        }
+
+        if ($type === 'integer' || $type === 'float') {
+            if (! is_numeric($value)) {
+                $this->warnNonScalarDrop($field, $warnings);
+
+                return null;
+            }
+
+            return $type === 'integer' ? (int) $value : (float) $value;
+        }
+
+        if ($type === 'time') {
+            if (! is_scalar($value)) {
+                $this->warnNonScalarDrop($field, $warnings);
+
+                return null;
+            }
+
+            $str = trim((string) $value);
+
+            if (preg_match('/^(\d{1,2}):(\d{2})(?::\d{2})?$/', $str, $m) !== 1 || (int) $m[1] > 23 || (int) $m[2] > 59) {
+                $warnings[] = __(':field: AI provided invalid time ":value". Field left empty.', [
+                    'field' => $field->display(),
+                    'value' => $str,
+                ]);
+
+                return null;
+            }
+
+            return sprintf('%02d:%s', (int) $m[1], $m[2]);
+        }
+
+        if ($type === 'table') {
+            return $this->mapTableFieldValue($value, $field, $warnings);
         }
 
         if ($type === 'terms') {
@@ -2441,6 +2617,59 @@ class EntryGeneratorService
         }
 
         return $result;
+    }
+
+    /**
+     * Normalize a table field to Statamic storage: each row {cells: [string|null, ...]}.
+     * Tolerant on purpose (adapted from cboxdk/statamic-mcp): LLMs commonly send
+     * bare arrays instead of {cells: ...} rows, or wrap cells as {value: x} — the
+     * latter renders as "[object Object]" in the CP editor if persisted raw.
+     *
+     * @return array<int, array{cells: array<int, string|null>}>|null
+     */
+    private function mapTableFieldValue(mixed $value, \Statamic\Fields\Field $field, array &$warnings): ?array
+    {
+        if (! is_array($value)) {
+            $this->warnNonScalarDrop($field, $warnings);
+
+            return null;
+        }
+
+        $rows = [];
+
+        foreach ($value as $row) {
+            if (is_array($row) && ! array_key_exists('cells', $row) && array_is_list($row)) {
+                $row = ['cells' => $row];
+            }
+
+            $cells = is_array($row) ? ($row['cells'] ?? null) : null;
+
+            if (! is_array($cells)) {
+                $warnings[] = __(':field: table row without "cells" was skipped.', ['field' => $field->display()]);
+
+                continue;
+            }
+
+            $rows[] = ['cells' => array_map(fn ($cell) => $this->normalizeTableCell($cell), array_values($cells))];
+        }
+
+        return $rows === [] ? null : $rows;
+    }
+
+    /**
+     * Coerce one table cell to string|null, unwrapping the augmented {value: x} form.
+     */
+    private function normalizeTableCell(mixed $cell): ?string
+    {
+        if (is_array($cell) && array_key_exists('value', $cell)) {
+            $cell = $cell['value'];
+        }
+
+        if ($cell === null) {
+            return null;
+        }
+
+        return is_scalar($cell) ? (string) $cell : null;
     }
 
     private function mapLinkFieldValue(mixed $value, \Statamic\Fields\Field $field, array &$warnings): ?string
@@ -2599,8 +2828,9 @@ class EntryGeneratorService
             $first = $this->firstSelectOptionValue($field);
 
             if ($first !== null && $first !== '') {
-                $data[$handle] = $first;
-                $displayData[$handle] = $first;
+                $value = $this->choiceFieldIsMultiple($field) ? [$first] : $first;
+                $data[$handle] = $value;
+                $displayData[$handle] = $value;
                 $this->requiredWasAutofilledWarning($field, $warnings);
             }
 
@@ -2724,27 +2954,57 @@ class EntryGeneratorService
         return Str::limit($p, $limit);
     }
 
-    private function firstSelectOptionValue(Field $field): ?string
+    /**
+     * Whether a choice field stores an ARRAY of values (checkboxes, or a
+     * select/button_group configured with multiple: true).
+     */
+    private function choiceFieldIsMultiple(Field $field): bool
+    {
+        return $field->type() === 'checkboxes' || (bool) ($field->config()['multiple'] ?? false);
+    }
+
+    /**
+     * The STORED values of a choice field's options — the single source used by
+     * the prompt schema, the mapper validation, and the required-field fallback,
+     * so the model is always shown exactly the values that will be accepted.
+     *
+     * Statamic option configs come in three shapes: a flat list of values
+     * (['red', 'blue']), a value => label map (['red' => 'Red']), or a list of
+     * {key, value} rows ([['key' => 'red', 'value' => 'Red']]). The stored value
+     * is the list item, the map KEY, or the row's `key` — never the label.
+     *
+     * @return array<int, string>
+     */
+    private function choiceFieldOptionValues(Field $field): array
     {
         $options = $field->config()['options'] ?? [];
 
         if (! is_array($options) || $options === []) {
-            return null;
+            return [];
         }
+
+        $values = [];
 
         foreach ($options as $key => $opt) {
             if (is_array($opt)) {
-                $v = $opt['value'] ?? $opt['key'] ?? null;
-
-                if ($v !== null && $v !== '') {
-                    return (string) $v;
-                }
+                $v = $opt['key'] ?? $opt['value'] ?? null;
             } elseif (is_string($key) && $key !== '') {
-                return $key;
+                $v = $key;
+            } else {
+                $v = is_scalar($opt) ? $opt : null;
+            }
+
+            if ($v !== null && $v !== '') {
+                $values[] = (string) $v;
             }
         }
 
-        return null;
+        return array_values(array_unique($values));
+    }
+
+    private function firstSelectOptionValue(Field $field): ?string
+    {
+        return $this->choiceFieldOptionValues($field)[0] ?? null;
     }
 
     /**
@@ -3306,30 +3566,40 @@ class EntryGeneratorService
     }
 
     /**
-     * Parse a Statamic date field value (Y-m-d string) for use as the dated entry's order date.
+     * Parse a Statamic date field value for use as the dated entry's order date.
+     * Accepts the stored shapes the mapper produces (Y-m-d, Y-m-d H:i).
      */
     private function carbonFromBlueprintDateData(mixed $value): ?Carbon
     {
-        if (! is_string($value)) {
-            return null;
+        return $this->carbonFromLlmDateValue($value);
+    }
+
+    /**
+     * Parse a model-provided date tolerantly (adapted from cboxdk/statamic-mcp):
+     * LLMs send Y-m-d, ISO 8601, "Y-m-d H:i", or a split {date, time} object —
+     * accept all of them instead of dropping the field over a format mismatch.
+     */
+    private function carbonFromLlmDateValue(mixed $value): ?Carbon
+    {
+        if (is_array($value)) {
+            $date = is_string($value['date'] ?? null) ? trim($value['date']) : '';
+
+            if ($date === '') {
+                return null;
+            }
+
+            $time = is_string($value['time'] ?? null) ? trim($value['time']) : '';
+            $value = trim($date.' '.$time);
         }
 
-        $raw = trim($value);
-
-        if ($raw === '') {
+        if (! is_string($value) || trim($value) === '') {
             return null;
         }
 
         try {
-            $c = Carbon::createFromFormat('Y-m-d', $raw);
+            return Carbon::parse(trim($value));
         } catch (\Throwable) {
             return null;
         }
-
-        if (! $c || $c->format('Y-m-d') !== $raw) {
-            return null;
-        }
-
-        return $c->startOfDay();
     }
 }
