@@ -116,6 +116,78 @@ class EntryGenerationBatchService
     }
 
     /**
+     * Recreate a transient session from a client-provided conversation
+     * transcript, so a chat whose cached session expired can continue where it
+     * left off. Chat history is stored only in the user's browser — this
+     * reseeds the server's working copy from it, in the same terminal state
+     * reopenForFollowUp() expects ('completed'/'planned', no running turn).
+     *
+     * @param  array<int, array{role: string, text: string, kind: ?string}>  $transcript
+     */
+    public function restoreSessionFromTranscript(string $locale, array $transcript, bool $advancedTools = false): string
+    {
+        $turns = [];
+        foreach ($transcript as $turn) {
+            if (! is_array($turn)) {
+                continue;
+            }
+            $role = $turn['role'] ?? '';
+            $text = trim((string) ($turn['text'] ?? ''));
+            if (! in_array($role, ['user', 'assistant'], true) || $text === '') {
+                continue;
+            }
+            $turns[] = [
+                'role' => $role,
+                'text' => $text,
+                // Prior entry rows no longer exist in the reseeded session.
+                'entry_ids' => [],
+                'kind' => $role === 'assistant' ? (string) ($turn['kind'] ?? 'summary') : null,
+            ];
+        }
+
+        $id = (string) Str::uuid();
+
+        $session = [
+            'id' => $id,
+            'created_at' => now()->toIso8601String(),
+            'updated_at' => now()->toIso8601String(),
+            'status' => 'completed',
+            'planning_status' => 'planned',
+            'planner_error' => null,
+            'planner_answer' => null,
+            'transcript' => $turns,
+            'auto_resolve' => true,
+            'prompt' => '',
+            'collection_handle' => '',
+            'blueprint_handle' => '',
+            'max_plan_entries' => null,
+            'advanced_tools' => $advancedTools,
+            'locale' => $locale,
+            'attachment_content' => null,
+            'plan_warnings' => [],
+            'url_augmentation' => [
+                'appendix' => '',
+                'warnings' => [],
+                'preferred_paths' => [],
+                'appended_to_prompts' => false,
+            ],
+            'entry_order' => [],
+            'entries' => [],
+            'operations' => [],
+            'counts' => [
+                'pending' => 0,
+                'running' => 0,
+                'completed' => 0,
+                'failed' => 0,
+            ],
+        ];
+
+        $this->persist($session);
+
+        return $id;
+    }
+
+    /**
      * Append a freshly-decorated plan entry. Returns true if the row was added
      * (false when the cap is reached, the session is missing/cancelled, or the
      * id is already known — duplicate-safe so the planner can retry safely).

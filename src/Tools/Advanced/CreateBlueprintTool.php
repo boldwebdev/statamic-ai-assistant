@@ -30,6 +30,9 @@ class CreateBlueprintTool extends AbstractAdvancedTool
             'function' => [
                 'name' => 'create_blueprint',
                 'description' => 'Create a NEW blueprint for a collection (entry blueprint) or taxonomy (term blueprint). '
+                    .'PREFER the "tabs" parameter and mirror the tab layout of an existing similar blueprint (read_blueprint first): '
+                    .'typically a "main" tab with the title + content sections, an "seo" tab importing the site\'s seo fieldset, and a "sidebar" tab with slug/date/settings. '
+                    .'Only use the flat "fields" parameter when the site\'s existing blueprints are untabbed. '
                     .'Each field is {"handle": "...", "field": {"type": "...", "display": "...", ...config}}. '
                     .'To reuse an EXISTING fieldset (hero, seo, ...) add an import row {"import": "<fieldset_handle>"} (optional "prefix": "x_") instead of redefining its fields — check list_fieldsets first. '
                     .'A single fieldset field can be referenced as {"handle": "...", "field": "<fieldset>.<field>"}. '
@@ -54,13 +57,22 @@ class CreateBlueprintTool extends AbstractAdvancedTool
                             'type' => 'string',
                             'description' => 'Taxonomy handle this term blueprint belongs to.',
                         ],
+                        'tabs' => [
+                            'type' => 'array',
+                            'items' => ['type' => 'object'],
+                            'description' => 'PREFERRED tabbed layout, matching the site\'s conventions: '
+                                .'[{"handle": "main", "display": "Main", "sections": [{"fields": [{"handle": "title", "field": {"type": "text"}}, {"import": "hero"}]}, {"display": "Content", "fields": [{"import": "main_components"}]}]}, '
+                                .'{"handle": "seo", "display": "SEO", "sections": [{"fields": [{"import": "seo"}]}]}, '
+                                .'{"handle": "sidebar", "sections": [{"fields": [{"handle": "slug", "field": {"type": "slug"}}]}]}]. '
+                                .'Provide either "tabs" or "fields", not both.',
+                        ],
                         'fields' => [
                             'type' => 'array',
                             'items' => ['type' => 'object'],
-                            'description' => 'Field definitions: [{"handle": "title", "field": {"type": "text", "display": "Title"}}, ...].',
+                            'description' => 'Flat single-tab fallback: [{"handle": "title", "field": {"type": "text", "display": "Title"}}, ...]. Use "tabs" instead whenever the site\'s blueprints are tabbed.',
                         ],
                     ],
-                    'required' => ['handle', 'fields'],
+                    'required' => ['handle'],
                 ],
             ],
         ];
@@ -78,10 +90,29 @@ class CreateBlueprintTool extends AbstractAdvancedTool
             return $ns;
         }
 
+        $tabs = isset($args['tabs']) && is_array($args['tabs']) ? $args['tabs'] : [];
         $fields = isset($args['fields']) && is_array($args['fields']) ? $args['fields'] : [];
-        $validation = $this->validator->validate($fields);
-        if (! $validation['ok']) {
-            return $validation;
+
+        if ($tabs !== [] && $fields !== []) {
+            return ['ok' => false, 'error' => 'Provide either "tabs" or "fields", not both — put the field rows inside the tab sections.'];
+        }
+
+        if ($tabs !== []) {
+            $validation = $this->validator->validateTabs($tabs);
+            if (! $validation['ok']) {
+                return $validation;
+            }
+            $fieldContents = ['tabs' => $validation['tabs']];
+            $fieldRows = collect($validation['tabs'])
+                ->flatMap(fn (array $tab) => collect($tab['sections'])->flatMap(fn (array $s) => $s['fields']))
+                ->all();
+        } else {
+            $validation = $this->validator->validate($fields);
+            if (! $validation['ok']) {
+                return $validation;
+            }
+            $fieldContents = ['fields' => $validation['fields']];
+            $fieldRows = $validation['fields'];
         }
 
         $title = $this->stringArg($args, 'title');
@@ -114,17 +145,22 @@ class CreateBlueprintTool extends AbstractAdvancedTool
 
             $blueprint = Blueprint::make($handle)
                 ->setNamespace($ns['namespace'])
-                ->setContents(['title' => $title, 'fields' => $validation['fields']]);
+                ->setContents(array_merge(['title' => $title], $fieldContents));
             $blueprint->save();
 
-            return [
+            $result = [
                 'ok' => true,
                 'created' => true,
                 'handle' => $blueprint->handle(),
                 'title' => $blueprint->title(),
                 $ns['owner_type'] => $ns['owner'],
-                'fields' => array_map(fn ($f) => $f['handle'] ?? 'import:'.$f['import'], $validation['fields']),
+                'fields' => array_map(fn ($f) => $f['handle'] ?? 'import:'.$f['import'], $fieldRows),
             ];
+            if (isset($fieldContents['tabs'])) {
+                $result['tabs'] = array_keys($fieldContents['tabs']);
+            }
+
+            return $result;
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);

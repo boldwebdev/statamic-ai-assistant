@@ -45,6 +45,38 @@ class EntryGenerationBatchServiceTest extends TestCase
         $this->assertSame([], $snap['warnings']);
     }
 
+    public function test_restore_session_from_transcript_seeds_a_resumable_session(): void
+    {
+        $sid = $this->batch->restoreSessionFromTranscript('default', [
+            ['role' => 'user', 'text' => 'Create a page about our spa offering'],
+            ['role' => 'assistant', 'text' => 'Created "Spa" in Pages.', 'kind' => 'summary'],
+            // Invalid turns are dropped, not persisted.
+            ['role' => 'system', 'text' => 'nope'],
+            ['role' => 'user', 'text' => '   '],
+            'not-an-array',
+        ]);
+
+        $snap = $this->batch->snapshotForProgress($sid);
+        $this->assertNotNull($snap);
+        // Terminal state: reopenForFollowUp can pick the session up directly.
+        $this->assertSame('completed', $snap['status']);
+        $this->assertSame('planned', $snap['planning_status']);
+        $this->assertTrue($snap['auto_resolve']);
+        $this->assertSame([], $snap['entries']);
+
+        $this->assertSame([
+            ['role' => 'user', 'text' => 'Create a page about our spa offering', 'entry_ids' => [], 'kind' => null],
+            ['role' => 'assistant', 'text' => 'Created "Spa" in Pages.', 'entry_ids' => [], 'kind' => 'summary'],
+        ], $snap['transcript']);
+
+        // Follow-up flow: the restored session accepts the next user turn.
+        $this->assertTrue($this->batch->reopenForFollowUp($sid, 'Now add a FAQ section to it', null));
+        $snap = $this->batch->snapshotForProgress($sid);
+        $this->assertSame('planning', $snap['planning_status']);
+        $this->assertCount(3, $snap['transcript']);
+        $this->assertSame('Now add a FAQ section to it', $snap['transcript'][2]['text']);
+    }
+
     public function test_add_planned_entry_appends_and_respects_cap_and_duplicates(): void
     {
         $sid = $this->batch->initPlanningSession(

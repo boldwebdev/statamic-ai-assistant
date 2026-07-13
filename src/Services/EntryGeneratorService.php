@@ -76,6 +76,8 @@ class EntryGeneratorService
 
     private SetHintsService $setHints;
 
+    private EditorialGuidanceService $editorialGuidance;
+
     private ?FigmaContentFetcher $figma;
 
     private ?RemoteImageFetcher $imageFetcher;
@@ -91,12 +93,14 @@ class EntryGeneratorService
         ?FigmaContentFetcher $figma = null,
         ?RemoteImageFetcher $imageFetcher = null,
         ?EntryStructureSerializer $structureSerializer = null,
+        ?EditorialGuidanceService $editorialGuidance = null,
     ) {
         $this->aiService = $aiService;
         $this->assetResolver = $assetResolver ?? new EntryGeneratorAssetResolver;
         $this->linkFallback = $linkFallback ?? new EntryGeneratorLinkFallback;
         $this->promptUrlFetcher = $promptUrlFetcher ?? new PromptUrlFetcher;
         $this->setHints = $setHints ?? new SetHintsService;
+        $this->editorialGuidance = $editorialGuidance ?? app(EditorialGuidanceService::class);
         $this->figma = $figma;
         $this->imageFetcher = $imageFetcher;
         $this->structureSerializer = $structureSerializer ?? new EntryStructureSerializer;
@@ -2043,7 +2047,8 @@ class EntryGeneratorService
             ."- Every field in the schema that includes \"required\": true must have a non-empty, valid value for its type. Never omit those keys, never use empty strings for them, and never use HTML with no visible text. If the user is vague, says to do nothing, or gives minimal instructions, you must still invent sensible placeholder content so the entry would pass blueprint validation.\n"
             ."- For fields without \"required\": true, if you cannot determine content, use an empty string when appropriate.\n"
             ."- Generate meaningful, high-quality content that is relevant to the user's request."
-            .$this->siteInstructionsPromptBlock();
+            .$this->siteInstructionsPromptBlock()
+            .$this->editorialGuidance->promptBlock($locale);
     }
 
     /**

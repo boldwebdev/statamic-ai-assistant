@@ -11,6 +11,7 @@ use BoldWeb\StatamicAiAssistant\Fieldtypes\TranslationActionPreflight;
 use BoldWeb\StatamicAiAssistant\Fieldtypes\TranslationTargetLanguages;
 use BoldWeb\StatamicAiAssistant\Services\AbstractAiService;
 use BoldWeb\StatamicAiAssistant\Services\DeeplService;
+use BoldWeb\StatamicAiAssistant\Services\EditorialGuidanceService;
 use BoldWeb\StatamicAiAssistant\Services\EntryGenerationBatchService;
 use BoldWeb\StatamicAiAssistant\Services\EntryGenerationPlanner;
 use BoldWeb\StatamicAiAssistant\Services\EntryGeneratorAssetResolver;
@@ -146,6 +147,14 @@ class ServiceProvider extends AddonServiceProvider
             return new SetHintsService;
         });
 
+        $this->app->singleton(EditorialGuidanceService::class, function ($app) {
+            return new EditorialGuidanceService(
+                $app->make(TranslationGlossaryService::class),
+                $app->make(TranslationStyleRulesService::class),
+                $app->make(DeeplService::class),
+            );
+        });
+
         $this->app->singleton(EntryGeneratorService::class, function ($app) {
             return new EntryGeneratorService(
                 $app->make(AbstractAiService::class),
@@ -155,6 +164,7 @@ class ServiceProvider extends AddonServiceProvider
                 $app->make(SetHintsService::class),
                 $app->make(FigmaContentFetcher::class),
                 $app->make(RemoteImageFetcher::class),
+                editorialGuidance: $app->make(EditorialGuidanceService::class),
             );
         });
 

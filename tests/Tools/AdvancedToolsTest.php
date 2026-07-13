@@ -209,6 +209,111 @@ class AdvancedToolsTest extends TestCase
         $this->assertContains('location', array_column($reread['fields'], 'handle'));
     }
 
+    public function test_create_blueprint_with_tabs_mirrors_site_layout(): void
+    {
+        \Statamic\Facades\Fieldset::make('adv_hero')->setContents([
+            'title' => 'Adv Hero',
+            'fields' => [['handle' => 'hero_title', 'field' => ['type' => 'text']]],
+        ])->save();
+        \Statamic\Facades\Fieldset::make('adv_main_components')->setContents([
+            'title' => 'Adv Main Components',
+            'fields' => [['handle' => 'components', 'field' => ['type' => 'replicator', 'sets' => []]]],
+        ])->save();
+
+        $this->invokeTool(new CreateCollectionTool, ['handle' => self::COLLECTION, 'title' => 'Adv Events']);
+
+        $created = $this->invokeTool(new CreateBlueprintTool, [
+            'handle' => 'event',
+            'collection' => self::COLLECTION,
+            'tabs' => [
+                [
+                    'handle' => 'main',
+                    'display' => 'Main',
+                    'sections' => [
+                        ['fields' => [
+                            ['handle' => 'title', 'field' => ['type' => 'text', 'required' => true]],
+                            ['import' => 'adv_hero'],
+                        ]],
+                        ['display' => 'Inhalt', 'fields' => [['import' => 'adv_main_components']]],
+                    ],
+                ],
+                [
+                    'handle' => 'seo',
+                    'display' => 'SEO',
+                    'sections' => [
+                        ['display' => 'Basic', 'instructions' => 'Basic SEO settings.', 'fields' => [
+                            ['handle' => 'meta_title', 'field' => ['type' => 'text']],
+                        ]],
+                    ],
+                ],
+                // Convenience shape: "fields" directly on the tab = one section.
+                [
+                    'handle' => 'sidebar',
+                    'fields' => [['handle' => 'slug', 'field' => ['type' => 'slug']]],
+                ],
+            ],
+        ]);
+
+        $this->assertTrue($created['ok'], $created['error'] ?? '');
+        $this->assertSame(['main', 'seo', 'sidebar'], $created['tabs']);
+        $this->assertSame(['title', 'import:adv_hero', 'import:adv_main_components', 'meta_title', 'slug'], $created['fields']);
+
+        // Raw structure keeps the tab/section layout exactly as the site's
+        // hand-written blueprints do — nothing collapses into one tab.
+        $read = $this->invokeTool(new ReadBlueprintTool, ['handle' => 'event', 'collection' => self::COLLECTION]);
+        $tabs = $read['structure']['tabs'];
+        $this->assertSame(['main', 'seo', 'sidebar'], array_keys($tabs));
+        $this->assertCount(2, $tabs['main']['sections']);
+        $this->assertSame('Inhalt', $tabs['main']['sections'][1]['display']);
+        $this->assertContains(['import' => 'adv_main_components'], $tabs['main']['sections'][1]['fields']);
+        $this->assertSame('Basic SEO settings.', $tabs['seo']['sections'][0]['instructions']);
+        $this->assertSame('slug', $tabs['sidebar']['sections'][0]['fields'][0]['handle']);
+
+        // Imports resolve across tabs.
+        $this->assertEqualsCanonicalizing(
+            ['title', 'hero_title', 'components', 'meta_title', 'slug'],
+            array_column($read['fields'], 'handle'),
+        );
+    }
+
+    public function test_create_blueprint_with_tabs_rejects_bad_shapes(): void
+    {
+        $this->invokeTool(new CreateCollectionTool, ['handle' => self::COLLECTION, 'title' => 'Adv Events']);
+
+        // tabs and fields together are ambiguous.
+        $both = $this->invokeTool(new CreateBlueprintTool, [
+            'handle' => 'event',
+            'collection' => self::COLLECTION,
+            'tabs' => [['handle' => 'main', 'fields' => [['handle' => 'title', 'field' => ['type' => 'text']]]]],
+            'fields' => [['handle' => 'title', 'field' => ['type' => 'text']]],
+        ]);
+        $this->assertFalse($both['ok']);
+        $this->assertStringContainsString('not both', $both['error']);
+
+        // Handle uniqueness is blueprint-wide, across tabs.
+        $dupe = $this->invokeTool(new CreateBlueprintTool, [
+            'handle' => 'event',
+            'collection' => self::COLLECTION,
+            'tabs' => [
+                ['handle' => 'main', 'fields' => [['handle' => 'title', 'field' => ['type' => 'text']]]],
+                ['handle' => 'seo', 'fields' => [['handle' => 'title', 'field' => ['type' => 'text']]]],
+            ],
+        ]);
+        $this->assertFalse($dupe['ok']);
+        $this->assertStringContainsString('Duplicate field handle', $dupe['error']);
+
+        // A tab without sections/fields is a targeted error, not a crash.
+        $empty = $this->invokeTool(new CreateBlueprintTool, [
+            'handle' => 'event',
+            'collection' => self::COLLECTION,
+            'tabs' => [['handle' => 'main']],
+        ]);
+        $this->assertFalse($empty['ok']);
+        $this->assertStringContainsString('sections', $empty['error']);
+
+        $this->assertNull($this->invokeTool(new ReadBlueprintTool, ['handle' => 'event', 'collection' => self::COLLECTION])['structure'] ?? null);
+    }
+
     public function test_create_fieldset_and_register_it_as_component_in_grouped_container(): void
     {
         // Container in the grouped format real sites use (sets → group → sets).

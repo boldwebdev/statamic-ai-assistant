@@ -82,4 +82,54 @@ class PromptAssetMentionResolverTest extends TestCase
         $this->assertStringNotContainsString('portrait.jpg?', $result['appendix']);
         $this->assertStringContainsString('alt: "A portrait"', $result['appendix']);
     }
+
+    public function test_newest_turn_mentions_become_preferred_imagery_pairs(): void
+    {
+        config(['filesystems.disks.test_assets' => [
+            'driver' => 'local',
+            'root' => Storage::fake('test_assets')->path(''),
+        ]]);
+
+        AssetContainer::make('media')->disk('test_assets')->title('Media')->save();
+        Storage::disk('test_assets')->put('hotel/front.jpg', 'x');
+        Storage::disk('test_assets')->put('spa/a.jpg', 'x');
+        Storage::disk('test_assets')->put('spa/b.jpg', 'x');
+        Storage::disk('test_assets')->put('spa/notes.txt', 'x');
+
+        // Older-turn refs stay OUT of preferred; newest-turn asset + folder go in.
+        $result = (new PromptAssetMentionResolver)->resolve([
+            'look at @asset:media::spa/a.jpg',
+            'create a page, use @asset:media::hotel/front.jpg everywhere and images from @folder:media::spa',
+        ]);
+
+        $containers = array_column($result['preferred'], 'container');
+        $paths = array_column($result['preferred'], 'path');
+
+        $this->assertSame(array_fill(0, count($containers), 'media'), $containers);
+        $this->assertContains('hotel/front.jpg', $paths);
+        $this->assertContains('spa/a.jpg', $paths); // via the folder mention
+        $this->assertContains('spa/b.jpg', $paths);
+        $this->assertNotContains('spa/notes.txt', $paths); // images only
+        // The explicitly mentioned asset comes first (mention order preserved).
+        $this->assertSame('hotel/front.jpg', $paths[0]);
+    }
+
+    public function test_read_only_questions_do_not_queue_preferred_imagery_from_old_turns(): void
+    {
+        config(['filesystems.disks.test_assets' => [
+            'driver' => 'local',
+            'root' => Storage::fake('test_assets')->path(''),
+        ]]);
+
+        AssetContainer::make('media')->disk('test_assets')->title('Media')->save();
+        Storage::disk('test_assets')->put('hotel/front.jpg', 'x');
+
+        $result = (new PromptAssetMentionResolver)->resolve([
+            '@asset:media::hotel/front.jpg',
+            'does it have a french alt text ?', // newest turn: no refs
+        ]);
+
+        $this->assertSame([], $result['preferred']);
+        $this->assertStringContainsString('hotel/front.jpg', $result['appendix']);
+    }
 }

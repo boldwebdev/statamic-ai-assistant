@@ -600,6 +600,38 @@ class EntryGeneratorController
     }
 
     /**
+     * Resume a chat whose server session expired. Chat history lives only in
+     * the user's browser; this reseeds a fresh transient session from the
+     * client-provided transcript, appends the new user turn, and re-runs the
+     * planner — the browser then polls generate-progress as usual.
+     */
+    public function generateResume(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'prompt' => 'required|string|min:10',
+            'transcript' => 'required|array|min:1|max:80',
+            'transcript.*.role' => 'required|string|in:user,assistant',
+            'transcript.*.text' => 'required|string|max:20000',
+            'transcript.*.kind' => 'nullable|string|max:32',
+        ]);
+
+        if ($err = $this->entryBatchQueueSetupError()) {
+            return response()->json(['error' => $err], 422);
+        }
+
+        $locale = optional(Site::selected())->handle() ?: Site::default()->handle();
+        $maxPlanEntries = EntryCreationPolicy::maxPlanEntries();
+        $advancedTools = AgentAccess::advancedToolsActive();
+
+        $sessionId = $this->entryBatch->restoreSessionFromTranscript($locale, $data['transcript'], $advancedTools);
+        $this->entryBatch->reopenForFollowUp($sessionId, (string) $data['prompt'], $maxPlanEntries, $advancedTools);
+
+        PlanEntriesJob::dispatch($sessionId);
+
+        return response()->json(['ok' => true, 'session_id' => $sessionId]);
+    }
+
+    /**
      * Current advanced-tools state for the agent UI toggle: whether the user
      * holds the access grant at all (toggle hidden otherwise) and whether they
      * have opted in.

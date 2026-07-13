@@ -1,11 +1,54 @@
 <template>
   <!-- ═══ Agentic chat (drawer) — Claude-style flat layout ═══ -->
   <div v-if="drawer" ref="chatRoot" class="eg-chat">
-    <!-- Top bar: conversation copy + advanced-tools opt-in -->
+    <!-- Top bar: history / new chat on the left, copy + advanced-tools on the right -->
     <div class="eg-chat__topbar">
+      <div class="eg-chat__topbar-left">
+        <button
+          type="button"
+          class="eg-topbar-btn"
+          :class="{ 'eg-topbar-btn--active': historyOpen }"
+          :title="__('Chat history')"
+          :aria-label="__('Chat history')"
+          :aria-expanded="historyOpen ? 'true' : 'false'"
+          @click="toggleHistory"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true">
+            <path d="M3 3v5h5" />
+            <path d="M3.05 13a9 9 0 102.13-7.36L3 8" />
+            <path d="M12 7v5l4 2" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="eg-topbar-btn"
+          :disabled="store.generating || store.planning"
+          :title="__('New chat')"
+          :aria-label="__('New chat')"
+          @click="startNewChat"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="eg-topbar-btn"
+          :class="{ 'eg-topbar-btn--active': templatesOpen }"
+          :disabled="store.generating || store.planning"
+          :title="__('Prompt templates')"
+          :aria-label="__('Prompt templates')"
+          @click="toggleTemplates"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true">
+            <path d="M12 3l1.8 4.6L18.5 9l-4.7 1.4L12 15l-1.8-4.6L5.5 9l4.7-1.4L12 3z" />
+            <path d="M18 14l.9 2.2L21 17l-2.1.8L18 20l-.9-2.2L15 17l2.1-.8L18 14z" />
+          </svg>
+        </button>
+      </div>
       <button
         type="button"
-        class="eg-topbar-copy"
+        class="eg-topbar-btn"
         :title="__('Copy conversation')"
         :aria-label="__('Copy conversation')"
         @click="copyConversation"
@@ -37,6 +80,37 @@
         <span v-if="advancedTools.enabled" class="eg-topbar-toggle__badge">{{ __('active') }}</span>
       </label>
     </div>
+
+    <!-- Chat history: slide-over list of locally saved conversations -->
+    <Transition name="eg-history">
+      <EntryGeneratorChatHistory
+        v-if="historyOpen"
+        :chats="historyChats"
+        :active-chat-id="store.currentChatId"
+        @select="onHistorySelect"
+        @delete="onHistoryDelete"
+        @close="historyOpen = false"
+      />
+    </Transition>
+
+    <!-- Prompt templates: slide-over gallery of ready-made prompts.
+         Self-contained module (resources/js/promptTemplates/). -->
+    <Transition name="eg-history">
+      <PromptTemplatesPanel
+        v-if="templatesOpen && !activeTemplate"
+        @select="onTemplateSelect"
+        @close="templatesOpen = false"
+      />
+    </Transition>
+    <Transition name="eg-history">
+      <PromptTemplateForm
+        v-if="templatesOpen && activeTemplate"
+        :template="activeTemplate"
+        @apply="onTemplateApply"
+        @back="activeTemplate = null"
+        @close="templatesOpen = false; activeTemplate = null"
+      />
+    </Transition>
 
     <!-- Enable confirmation: informed consent before arming structural tools -->
     <div
@@ -653,6 +727,9 @@ import { Button } from '@statamic/cms/ui';
 import AiModalLoadingOverlay from './AiModalLoadingOverlay.vue';
 import AgentAssetSelectorStack from './AgentAssetSelectorStack.vue';
 import EntryGeneratorEntryCard from './EntryGeneratorEntryCard.vue';
+import EntryGeneratorChatHistory from './EntryGeneratorChatHistory.vue';
+import PromptTemplatesPanel from './PromptTemplatesPanel.vue';
+import PromptTemplateForm from './PromptTemplateForm.vue';
 import {
   state,
   STATUS,
@@ -668,6 +745,9 @@ import {
   stopChatTurn,
   pushActivityLine,
   registerMention,
+  listChatHistory,
+  openChatFromHistory,
+  deleteChatFromHistory,
   setI18n,
   setToaster,
 } from '../store/entryGeneratorStore.js';
@@ -675,7 +755,7 @@ import { formatChatMessageHtml } from '../formatChatUrls.js';
 
 export default {
   name: 'EntryGeneratorPage',
-  components: { Button, AiModalLoadingOverlay, EntryGeneratorEntryCard, AgentAssetSelectorStack },
+  components: { Button, AiModalLoadingOverlay, EntryGeneratorEntryCard, AgentAssetSelectorStack, EntryGeneratorChatHistory, PromptTemplatesPanel, PromptTemplateForm },
 
   props: {
     drawer: { type: Boolean, default: false },
@@ -696,6 +776,15 @@ export default {
       // requires confirming the warning modal.
       advancedTools: { granted: false, enabled: false, saving: false },
       advancedToolsModalOpen: false,
+
+      // Chat history slide-over (drawer only). The list is re-read from
+      // localStorage each time the panel opens — no live sync needed.
+      historyOpen: false,
+      historyChats: [],
+      // Prompt templates slide-over (drawer only). `activeTemplate` swaps the
+      // gallery for the clarifying-questions form for the chosen template.
+      templatesOpen: false,
+      activeTemplate: null,
       collections: [],
       selectedCollection: '',
       selectedBlueprint: '',
@@ -1327,6 +1416,88 @@ export default {
       this.chatStickToBottom = true;
     },
 
+    // ── Chat history (drawer) ──
+
+    toggleHistory() {
+      if (this.historyOpen) {
+        this.historyOpen = false;
+        return;
+      }
+      this.historyChats = listChatHistory();
+      this.historyOpen = true;
+    },
+
+    startNewChat() {
+      if (this.store.generating || this.store.planning) return;
+      this.resetForNewRequest();
+      this.historyOpen = false;
+      this.$nextTick(() => this.$refs.promptTextarea?.focus?.());
+    },
+
+    // ── Prompt templates (drawer) ──
+
+    toggleTemplates() {
+      if (this.templatesOpen) {
+        this.templatesOpen = false;
+        this.activeTemplate = null;
+        return;
+      }
+      this.historyOpen = false;
+      this.activeTemplate = null;
+      this.templatesOpen = true;
+    },
+
+    onTemplateSelect(template) {
+      if (Array.isArray(template.questions) && template.questions.length > 0) {
+        this.activeTemplate = template;
+        return;
+      }
+      this.applyPromptTemplate(template, {});
+    },
+
+    onTemplateApply(answers) {
+      const template = this.activeTemplate;
+      if (!template) return;
+      this.applyPromptTemplate(template, answers);
+    },
+
+    /**
+     * Build the final prompt from a template, register entry mentions so the
+     * chips render in the chat, then start a fresh chat via the existing send
+     * pipeline. Templates are pure client-side prompt builders — the agent's
+     * tools (read_entry, update_entry_job, analyze_image, …) do the real work.
+     */
+    applyPromptTemplate(template, answers) {
+      const prompt = String(template.buildPrompt(answers, this) || '').trim();
+      if (prompt.length < 10) return;
+
+      (template.questions || []).forEach((q) => {
+        if (q.type === 'entry' && answers[q.id]?.title) {
+          registerMention(answers[q.id].title);
+        }
+      });
+
+      this.templatesOpen = false;
+      this.activeTemplate = null;
+
+      if (this.store.generating || this.store.planning) return;
+      this.resetForNewRequest();
+      this.store.pendingPrompt = prompt;
+      this.$nextTick(() => this.handleGenerate());
+    },
+
+    onHistorySelect(id) {
+      if (!openChatFromHistory(id)) return;
+      this.historyOpen = false;
+      this.chatStickToBottom = true;
+      this.$nextTick(() => this.scrollChatToBottom(true));
+    },
+
+    onHistoryDelete(id) {
+      deleteChatFromHistory(id);
+      this.historyChats = listChatHistory();
+    },
+
     /**
      * Composer keydown: when the mention picker is open, arrows/enter/tab/escape
      * drive it. Otherwise Enter sends (Shift+Enter = newline).
@@ -1485,7 +1656,9 @@ export default {
     },
 
     approvePlan() {
-      if (this.store.generating || this.store.planning || !this.store.chatSessionId) return;
+      // A restored chat may have an expired session — continueGeneration
+      // falls back to the resume endpoint, so only a live turn blocks this.
+      if (this.store.generating || this.store.planning || this.store.transcript.length === 0) return;
       continueGeneration(this.__('Approved — proceed with the proposed plan.'));
       this.chatStickToBottom = true;
     },
@@ -1495,7 +1668,9 @@ export default {
 
       this.closeMention();
 
-      if (this.drawer && this.store.chatSessionId) {
+      // An ongoing chat continues — even when restored from history with an
+      // expired server session (continueGeneration reseeds it transparently).
+      if (this.drawer && (this.store.chatSessionId || this.store.transcript.length > 0)) {
         continueGeneration(this.store.pendingPrompt);
         this.resetComposerHeight();
         this.chatStickToBottom = true;

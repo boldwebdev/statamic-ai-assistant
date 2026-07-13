@@ -12,6 +12,13 @@
 
 import { reactive } from 'vue';
 import axios from 'axios';
+import {
+  newChatId,
+  listChats,
+  getChat,
+  upsertChat,
+  deleteChat,
+} from '../services/chatHistoryStorage.js';
 
 export const STATUS = {
   QUEUED: 'queued',
@@ -40,6 +47,7 @@ export const state = reactive({
   operations: [],           // completed non-entry operations this turn: [{id,kind,label}]
   transcript: [],           // full chat history from the server: [{role,text,entry_ids,kind}]
   chatSessionId: null,      // durable session id across turns (NOT cleared at poll-terminal)
+  currentChatId: null,      // id of this conversation's local-history record
   bulkSaving: false,
 
   // Titles referenced via the composer "@" picker this session. Used purely to
@@ -191,6 +199,65 @@ function mergeTranscriptMentions(incoming, previous) {
   });
 }
 
+// ─── Local chat history (per-user, browser-only) ────────────────────────
+
+/**
+ * Snapshot the live conversation into localStorage. Called wherever the
+ * transcript changes (optimistic user turns + every server overwrite), so the
+ * saved record always mirrors what the user sees.
+ */
+function persistChatHistory() {
+  if (!state.currentChatId || state.transcript.length === 0) return;
+  upsertChat({
+    id: state.currentChatId,
+    sessionId: state.chatSessionId,
+    transcript: state.transcript,
+    mentionedTitles: state.mentionedTitles,
+  });
+}
+
+/** Saved conversations for the history panel, newest first. */
+export function listChatHistory() {
+  return listChats();
+}
+
+/**
+ * Load a saved conversation into the live state so the user can read it and
+ * continue from where it left off. Follow-ups reuse the recorded server
+ * session when it is still alive; continueGeneration falls back to the
+ * resume endpoint when it has expired. Refused while a turn is in flight.
+ */
+export function openChatFromHistory(id) {
+  if (state.generating || state.planning) {
+    if (_toast) _toast.error(_trans('Wait for the current generation to finish first.'));
+    return false;
+  }
+  const record = getChat(id);
+  if (!record) return false;
+
+  resetGenerationOnly();
+  state.pendingAttachedFile = null;
+  state.currentChatId = record.id;
+  state.chatSessionId = record.sessionId || null;
+  state.mentionedTitles = [...(record.mentionedTitles || [])];
+  state.transcript = record.transcript.map((t) => ({ ...t }));
+  return true;
+}
+
+/** Remove a conversation from local history (and from view when it is open). */
+export function deleteChatFromHistory(id) {
+  // The open chat re-persists on every progress poll — deleting it mid-turn
+  // would just resurrect it, so refuse instead of pretending it worked.
+  if (state.currentChatId === id && (state.generating || state.planning)) {
+    if (_toast) _toast.error(_trans('Wait for the current generation to finish first.'));
+    return;
+  }
+  deleteChat(id);
+  if (state.currentChatId === id) {
+    reset();
+  }
+}
+
 // ─── Activity / visibility ───────────────────────────────────────────────
 
 /**
@@ -274,6 +341,7 @@ function applyBatchProgressSnapshot(data) {
   // Full conversation history — server is the source of truth. Overwrite each poll.
   if (Array.isArray(data.transcript)) {
     state.transcript = mergeTranscriptMentions(data.transcript, state.transcript);
+    persistChatHistory();
     // Errors are rendered from the transcript turn — don't also show the live banner.
     const last = data.transcript[data.transcript.length - 1];
     if (last?.role === 'assistant' && last?.kind === 'error') {
@@ -465,6 +533,8 @@ export async function startGeneration({ prompt, attachedFile, useAutoTarget, col
   state.pendingPrompt = '';
   // Optimistic first user turn so the chat shows the message before the first poll.
   state.transcript = [{ role: 'user', text, entry_ids: [], kind: null, mention_titles: mentionTitles }];
+  state.currentChatId = newChatId();
+  persistChatHistory();
 
   const formData = new FormData();
   if (useAutoTarget) {
@@ -576,6 +646,7 @@ function handleStreamEvent(msg) {
       if (msg.session_id) {
         state.generationBatchSessionId = msg.session_id;
         state.chatSessionId = msg.session_id; // durable across follow-up turns
+        persistChatHistory();
         // Reset card list — the agentic planner will push entries one at a time
         // through the polling snapshot as it discovers them.
         state.plan = { entries: [], warnings: [] };
@@ -650,10 +721,22 @@ export function stopGeneration({ keepReady = false } = {}) {
  * Send a follow-up message in the current chat. Reuses the live chatSessionId,
  * keeps all prior turns + entry cards, and restarts the progress poll. The
  * server appends the user turn and re-runs the planner with full context.
+ *
+ * When the server session has expired (or a chat was restored from local
+ * history without a live session), the conversation is reseeded from the
+ * locally saved transcript via generate-resume — the chat continues
+ * seamlessly instead of dying with "this chat has expired".
  */
 export async function continueGeneration(prompt) {
   const text = (prompt || '').trim();
-  if (state.generating || text.length < 10 || !state.chatSessionId) return;
+  if (state.generating || text.length < 10) return;
+  if (!state.chatSessionId && state.transcript.length === 0) return;
+
+  // Turns as the resume endpoint expects them — captured BEFORE the optimistic
+  // append so the new prompt isn't duplicated when the server re-appends it.
+  const priorTurns = state.transcript
+    .filter((t) => (t.text || '').trim() !== '')
+    .map((t) => ({ role: t.role, text: t.text, kind: t.kind || null }));
 
   // Clear only the CURRENT-turn scratch — history + prior cards stay.
   state.generationError = null;
@@ -670,30 +753,46 @@ export async function continueGeneration(prompt) {
   // Optimistically show the user's message; the next poll's server transcript
   // (which also contains it) overwrites this idempotently.
   state.transcript = [...state.transcript, { role: 'user', text, entry_ids: [], kind: null, mention_titles: mentionTitles }];
+  persistChatHistory();
 
   const headers = { 'X-Requested-With': 'XMLHttpRequest' };
   const xsrf = getCpXsrfToken();
   if (xsrf) headers['X-XSRF-TOKEN'] = xsrf;
 
   try {
-    const { data } = await axios.post(
-      `/cp/ai-generate/generate-continue/${state.chatSessionId}`,
-      { prompt: text },
-      { headers, withCredentials: true },
-    );
-    state.generationBatchSessionId = data.session_id || state.chatSessionId;
+    let sessionId = null;
+
+    if (state.chatSessionId) {
+      try {
+        const { data } = await axios.post(
+          `/cp/ai-generate/generate-continue/${state.chatSessionId}`,
+          { prompt: text },
+          { headers, withCredentials: true },
+        );
+        sessionId = data.session_id || state.chatSessionId;
+      } catch (e) {
+        // 404 = session expired → fall through to resume; anything else is fatal.
+        if (e?.response?.status !== 404 || priorTurns.length === 0) throw e;
+      }
+    }
+
+    if (!sessionId) {
+      const { data } = await axios.post(
+        '/cp/ai-generate/generate-resume',
+        { prompt: text, transcript: priorTurns },
+        { headers, withCredentials: true },
+      );
+      sessionId = data.session_id;
+      state.chatSessionId = sessionId;
+      persistChatHistory();
+    }
+
+    state.generationBatchSessionId = sessionId;
     scheduleGenerationBatchPoll();
   } catch (e) {
     state.generating = false;
     state.planning = false;
-    const msg = e?.response?.data?.error || _trans('Generation failed.');
-    if (e?.response?.status === 404) {
-      // Chat expired: back to a fresh composer, notify via toast.
-      reset();
-      if (_toast) _toast.error(msg);
-    } else {
-      state.generationError = msg;
-    }
+    state.generationError = e?.response?.data?.error || _trans('Generation failed.');
   }
 }
 
@@ -954,6 +1053,7 @@ function resetGenerationOnly() {
   state.operations = [];
   state.transcript = [];
   state.chatSessionId = null;
+  state.currentChatId = null;
   state.planning = false;
   state.generating = false;
   state.bulkSaving = false;

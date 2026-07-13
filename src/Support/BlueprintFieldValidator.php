@@ -38,12 +38,103 @@ class BlueprintFieldValidator
      */
     public function validate(array $fields): array
     {
+        $seenHandles = [];
+
+        return $this->validateFieldList($fields, $seenHandles);
+    }
+
+    /**
+     * Validate an LLM-provided tabbed blueprint layout and normalize it to
+     * Statamic's `tabs` contents (keyed by tab handle):
+     *
+     *   [{"handle": "main", "display": "Main", "sections": [{"display": "...", "instructions": "...", "fields": [...]}]}]
+     *
+     * Field handle uniqueness is enforced blueprint-wide (across all tabs and
+     * sections), and every section's fields go through the same strict field
+     * validation as flat lists.
+     *
+     * @param  array<int|string, mixed>  $tabs
+     * @return array{ok: true, tabs: array<string, array<string, mixed>>}|array{ok: false, error: string}
+     */
+    public function validateTabs(array $tabs): array
+    {
+        if ($tabs === []) {
+            return $this->error('Provide at least one tab as {"handle": "main", "sections": [{"fields": [...]}]}.');
+        }
+
+        $seenHandles = [];
+        $normalized = [];
+
+        foreach (array_values($tabs) as $ti => $tab) {
+            if (! is_array($tab)) {
+                return $this->error("Tab at index {$ti} must be an object: {\"handle\": \"main\", \"sections\": [{\"fields\": [...]}]}.");
+            }
+
+            $tabHandle = is_string($tab['handle'] ?? null) ? trim($tab['handle']) : '';
+            if (preg_match('/^[a-z][a-z0-9_]*$/', $tabHandle) !== 1) {
+                return $this->error("Tab at index {$ti} needs a snake_case \"handle\" (e.g. \"main\", \"seo\", \"sidebar\").");
+            }
+            if (isset($normalized[$tabHandle])) {
+                return $this->error("Duplicate tab handle \"{$tabHandle}\". Each tab must have a unique handle.");
+            }
+
+            $sections = is_array($tab['sections'] ?? null) ? array_values($tab['sections']) : [];
+            // Convenience: a tab with "fields" directly on it becomes its single section.
+            if ($sections === [] && is_array($tab['fields'] ?? null)) {
+                $sections = [['fields' => $tab['fields']]];
+            }
+            if ($sections === []) {
+                return $this->error("Tab \"{$tabHandle}\" must have \"sections\": [{\"fields\": [...]}] with at least one section.");
+            }
+
+            $sectionsOut = [];
+            foreach ($sections as $si => $section) {
+                if (! is_array($section) || ! is_array($section['fields'] ?? null)) {
+                    return $this->error("Tab \"{$tabHandle}\" section {$si} must be an object with a \"fields\" array.");
+                }
+
+                $result = $this->validateFieldList($section['fields'], $seenHandles);
+                if (! $result['ok']) {
+                    return $this->error("Tab \"{$tabHandle}\" section {$si}: {$result['error']}");
+                }
+
+                $sectionOut = [];
+                if (is_string($section['display'] ?? null) && trim($section['display']) !== '') {
+                    $sectionOut['display'] = $this->cleanLabel($section['display']);
+                }
+                if (is_string($section['instructions'] ?? null) && trim($section['instructions']) !== '') {
+                    $sectionOut['instructions'] = $this->cleanLabel($section['instructions']);
+                }
+                $sectionOut['fields'] = $result['fields'];
+                $sectionsOut[] = $sectionOut;
+            }
+
+            $tabOut = [];
+            if (is_string($tab['display'] ?? null) && trim($tab['display']) !== '') {
+                $tabOut['display'] = $this->cleanLabel($tab['display']);
+            }
+            $tabOut['sections'] = $sectionsOut;
+            $normalized[$tabHandle] = $tabOut;
+        }
+
+        return ['ok' => true, 'tabs' => $normalized];
+    }
+
+    /**
+     * Validate one flat field list. `$seenHandles` is shared by reference so
+     * tabbed layouts get blueprint-wide handle uniqueness across sections.
+     *
+     * @param  array<int|string, mixed>  $fields
+     * @param  array<string, true>  $seenHandles
+     * @return array{ok: true, fields: array<int, array{handle: string, field: array<string, mixed>}>}|array{ok: false, error: string}
+     */
+    private function validateFieldList(array $fields, array &$seenHandles): array
+    {
         if ($fields === []) {
             return ['ok' => false, 'error' => 'Provide at least one field as {"handle": "...", "field": {"type": "..."}}.'];
         }
 
         $fieldtypes = app(FieldtypeRepository::class);
-        $seenHandles = [];
         $validated = [];
 
         foreach (array_values($fields) as $index => $field) {
@@ -217,6 +308,12 @@ class BlueprintFieldValidator
         }
 
         return null;
+    }
+
+    /** Tab/section labels get the same Antlers-stripping as field config strings. */
+    private function cleanLabel(string $value): string
+    {
+        return trim(strip_tags((string) preg_replace('/\{\{.*?\}\}|\{!!.*?!!\}/s', '', $value)));
     }
 
     private function availableFieldsets(): string
