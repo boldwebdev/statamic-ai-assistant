@@ -556,6 +556,11 @@ return [
         // assets fields point at.
         'asset_container' => env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_ASSET_CONTAINER', null),
 
+        // Generate an alt text (one quick LLM call, vision when available) for
+        // every downloaded image BEFORE it is saved, so assets never enter the
+        // site without alt. Disable to skip the extra call per image.
+        'generate_alt' => (bool) env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_GENERATE_ALT', true),
+
         // Per-entry caps so a runaway generation can't flood the disk.
         'max_images' => max(0, (int) env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_MAX', 30)),
         'max_bytes' => max(1024, (int) env('STATAMIC_AI_ASSISTANT_IMAGE_FETCH_MAX_BYTES', 10 * 1024 * 1024)),

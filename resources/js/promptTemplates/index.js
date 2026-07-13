@@ -21,7 +21,7 @@
  * @typedef {Object} PromptTemplate
  * @property {string} id
  * @property {string} category        Grouping key ('seo', ...).
- * @property {string} icon            Inline-SVG key (see PromptTemplatesPanel).
+ * @property {string} icon            Inline-SVG key (see TEMPLATE_ICONS in EntryGeneratorPage).
  * @property {string} title           Localized.
  * @property {string} summary         One-line outcome, localized.
  * @property {string} whenToUse       Localized.
@@ -29,14 +29,16 @@
  * @property {(answers: Record<string, *>, ctx: *) => string} buildPrompt
  */
 
+import copyPageFromUrl from './content/copyPageFromUrl.js';
 import optimizePage from './seo/optimizePage.js';
 import metaDescriptions from './seo/metaDescriptions.js';
 import altTextForPage from './seo/altTextForPage.js';
 
-export const promptTemplates = [optimizePage, metaDescriptions, altTextForPage];
+export const promptTemplates = [copyPageFromUrl, optimizePage, metaDescriptions, altTextForPage];
 
 /** Category metadata in display order. */
 export const templateCategories = [
+  { id: 'content', label: 'Content' },
   { id: 'seo', label: 'SEO' },
 ];
 

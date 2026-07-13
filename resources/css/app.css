@@ -3092,6 +3092,13 @@ html.dark .translation-progress__entry-error {
     --c-muted: var(--theme-color-gray-500, #71717a);
     --c-faint: var(--theme-color-gray-400, #a1a1aa);
 
+    /* Reference-kind colors, shared by transcript chips, composer chips and links. */
+    --chip-entry: var(--c-accent);
+    --chip-asset: var(--theme-color-success, #059669);
+    --chip-folder: var(--theme-color-warning, #d97706);
+    --chip-url: #0284c7;
+    --chip-file: #dc2626;
+
     display: flex;
     flex-direction: column;
     flex: 1;
@@ -3181,18 +3188,47 @@ html.dark .translation-progress__entry-error {
     word-break: break-word;
 }
 
-/* http(s):// spans rendered via formatChatTextWithBoldUrls */
-.eg-chat__url {
-    font-weight: 700;
-    word-break: break-all;
+.eg-chat__bubble-attach {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.45rem;
+    padding-top: 0.45rem;
+    border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+    font-size: 0.75rem;
+    line-height: 1.2;
+    color: inherit;
+    opacity: 0.9;
 }
+
+.eg-chat__bubble--user p + .eg-chat__bubble-attach {
+    margin-top: 0.45rem;
+}
+
+.eg-chat__bubble-attach-name {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.eg-chat__bubble-attach-meta {
+    flex-shrink: 0;
+    opacity: 0.65;
+    font-variant-numeric: tabular-nums;
+}
+
+/* http(s):// spans rendered via formatChatTextWithBoldUrls */
 
 .eg-chat__bold {
     font-weight: 700;
 }
 
-/* "@Title" entry references rendered as colored chips */
+/* Reference chips ("@Title", "@asset:", "@folder:"). Each kind recolors via
+   --chip-color; every visual variant below derives from that one variable. */
 .eg-chat__chip {
+    --chip-color: var(--chip-entry, #2563eb);
+
     display: inline;
     padding: 0.05em 0.45em;
     margin: 0 0.05em;
@@ -3204,27 +3240,27 @@ html.dark .translation-progress__entry-error {
     word-break: break-word;
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
-    color: var(--c-accent, #2563eb);
-    background: color-mix(in srgb, var(--c-accent, #2563eb) 14%, transparent);
-    border: 1px solid color-mix(in srgb, var(--c-accent, #2563eb) 32%, transparent);
+    color: var(--chip-color);
+    background: color-mix(in srgb, var(--chip-color) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--chip-color) 32%, transparent);
 }
 
 .dark .eg-chat__chip {
-    color: color-mix(in srgb, var(--c-accent, #2563eb) 70%, #fff);
-    background: color-mix(in srgb, var(--c-accent, #2563eb) 26%, transparent);
-    border-color: color-mix(in srgb, var(--c-accent, #2563eb) 50%, transparent);
+    color: color-mix(in srgb, var(--chip-color) 70%, #fff);
+    background: color-mix(in srgb, var(--chip-color) 26%, transparent);
+    border-color: color-mix(in srgb, var(--chip-color) 50%, transparent);
 }
 
 .eg-chat__bubble--user .eg-chat__chip {
-    color: var(--c-accent, #2563eb);
-    background: color-mix(in srgb, var(--c-accent, #2563eb) 22%, #fff);
-    border-color: color-mix(in srgb, var(--c-accent, #2563eb) 45%, transparent);
+    color: var(--chip-color);
+    background: color-mix(in srgb, var(--chip-color) 22%, #fff);
+    border-color: color-mix(in srgb, var(--chip-color) 45%, transparent);
 }
 
 .dark .eg-chat__bubble--user .eg-chat__chip {
     color: #fff;
-    background: color-mix(in srgb, var(--c-accent, #2563eb) 55%, transparent);
-    border-color: color-mix(in srgb, var(--c-accent, #2563eb) 70%, transparent);
+    background: color-mix(in srgb, var(--chip-color) 55%, transparent);
+    border-color: color-mix(in srgb, var(--chip-color) 70%, transparent);
 }
 
 .eg-chat__chip-at {
@@ -3620,22 +3656,68 @@ html.dark .translation-progress__entry-error {
 }
 
 /* Asset / folder mentions: amber accents to distinguish from entry mentions. */
-.eg-chat__mention-item--asset .eg-chat__mention-title,
-.eg-chat__mention-item--folder .eg-chat__mention-title {
-    color: var(--theme-color-warning, #d97706);
+/* Picker rows use the same kind colors as the chips. */
+.eg-chat__mention-item--asset .eg-chat__mention-title {
+    color: var(--chip-asset, #059669);
 }
 
-.eg-chat__chip--asset,
+.eg-chat__mention-item--folder .eg-chat__mention-title {
+    color: var(--chip-folder, #d97706);
+}
+
+.eg-chat__chip--asset {
+    --chip-color: var(--chip-asset, #059669);
+}
+
 .eg-chat__chip--folder {
-    color: var(--theme-color-warning, #d97706);
-    background: color-mix(in srgb, var(--theme-color-warning, #d97706) 10%, var(--c-surface));
-    border-color: color-mix(in srgb, var(--theme-color-warning, #d97706) 30%, var(--c-border));
+    --chip-color: var(--chip-folder, #d97706);
+}
+
+/* URL chips are real links — keep the pill look, not the underline. */
+.eg-chat__chip--url {
+    --chip-color: var(--chip-url, #0284c7);
+    text-decoration: none;
+    font-weight: 600;
+}
+
+/* "@file:" attachment chips (icon + name + size); nothing to open, no cursor. */
+.eg-chat__chip--file {
+    --chip-color: var(--chip-file, #dc2626);
+}
+
+/* Shared paperclip glyph, colored by the chip via currentColor. */
+.eg-chip-icon {
+    display: inline-block;
+    width: 0.8em;
+    height: 0.8em;
+    margin-right: 0.3em;
+    vertical-align: -0.08em;
+    background: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48'/%3E%3C/svg%3E") no-repeat center / contain;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48'/%3E%3C/svg%3E") no-repeat center / contain;
+}
+
+/* Muted size suffix inside file chips ("· 245.3 KB"). */
+.eg-chat__chip-meta,
+.eg-composer-chip__meta {
+    margin-left: 0.3em;
+    font-weight: 500;
+    font-size: 0.88em;
+    opacity: 0.65;
+}
+
+.eg-chat__chip--entry,
+.eg-chat__chip--asset,
+.eg-chat__chip--folder,
+.eg-chat__chip--url {
     cursor: pointer;
 }
 
+.eg-chat__chip--entry:hover,
 .eg-chat__chip--asset:hover,
-.eg-chat__chip--folder:hover {
-    background: color-mix(in srgb, var(--theme-color-warning, #d97706) 18%, var(--c-surface));
+.eg-chat__chip--folder:hover,
+.eg-chat__chip--url:hover {
+    background: color-mix(in srgb, var(--chip-color) 24%, transparent);
 }
 
 /* ── Asset / folder preview modal (click on a chip) ── */
@@ -4080,6 +4162,7 @@ html.dark .eg-asset-modal__backdrop {
 
 .eg-chat__composer {
     display: flex;
+    flex-wrap: wrap;
     align-items: flex-end;
     gap: 0;
     border-radius: 1.25rem;
@@ -4088,6 +4171,12 @@ html.dark .eg-asset-modal__backdrop {
     box-shadow: var(--shadow-ui-md, 0px 2px 4px -2px rgba(0, 0, 0, 0.37));
     overflow: hidden;
     padding: 0.15rem 0.15rem 0.15rem 0;
+    transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.eg-chat__composer--drag {
+    border-color: var(--c-accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--c-accent) 35%, transparent);
 }
 
 .dark .eg-chat__composer {
@@ -4095,23 +4184,181 @@ html.dark .eg-asset-modal__backdrop {
     margin-top: 0.5rem;
 }
 
+.eg-chat__attach-pill {
+    flex: 0 0 100%;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.4rem 0.4rem 0 0.5rem;
+    padding: 0.3rem 0.5rem;
+    border-radius: 0.6rem;
+    background: color-mix(in srgb, var(--c-accent) 12%, transparent);
+    color: var(--c-text);
+    font-size: 0.75rem;
+    line-height: 1.2;
+}
+
+.eg-chat__attach-pill-name {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.eg-chat__attach-pill-meta {
+    flex-shrink: 0;
+    opacity: 0.6;
+    font-variant-numeric: tabular-nums;
+}
+
+.eg-chat__attach-pill-x {
+    margin-left: auto;
+    flex-shrink: 0;
+    width: 1.1rem;
+    height: 1.1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    opacity: 0.6;
+    line-height: 1;
+}
+
+.eg-chat__attach-pill-x:hover {
+    opacity: 1;
+    background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
 .eg-chat__composer-input {
     flex: 1;
-    min-height: 2.25rem;
+    min-width: 0;
     max-height: 10rem;
+    overflow-y: auto;
+}
+
+/* The TipTap editable inside AgentComposerInput — mirrors the old textarea. */
+.eg-chat__composer-input .ProseMirror {
+    position: relative;
+    min-height: 2.25rem;
     padding: 0.5rem 0 0.5rem 0.85rem;
-    border: none;
-    background: transparent;
     color: var(--c-text);
     font-size: 0.8125rem;
     line-height: 1.45;
-    resize: none;
     font-family: inherit;
     outline: none;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
-.eg-chat__composer-input::placeholder {
+/* Placeholder: absolutely positioned single ellipsis line, so a long
+   placeholder can never wrap or add scroll overflow — the composer height
+   stays identical whether the placeholder is shown or not. */
+.eg-chat__composer-input .ProseMirror p.is-editor-empty:first-child::before {
+    content: attr(data-placeholder);
+    position: absolute;
+    top: 0.5rem;
+    left: 0.85rem;
+    right: 0.25rem;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    pointer-events: none;
     color: var(--c-faint);
+}
+
+/* ── Composer chips (same family as the transcript's eg-chat__chip) ── */
+
+/* display:inline + box-decoration-break, exactly like the transcript chips:
+   inline boxes never grow the line box, so inserting a chip cannot change
+   the composer height. All chips are clickable (entry/asset/folder/URL). */
+.eg-composer-chip {
+    --chip-color: var(--chip-entry, #2563eb);
+
+    display: inline;
+    padding: 0.05em 0.45em;
+    margin: 0 0.05em;
+    border-radius: 0.5rem;
+    background: color-mix(in srgb, var(--chip-color) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--chip-color) 28%, transparent);
+    color: color-mix(in srgb, var(--chip-color) 82%, var(--c-text));
+    font-weight: 600;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+    cursor: pointer;
+}
+
+.eg-composer-chip:hover {
+    background: color-mix(in srgb, var(--chip-color) 22%, transparent);
+}
+
+.dark .eg-composer-chip {
+    color: color-mix(in srgb, var(--chip-color) 65%, #fff);
+}
+
+.eg-composer-chip.ProseMirror-selectednode {
+    outline: 2px solid color-mix(in srgb, var(--chip-color) 55%, transparent);
+    outline-offset: 1px;
+}
+
+.eg-composer-chip--asset {
+    --chip-color: var(--chip-asset, #059669);
+}
+
+.eg-composer-chip--folder {
+    --chip-color: var(--chip-folder, #d97706);
+}
+
+.eg-composer-chip--url {
+    --chip-color: var(--chip-url, #0284c7);
+}
+
+/* Attachment chips: informational only — no click affordance. */
+.eg-composer-chip--file {
+    --chip-color: var(--chip-file, #dc2626);
+    cursor: default;
+}
+
+.eg-composer-chip--file:hover {
+    background: color-mix(in srgb, var(--chip-color) 12%, transparent);
+}
+
+.eg-chat__composer-attach {
+    flex-shrink: 0;
+    width: 2.1rem;
+    height: 2.1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
+    color: inherit;
+    background: transparent;
+    opacity: 0.55;
+    transition: opacity 0.1s, background 0.1s;
+}
+
+.eg-chat__composer-attach:not(:disabled):hover {
+    opacity: 1;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.eg-chat__composer-attach:disabled {
+    opacity: 0.25;
+    cursor: default;
+}
+
+.eg-chat__composer-attach--on {
+    opacity: 1;
+    color: var(--c-accent);
 }
 
 .eg-chat__composer-assets {
@@ -5250,6 +5497,41 @@ html.dark .eg-asset-modal__backdrop {
     font-size: 0.75rem;
     color: var(--c-muted);
     line-height: 1.45;
+}
+
+/* ── Inline template cards (initial chat content) ── */
+
+.eg-chat__templates-lead {
+    margin: 0 0 0.5rem;
+}
+
+.eg-chat__templates {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+}
+
+.eg-chat__templates-more {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    align-self: flex-start;
+    margin: 0.35rem 0 0;
+    padding: 0.35rem 0.7rem;
+    border: 1px dashed var(--c-border);
+    border-radius: 0.6rem;
+    background: transparent;
+    color: var(--c-muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.eg-chat__templates-more:hover {
+    border-color: color-mix(in srgb, var(--c-accent, #2563eb) 45%, var(--c-border));
+    color: var(--c-text);
+    background: color-mix(in srgb, var(--c-accent, #2563eb) 6%, transparent);
 }
 
 .eg-templates__list {

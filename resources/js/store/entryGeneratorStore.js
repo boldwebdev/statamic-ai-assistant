@@ -35,7 +35,9 @@ export const state = reactive({
 
   // Composer state — lives in the store so it survives close/reopen.
   pendingPrompt: '',
-  pendingAttachedFile: null,
+  // Files for the NEXT message: [{token, file}] — token is the "@file:<name>"
+  // chip reference (null for the wizard's chipless single attachment).
+  pendingAttachedFiles: [],
 
   // Generation lifecycle.
   generating: false,        // true from request start until done event
@@ -178,24 +180,98 @@ function mentionTitlesForPrompt(text) {
   return found;
 }
 
-/** Preserve mention_titles when the server transcript overwrites the client copy. */
+// ─── Pending attachments (multi-file, chip-referenced) ──────────────────
+
+/**
+ * Register a file for the NEXT message. Returns the unique "@file:<token>"
+ * token name (slugged filename, deduped) the composer inserts as a chip, or
+ * null with `withToken: false` (full-page wizard — no chips there). The File
+ * objects live only until the message is sent.
+ */
+export function addPendingFile(file, { withToken = true } = {}) {
+  if (!file) return null;
+
+  let token = null;
+  if (withToken) {
+    const ext = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : '';
+    const slug = file.name
+      .replace(/\.[^.]+$/, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'file';
+    const taken = state.pendingAttachedFiles.map((f) => f.token);
+    token = ext ? `${slug}.${ext}` : slug;
+    for (let i = 2; taken.includes(token); i += 1) {
+      token = ext ? `${slug}-${i}.${ext}` : `${slug}-${i}`;
+    }
+  }
+
+  state.pendingAttachedFiles.push({ token, file });
+  return token;
+}
+
+export function removePendingFile(token) {
+  state.pendingAttachedFiles = state.pendingAttachedFiles.filter((f) => f.token !== token);
+}
+
+/**
+ * The files to send with a message: tokenless ones (wizard) always go; chip
+ * files only while their "@file:" token is still in the prompt — deleting a
+ * chip drops its file.
+ */
+function pendingFilesForPrompt(text) {
+  return state.pendingAttachedFiles.filter(
+    (f) => f.token === null || String(text).includes(`@file:${f.token}`),
+  );
+}
+
+/** Serializable per-turn metadata so chat chips can show name + size later. */
+function attachmentsMeta(files) {
+  return files.map(({ token, file }) => ({
+    token,
+    name: file.name || '',
+    size: Number(file.size) || 0,
+  }));
+}
+
+/** Append the given pending files to a FormData body (shared by all sends). */
+function appendAttachments(formData, files) {
+  for (const { token, file } of files) {
+    formData.append('attachments[]', file, token || file.name);
+  }
+}
+
+/** Preserve client-only turn metadata (mention_titles, attachments) when the
+ * server transcript overwrites the client copy. The server never sees these
+ * fields, so without this they'd vanish on the first poll. */
 function mergeTranscriptMentions(incoming, previous) {
   if (!Array.isArray(incoming)) return incoming;
 
   const prevByText = new Map();
   for (const turn of previous || []) {
-    if (turn?.role === 'user' && turn.text && Array.isArray(turn.mention_titles) && turn.mention_titles.length) {
-      prevByText.set(turn.text, turn.mention_titles);
-    }
+    if (turn?.role !== 'user' || !turn.text) continue;
+    prevByText.set(turn.text, {
+      mention_titles: Array.isArray(turn.mention_titles) ? turn.mention_titles : [],
+      // `attachment` (single object) is the legacy shape from older saved chats.
+      attachments: Array.isArray(turn.attachments) ? turn.attachments : [],
+      attachment: turn.attachment || null,
+    });
   }
 
   return incoming.map((turn) => {
     if (turn?.role !== 'user') return turn;
-    const preserved = prevByText.get(turn.text) || [];
+    const preserved = prevByText.get(turn.text) || {};
     const detected = mentionTitlesForPrompt(turn.text);
-    const merged = [...new Set([...preserved, ...detected])];
-    if (merged.length === 0) return turn;
-    return { ...turn, mention_titles: merged };
+    const merged = [...new Set([...(preserved.mention_titles || []), ...detected])];
+    const attachments = Array.isArray(turn.attachments) && turn.attachments.length
+      ? turn.attachments
+      : (preserved.attachments || []);
+    const attachment = turn.attachment || preserved.attachment || null;
+    const next = { ...turn };
+    if (merged.length) next.mention_titles = merged;
+    if (attachments.length) next.attachments = attachments;
+    if (attachment) next.attachment = attachment;
+    return next;
   });
 }
 
@@ -236,7 +312,7 @@ export function openChatFromHistory(id) {
   if (!record) return false;
 
   resetGenerationOnly();
-  state.pendingAttachedFile = null;
+  state.pendingAttachedFiles = [];
   state.currentChatId = record.id;
   state.chatSessionId = record.sessionId || null;
   state.mentionedTitles = [...(record.mentionedTitles || [])];
@@ -520,19 +596,20 @@ function scheduleGenerationBatchPoll() {
   pollGenerationBatchOnce();
 }
 
-export async function startGeneration({ prompt, attachedFile, useAutoTarget, collection, blueprint }) {
+export async function startGeneration({ prompt, useAutoTarget, collection, blueprint }) {
   if (state.generating) return;
   const text = (prompt || '').trim();
   if (text.length < 10) return;
 
   const mentionTitles = mentionTitlesForPrompt(text);
+  const files = pendingFilesForPrompt(text);
 
   resetGenerationOnly();
   state.generating = true;
   state.planning = true;
   state.pendingPrompt = '';
   // Optimistic first user turn so the chat shows the message before the first poll.
-  state.transcript = [{ role: 'user', text, entry_ids: [], kind: null, mention_titles: mentionTitles }];
+  state.transcript = [{ role: 'user', text, entry_ids: [], kind: null, mention_titles: mentionTitles, attachments: attachmentsMeta(files) }];
   state.currentChatId = newChatId();
   persistChatHistory();
 
@@ -545,7 +622,10 @@ export async function startGeneration({ prompt, attachedFile, useAutoTarget, col
     formData.append('auto_resolve_target', '0');
   }
   formData.append('prompt', text);
-  if (attachedFile) formData.append('attachment', attachedFile);
+  appendAttachments(formData, files);
+  // The file payloads are now captured by FormData; clear the scratch list so
+  // composer chips reference nothing stale after sending.
+  state.pendingAttachedFiles = [];
 
   state._abortController = new AbortController();
 
@@ -732,6 +812,8 @@ export async function continueGeneration(prompt) {
   if (state.generating || text.length < 10) return;
   if (!state.chatSessionId && state.transcript.length === 0) return;
 
+  const files = pendingFilesForPrompt(text);
+
   // Turns as the resume endpoint expects them — captured BEFORE the optimistic
   // append so the new prompt isn't duplicated when the server re-appends it.
   const priorTurns = state.transcript
@@ -752,12 +834,25 @@ export async function continueGeneration(prompt) {
 
   // Optimistically show the user's message; the next poll's server transcript
   // (which also contains it) overwrites this idempotently.
-  state.transcript = [...state.transcript, { role: 'user', text, entry_ids: [], kind: null, mention_titles: mentionTitles }];
+  state.transcript = [...state.transcript, { role: 'user', text, entry_ids: [], kind: null, mention_titles: mentionTitles, attachments: attachmentsMeta(files) }];
   persistChatHistory();
 
   const headers = { 'X-Requested-With': 'XMLHttpRequest' };
   const xsrf = getCpXsrfToken();
   if (xsrf) headers['X-XSRF-TOKEN'] = xsrf;
+
+  // Attachments are scoped to this turn — once the request bodies are built
+  // the file payloads are captured, so clear the scratch list immediately.
+  const continueBody = new FormData();
+  continueBody.append('prompt', text);
+  appendAttachments(continueBody, files);
+
+  const resumeBody = new FormData();
+  resumeBody.append('prompt', text);
+  resumeBody.append('transcript', JSON.stringify(priorTurns));
+  appendAttachments(resumeBody, files);
+
+  state.pendingAttachedFiles = [];
 
   try {
     let sessionId = null;
@@ -766,7 +861,7 @@ export async function continueGeneration(prompt) {
       try {
         const { data } = await axios.post(
           `/cp/ai-generate/generate-continue/${state.chatSessionId}`,
-          { prompt: text },
+          continueBody,
           { headers, withCredentials: true },
         );
         sessionId = data.session_id || state.chatSessionId;
@@ -779,7 +874,7 @@ export async function continueGeneration(prompt) {
     if (!sessionId) {
       const { data } = await axios.post(
         '/cp/ai-generate/generate-resume',
-        { prompt: text, transcript: priorTurns },
+        resumeBody,
         { headers, withCredentials: true },
       );
       sessionId = data.session_id;
@@ -1061,11 +1156,11 @@ function resetGenerationOnly() {
   state.hasServerActivity = false;
 }
 
-/** Clear everything except `active`; used when user clicks "New request". */
+/** Clear everything except `active`; used when user clicks "New chat". */
 export function reset() {
   resetGenerationOnly();
   state.mentionedTitles = [];
-  state.pendingAttachedFile = null;
+  state.pendingAttachedFiles = [];
   state._backgroundedAt = null;
 }
 

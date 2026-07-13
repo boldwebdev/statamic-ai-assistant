@@ -12,6 +12,7 @@ use BoldWeb\StatamicAiAssistant\Support\EntryCreationPolicy;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Statamic\Facades\Collection;
 use Statamic\Facades\Site;
@@ -24,14 +25,18 @@ class EntryGeneratorController
 
     private EntryGenerationBatchService $entryBatch;
 
+    private \BoldWeb\StatamicAiAssistant\Services\DocumentTextExtractor $documents;
+
     public function __construct(
         EntryGeneratorService $generator,
         AbstractAiService $aiService,
         EntryGenerationBatchService $entryBatch,
+        \BoldWeb\StatamicAiAssistant\Services\DocumentTextExtractor $documents,
     ) {
         $this->generator = $generator;
         $this->aiService = $aiService;
         $this->entryBatch = $entryBatch;
+        $this->documents = $documents;
     }
 
     /**
@@ -188,6 +193,11 @@ class EntryGeneratorController
             'kind' => 'asset',
             'name' => $asset->basename(),
             'meta' => (string) $container->title().($folder !== '' && $folder !== '.' ? ' · '.$folder : ''),
+            // Preview capability drives the modal's presentation: images show a
+            // thumbnail, everything else a document card ('file'). New media
+            // kinds (video, …) slot in here without touching the dispatch.
+            'preview' => $asset->isImage() ? 'image' : 'file',
+            'size' => (int) $asset->size(),
             'is_image' => (bool) $asset->isImage(),
             'thumbnail' => $asset->isImage() ? $asset->thumbnailUrl('small') : null,
             'extension' => strtoupper((string) $asset->extension()),
@@ -292,14 +302,12 @@ class EntryGeneratorController
             'blueprint' => 'nullable|string',
             'prompt' => 'required|string|min:10',
             'attachment' => 'nullable|file|mimes:pdf,txt|max:10240',
+            'attachments' => 'nullable|array|max:6',
+            'attachments.*' => 'file|mimes:pdf,txt|max:10240',
             'auto_resolve_target' => 'nullable|boolean',
         ]);
 
-        $attachmentContent = null;
-
-        if ($file = $request->file('attachment')) {
-            $attachmentContent = $this->extractFileContent($file);
-        }
+        $attachmentContent = $this->attachmentContentFromRequest($request);
 
         $autoResolve = $request->boolean('auto_resolve_target');
 
@@ -368,14 +376,12 @@ class EntryGeneratorController
             'blueprint' => 'nullable|string',
             'prompt' => 'required|string|min:10',
             'attachment' => 'nullable|file|mimes:pdf,txt|max:10240',
+            'attachments' => 'nullable|array|max:6',
+            'attachments.*' => 'file|mimes:pdf,txt|max:10240',
             'auto_resolve_target' => 'nullable|boolean',
         ]);
 
-        $attachmentContent = null;
-
-        if ($file = $request->file('attachment')) {
-            $attachmentContent = $this->extractFileContent($file);
-        }
+        $attachmentContent = $this->attachmentContentFromRequest($request);
 
         $autoResolve = $request->boolean('auto_resolve_target');
 
@@ -570,6 +576,9 @@ class EntryGeneratorController
     {
         $data = $request->validate([
             'prompt' => 'required|string|min:10',
+            'attachment' => 'nullable|file|mimes:pdf,txt|max:10240',
+            'attachments' => 'nullable|array|max:6',
+            'attachments.*' => 'file|mimes:pdf,txt|max:10240',
         ]);
 
         $session = $this->entryBatch->getSession($sessionId);
@@ -590,7 +599,9 @@ class EntryGeneratorController
         $maxPlanEntries = EntryCreationPolicy::maxPlanEntries();
         $advancedTools = AgentAccess::advancedToolsActive();
 
-        if (! $this->entryBatch->reopenForFollowUp($sessionId, (string) $data['prompt'], $maxPlanEntries, $advancedTools)) {
+        $attachmentContent = $this->attachmentContentFromRequest($request);
+
+        if (! $this->entryBatch->reopenForFollowUp($sessionId, (string) $data['prompt'], $maxPlanEntries, $advancedTools, $attachmentContent)) {
             return response()->json(['error' => __('This chat has expired. Start a new request.')], 404);
         }
 
@@ -613,6 +624,9 @@ class EntryGeneratorController
             'transcript.*.role' => 'required|string|in:user,assistant',
             'transcript.*.text' => 'required|string|max:20000',
             'transcript.*.kind' => 'nullable|string|max:32',
+            'attachment' => 'nullable|file|mimes:pdf,txt|max:10240',
+            'attachments' => 'nullable|array|max:6',
+            'attachments.*' => 'file|mimes:pdf,txt|max:10240',
         ]);
 
         if ($err = $this->entryBatchQueueSetupError()) {
@@ -623,8 +637,10 @@ class EntryGeneratorController
         $maxPlanEntries = EntryCreationPolicy::maxPlanEntries();
         $advancedTools = AgentAccess::advancedToolsActive();
 
+        $attachmentContent = $this->attachmentContentFromRequest($request);
+
         $sessionId = $this->entryBatch->restoreSessionFromTranscript($locale, $data['transcript'], $advancedTools);
-        $this->entryBatch->reopenForFollowUp($sessionId, (string) $data['prompt'], $maxPlanEntries, $advancedTools);
+        $this->entryBatch->reopenForFollowUp($sessionId, (string) $data['prompt'], $maxPlanEntries, $advancedTools, $attachmentContent);
 
         PlanEntriesJob::dispatch($sessionId);
 
@@ -678,47 +694,99 @@ class EntryGeneratorController
 
     private function entryBatchQueueSetupError(): ?string
     {
-        if (config('queue.default') !== 'sync') {
-            return null;
+        if (config('queue.default') === 'sync') {
+            return (string) __(
+                'BOLD agent batch generation requires an asynchronous queue. Set QUEUE_CONNECTION=redis in your .env, then start php artisan horizon or php artisan queue:work. The sync driver cannot be used.',
+            );
         }
 
-        return (string) __(
-            'BOLD agent batch generation requires an asynchronous queue. Set QUEUE_CONNECTION=redis in your .env, then start php artisan horizon or php artisan queue:work. The sync driver cannot be used.',
-        );
+        if ($missing = $this->missingQueueDatabaseTables()) {
+            return (string) __(
+                'The addon queue relies on database tables that are not set up yet (:missing). Run `php artisan migrate --force` to create them, then restart php artisan horizon or php artisan queue:work.',
+                ['missing' => implode(', ', $missing)],
+            );
+        }
+
+        return null;
     }
 
     /**
-     * Extract text content from an uploaded file.
+     * Queue-related database tables that are missing or unreachable — typically
+     * because `php artisan migrate --force` has not been run locally. Empty when
+     * the database is ready. Mirrors the Horizon/sync setup guard above.
      */
-    private function extractFileContent(\Illuminate\Http\UploadedFile $file): ?string
+    private function missingQueueDatabaseTables(): array
+    {
+        $checks = [];
+
+        if (config('queue.failed.driver') === 'database-uuids') {
+            $checks[] = [
+                config('queue.failed.database', config('database.default')),
+                config('queue.failed.table', 'failed_jobs'),
+            ];
+        }
+
+        // Laravel Bus batching backs the translation/navigation batch runs.
+        $checks[] = [
+            config('queue.batching.database', config('database.default')),
+            config('queue.batching.table', 'job_batches'),
+        ];
+
+        $missing = [];
+
+        foreach ($checks as [$connection, $table]) {
+            if (! $this->queueTableExists($connection, $table)) {
+                $missing[] = $table;
+            }
+        }
+
+        return $missing;
+    }
+
+    private function queueTableExists(string $connection, string $table): bool
     {
         try {
-            $extension = strtolower($file->getClientOriginalExtension());
-
-            if ($extension === 'pdf') {
-                $parser = new \Smalot\PdfParser\Parser;
-                $pdf = $parser->parseFile($file->getRealPath());
-                $content = $pdf->getText();
-            } else {
-                $content = file_get_contents($file->getRealPath());
-            }
-
-            if (! $content) {
-                return null;
-            }
-
-            // Truncate to ~8000 words to stay within LLM context window
-            $words = explode(' ', $content);
-
-            if (count($words) > 8000) {
-                $content = implode(' ', array_slice($words, 0, 8000))."\n\n[Content truncated...]";
-            }
-
-            return $content;
-        } catch (\Exception $e) {
-            Log::warning('Attachment text extraction failed', ['extension' => $extension ?? null, 'error' => $e->getMessage()]);
-
-            return null;
+            return Schema::connection($connection)->hasTable($table);
+        } catch (\Throwable) {
+            return false;
         }
     }
+
+    /**
+     * Extract text content from an optional attachment uploaded with a chat
+     * turn (initial or follow-up). Centralized so continue/resume mirror the
+     * streaming start endpoint's handling.
+     */
+    private function attachmentContentFromRequest(Request $request): ?string
+    {
+        $files = [];
+        if ($single = $request->file('attachment')) {
+            $files[] = $single;
+        }
+        $many = $request->file('attachments');
+        foreach (is_array($many) ? $many : [] as $file) {
+            if ($file) {
+                $files[] = $file;
+            }
+        }
+
+        // Each document is labeled with its client filename — that name equals
+        // the "@file:<token>" the user references in the prompt, so the planner
+        // can match mentions to contents. Unreadable files (e.g. scanned PDFs
+        // with no embedded text) are still listed with the reason, never
+        // dropped silently — otherwise the model invents content from the name.
+        $parts = [];
+        foreach ($files as $file) {
+            $name = $file->getClientOriginalName();
+            $result = $this->documents->extractUploadedFile($file);
+
+            $parts[] = $result['content'] !== null
+                ? "── Attachment: {$name} ──\n".trim($result['content'])
+                : "── Attachment: {$name} (UNREADABLE — {$result['reason']}) ──\n"
+                    ."This file was attached but its text could not be extracted. Tell the user this and do not guess its contents.";
+        }
+
+        return $parts === [] ? null : implode("\n\n", $parts);
+    }
+
 }

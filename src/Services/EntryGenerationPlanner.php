@@ -277,7 +277,9 @@ class EntryGenerationPlanner
             ."- `read_nav_tree`: read a navigation as a hierarchy of page titles (with URLs + linked entry ids). Call with no args to list navigations, or a `handle` for its tree. Use it to understand site structure or pick internal link targets.\n"
             ."- `list_taxonomies`: list taxonomies, or the terms of one (pass a `taxonomy` handle). Use the returned slugs when a per-entry prompt must set a `terms` field, so you only reference terms that exist.\n"
             ."- `list_assets`: browse asset containers/folders and their files (optional `search` filters by filename). Use it to explore `@folder:container::path` references.\n"
+            ."- `read_document`: read the TEXT of a pdf/txt/md/csv document in the asset library (exact \"container::path\" ref). When the user references or asks about a document asset (e.g. `@asset:…report.pdf`), call this — NEVER claim you cannot read PDFs.\n"
             ."- IMPORTANT: `@asset:container::path` and `@folder:container::path` references from the user are EXACT, already-validated references — use everything after `@asset:` / `@folder:` directly as the `ref`/container+folder arguments of the asset tools. NEVER verify their existence with list_assets first, and never claim such a reference does not exist.\n"
+            ."- IMPORTANT: `@file:<name>` mentions (e.g. `@file:report.pdf`) are documents the user UPLOADED FROM THEIR BROWSER for THIS message — they are NOT in the asset library. Their extracted text is already provided inline below under \"attached document\" (each labelled `── Attachment: <name> ──`). Read and answer about them, and base entries on them, straight from that inline text. NEVER call read_document, list_assets or fetch_page_content for an `@file:` mention, and NEVER say it cannot be found — it is not a library asset by design.\n"
             ."- IMPORTANT: such references point to FILES in the asset library, never to collections or entries — even when a collection shares the folder's name (folder \"apartments\" ≠ collection \"apartments\"). Questions about them (\"how many\", \"which folder has more\", \"does it have alt text\") are answered from the REFERENCED ASSETS block in the user message (or list_assets), never from the entries catalog.\n"
             ."- `use_assets`: mark existing assets (exact \"container::path\" refs from list_assets) as the PREFERRED imagery for the entries of this request — call it BEFORE dispatching the entry jobs. NOTE: assets/folders the user referenced with @asset:/@folder: in their newest message are queued automatically — use_assets is only needed for assets YOU choose (e.g. picked from list_assets).\n"
             ."- `update_asset`: update an asset's METADATA (alt texts, captions, custom fields). Sites often keep one handle per language (alt, alt_text_fr, …) — write each language to its own handle, translating yourself. Asset metadata changes apply immediately.\n"
@@ -316,6 +318,21 @@ class EntryGenerationPlanner
         $attachmentPart = $attachment
             ? "\n\nAdditional context from an attached document (excerpt):\n".Str::limit($attachment, 6000)
             : '';
+
+        if ($attachment) {
+            // The user attached a document: it IS the source material. Make the
+            // planner base every planned entry on the attachment's content, keep
+            // the relevant facts inside each per-entry prompt, and — critically —
+            // NOT call fetch_page_content for it (the worker re-appends the full
+            // attachment and is told to use it, not go online).
+            $system .= "\n\nATTACHED DOCUMENT RULES:\n"
+                ."- The user uploaded one or more documents from their browser for this message (referenced in the prompt as `@file:<name>`); their extracted text is included below, each labelled `── Attachment: <name> ──`. This inline text IS the document content — it is NOT in the asset library.\n"
+                ."- To match an `@file:report.pdf` mention to its content, find the `── Attachment: report.pdf ──` block below; do not call read_document / list_assets / fetch_page_content for it.\n"
+                ."- NEVER fabricate a document's contents. Use ONLY what is in its `── Attachment ──` block. If a block is marked `(UNREADABLE — …)`, its text could not be extracted (e.g. a scanned/image-only PDF): tell the user plainly that you could not read that file and why, and do NOT guess what it contains from its name. Inventing a plausible document is a serious error.\n"
+                ."- If the user is only ASKING about a readable attachment (\"what is in @file:x.pdf\", \"summarise it\"), call **answer_question** with the CONTENT they asked for — quote or summarise the document's actual text into the `answer`. The answer must BE that content; never reply that you have answered, that the text was provided, or that no lookup was needed.\n"
+                ."- When creating/updating: treat the attachment as the PRIMARY source. In every create_entry_job / update_entry_job `prompt`, include the concrete facts, names, numbers, structure and wording from the attachment that the worker needs to write THAT entry. A generic brief like \"create a page about garages\" is not enough — transcribe the relevant portion into the prompt.\n"
+                ."- If an attachment is too long for one entry, split its content across multiple create_entry_job calls (one per section/item), each prompt carrying that section's content.\n";
+        }
 
         // Build the message array from the conversation transcript so follow-up
         // turns carry context. Only the newest user turn carries the catalog +
@@ -643,6 +660,7 @@ class EntryGenerationPlanner
             new ListAssetsTool,
             new UseAssetsTool,
             new UpdateAssetTool,
+            new \BoldWeb\StatamicAiAssistant\Tools\ReadDocumentTool,
         ];
 
         if ($this->aiService->supportsVision()) {
@@ -1620,7 +1638,7 @@ class EntryGenerationPlanner
                     'properties' => [
                         'answer' => [
                             'type' => 'string',
-                            'description' => 'The complete answer to show the user, in their language. Include the entry title and id when relevant. This text is displayed verbatim — it must be the answer itself, never a remark about answering (not "no action needed", not "I will answer directly").',
+                            'description' => 'The complete answer to show the user, in their language. Include the entry title and id when relevant. When asked about a document/attachment, put the ACTUAL content here — quote or summarise the document text itself. This text is displayed verbatim, so it must BE the answer, never a remark about answering or about your process (NOT "no action needed", "I will answer directly", "I have already answered", "using the provided document text", "no lookup is required").',
                         ],
                     ],
                     'required' => ['answer'],

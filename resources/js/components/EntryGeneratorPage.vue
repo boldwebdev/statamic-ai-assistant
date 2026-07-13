@@ -31,20 +31,6 @@
             <path d="M12 5v14M5 12h14" />
           </svg>
         </button>
-        <button
-          type="button"
-          class="eg-topbar-btn"
-          :class="{ 'eg-topbar-btn--active': templatesOpen }"
-          :disabled="store.generating || store.planning"
-          :title="__('Prompt templates')"
-          :aria-label="__('Prompt templates')"
-          @click="toggleTemplates"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true">
-            <path d="M12 3l1.8 4.6L18.5 9l-4.7 1.4L12 15l-1.8-4.6L5.5 9l4.7-1.4L12 3z" />
-            <path d="M18 14l.9 2.2L21 17l-2.1.8L18 20l-.9-2.2L15 17l2.1-.8L18 14z" />
-          </svg>
-        </button>
       </div>
       <button
         type="button"
@@ -93,15 +79,9 @@
       />
     </Transition>
 
-    <!-- Prompt templates: slide-over gallery of ready-made prompts.
+    <!-- Prompt templates: when a template with clarifying questions is picked
+         from the inline cards, this form slide-over collects the answers.
          Self-contained module (resources/js/promptTemplates/). -->
-    <Transition name="eg-history">
-      <PromptTemplatesPanel
-        v-if="templatesOpen && !activeTemplate"
-        @select="onTemplateSelect"
-        @close="templatesOpen = false"
-      />
-    </Transition>
     <Transition name="eg-history">
       <PromptTemplateForm
         v-if="templatesOpen && activeTemplate"
@@ -185,7 +165,9 @@
             </div>
           </template>
 
-          <!-- Single asset: image (or filetype badge) + details -->
+          <!-- Single asset, dispatched by preview capability: images get a real
+               thumbnail; documents (PDF, TXT, …) get a type badge + size, with
+               Statamic's own asset editor as the primary action. -->
           <template v-else>
             <div v-if="assetPreview.data.thumbnail" class="eg-asset-modal__media">
               <img :src="assetPreview.data.thumbnail" :alt="assetPreview.data.alt || assetPreview.data.name" />
@@ -197,20 +179,29 @@
               <p v-if="assetPreview.data.width" class="eg-asset-modal__meta">
                 {{ assetPreview.data.width }} × {{ assetPreview.data.height }} px · {{ assetPreview.data.extension }}
               </p>
+              <p v-else-if="assetPreview.data.size" class="eg-asset-modal__meta">
+                {{ assetPreview.data.extension }} · {{ formatFileSize(assetPreview.data.size) }}
+              </p>
               <p v-if="assetPreview.data.alt" class="eg-asset-modal__alt">“{{ assetPreview.data.alt }}”</p>
             </div>
           </template>
 
           <div class="eg-asset-modal__foot">
-            <a :href="assetBrowseUrl" class="eg-asset-modal__link" target="_blank" rel="noopener">
-              {{ __('Open in assets') }} ↗
-            </a>
-            <Button
-              variant="primary"
-              size="sm"
-              :text="__('Reference in chat')"
-              @click="insertPreviewedAssetRef"
-            />
+            <template v-if="assetPreviewIsDocument">
+              <Button variant="default" size="sm" :text="__('Reference in chat')" @click="insertPreviewedAssetRef" />
+              <Button variant="primary" size="sm" :text="__('Open in Statamic')" @click="openPreviewedAssetInCp" />
+            </template>
+            <template v-else>
+              <a :href="assetBrowseUrl" class="eg-asset-modal__link" target="_blank" rel="noopener">
+                {{ __('Open in assets') }} ↗
+              </a>
+              <Button
+                variant="primary"
+                size="sm"
+                :text="__('Reference in chat')"
+                @click="insertPreviewedAssetRef"
+              />
+            </template>
           </div>
         </template>
 
@@ -238,47 +229,49 @@
       @click="onChatStreamClick"
     >
 
-      <!-- Agent: welcome -->
-      <div class="eg-chat__msg eg-chat__msg--agent">
-        <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
-        <p>{{ __("Describe what you need. I'll choose the right collection and draft the entry for you.") }}</p>
-      </div>
-
-      <!-- Step 2: brief -->
+      <!-- Step 2: prompt-template cards shown inline as the initial content.
+           First 3 templates surface immediately; "More templates" reveals the rest. -->
       <div v-if="renderedStep === 2" class="eg-chat__msg eg-chat__msg--agent">
         <span class="eg-chat__sender">{{ __('BOLD agent') }}</span>
-        <p>{{ __('Tell me what you want. Examples:') }}</p>
-        <ul class="eg-chat__examples">
-          <li>{{ __('“Create a page about our new pilot program”') }}</li>
-          <li>{{ __('“Create an entry that takes exactly the same content as https://www.example.com/about-us”') }}</li>
-        </ul>
-
-        <div class="eg-chat__card">
-          <div class="eg-chat__form-row">
-            <label class="eg-chat__form-label">{{ __('Attachment') }}</label>
-            <div
-              class="eg-chat__drop"
-              :class="{ 'eg-chat__drop--active': dragOver }"
-              @dragover.prevent="dragOver = true"
-              @dragleave="dragOver = false"
-              @drop.prevent="handleDrop"
-            >
-              <template v-if="!attachedFile">
-                <span class="eg-chat__drop-text">
-                  {{ __('Drop PDF/TXT or') }}
-                  <button type="button" class="eg-chat__drop-link" @click="$refs.fileInput.click()">{{ __('browse') }}</button>
-                </span>
-              </template>
-              <template v-else>
-                <span class="eg-chat__file">
-                  <span class="eg-chat__file-name">{{ attachedFile.name }}</span>
-                  <span class="eg-chat__file-meta">{{ formatFileSize(attachedFile.size) }}</span>
-                  <button type="button" class="eg-chat__file-x" @click="removeFile">&times;</button>
-                </span>
-              </template>
-              <input ref="fileInput" type="file" accept=".pdf,.txt" class="sr-only" @change="handleFileSelect" />
-            </div>
-          </div>
+        <p class="eg-chat__templates-lead">{{ __('Start from a template, or type your own request below.') }}</p>
+        <div class="eg-chat__templates">
+          <button
+            v-for="tpl in visibleTemplates"
+            :key="tpl.id"
+            type="button"
+            class="eg-templates__card"
+            @click="onTemplateSelect(tpl)"
+          >
+            <span class="eg-templates__card-icon" aria-hidden="true" v-html="templateIconSvg(tpl.icon)"></span>
+            <span class="eg-templates__card-body">
+              <span class="eg-templates__card-title">{{ __(tpl.title) }}</span>
+              <span class="eg-templates__card-summary">{{ __(tpl.summary) }}</span>
+            </span>
+            <span class="eg-templates__card-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+                <path d="M9 18l6-6-6-6" />
+              </svg>
+            </span>
+          </button>
+          <button
+            v-if="!showAllTemplates && allTemplates.length > initialTemplateCount"
+            type="button"
+            class="eg-chat__templates-more"
+            @click="showAllTemplates = true"
+          >
+            {{ __('More templates') }}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="14" height="14" aria-hidden="true">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+          <button
+            v-else-if="showAllTemplates && allTemplates.length > initialTemplateCount"
+            type="button"
+            class="eg-chat__templates-more"
+            @click="showAllTemplates = false"
+          >
+            {{ __('Show fewer') }}
+          </button>
         </div>
       </div>
 
@@ -289,7 +282,16 @@
           <div class="eg-chat__user-wrap">
             <span class="eg-chat__sender">{{ __('You') }}</span>
             <div class="eg-chat__bubble eg-chat__bubble--user">
-              <p v-html="chatHtml(turn.text, turn.mention_titles)"></p>
+              <p v-html="chatHtml(turn.text, turn.mention_titles, turn.attachments)"></p>
+              <!-- Legacy single-attachment pill (old saved chats — new turns
+                   render their attachments as inline "@file:" chips). -->
+              <div v-if="turn.attachment" class="eg-chat__bubble-attach">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="14" height="14" aria-hidden="true">
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+                </svg>
+                <span class="eg-chat__bubble-attach-name">{{ turn.attachment.name }}</span>
+                <span v-if="turn.attachment.size" class="eg-chat__bubble-attach-meta">{{ formatFileSize(turn.attachment.size) }}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -457,20 +459,40 @@
           </template>
         </div>
 
-        <div class="eg-chat__composer">
-          <textarea
-            ref="promptTextarea"
+        <div
+          class="eg-chat__composer"
+          :class="{ 'eg-chat__composer--drag': dragOver }"
+          @dragover.prevent="dragOver = true"
+          @dragleave="dragOver = false"
+          @drop.prevent="handleDrop"
+        >
+          <AgentComposerInput
+            ref="composer"
             v-model="store.pendingPrompt"
             class="eg-chat__composer-input"
             :placeholder="composerPlaceholder"
-            rows="1"
             :disabled="store.generating"
-            @keydown="onComposerKeydown"
-            @keyup="onComposerKeyup"
-            @click="updateMentionFromCaret"
+            :known-titles="store.mentionedTitles"
+            :file-meta="pendingFileMeta"
+            :keydown-interceptor="composerKeydownInterceptor"
+            @send="handleComposerSend"
+            @mention-query="onMentionQuery"
+            @chip-click="onComposerChipClick"
             @blur="onComposerBlur"
-            @input="onComposerInput"
           />
+          <button
+            type="button"
+            class="eg-chat__composer-attach"
+            :disabled="store.generating"
+            :title="__('Attach PDF or TXT')"
+            :aria-label="__('Attach PDF or TXT')"
+            @click="$refs.fileInput.click()"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="17" height="17" aria-hidden="true">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
+          <input ref="fileInput" type="file" accept=".pdf,.txt" multiple class="sr-only" @change="handleFileSelect" />
           <button
             type="button"
             class="eg-chat__composer-assets"
@@ -516,7 +538,7 @@
         </template>
         <template v-else-if="renderedStep === 3">
           <span v-if="readyOrSavedSummary" class="eg-chat__actions-summary">{{ readyOrSavedSummary }}</span>
-          <Button variant="default" :text="__('New request')" @click="resetForNewRequest" />
+          <Button variant="default" :text="__('New chat')" @click="resetForNewRequest" />
           <Button
             v-if="canSaveAll"
             variant="default"
@@ -650,7 +672,7 @@
           <p v-html="chatHtml(store.plannerAnswer)"></p>
         </div>
         <div class="entry-generator__panel-footer">
-          <Button variant="primary" :text="__('New request')" @click="resetForNewRequest" />
+          <Button variant="primary" :text="__('New chat')" @click="resetForNewRequest" />
         </div>
       </template>
       <template v-else>
@@ -727,9 +749,14 @@ import { Button } from '@statamic/cms/ui';
 import AiModalLoadingOverlay from './AiModalLoadingOverlay.vue';
 import AgentAssetSelectorStack from './AgentAssetSelectorStack.vue';
 import EntryGeneratorEntryCard from './EntryGeneratorEntryCard.vue';
+import { defineAsyncComponent } from 'vue';
 import EntryGeneratorChatHistory from './EntryGeneratorChatHistory.vue';
-import PromptTemplatesPanel from './PromptTemplatesPanel.vue';
 import PromptTemplateForm from './PromptTemplateForm.vue';
+
+// TipTap only loads when the drawer composer actually renders — it must not
+// weigh down the CP-wide bundle (this addon's JS runs on every CP page).
+const AgentComposerInput = defineAsyncComponent(() => import('./AgentComposerInput.vue'));
+import { promptTemplates } from '../promptTemplates/index.js';
 import {
   state,
   STATUS,
@@ -745,6 +772,8 @@ import {
   stopChatTurn,
   pushActivityLine,
   registerMention,
+  addPendingFile,
+  removePendingFile,
   listChatHistory,
   openChatFromHistory,
   deleteChatFromHistory,
@@ -752,10 +781,11 @@ import {
   setToaster,
 } from '../store/entryGeneratorStore.js';
 import { formatChatMessageHtml } from '../formatChatUrls.js';
+import { formatFileSize } from '../composer/promptTokens.js';
 
 export default {
   name: 'EntryGeneratorPage',
-  components: { Button, AiModalLoadingOverlay, EntryGeneratorEntryCard, AgentAssetSelectorStack, EntryGeneratorChatHistory, PromptTemplatesPanel, PromptTemplateForm },
+  components: { Button, AiModalLoadingOverlay, EntryGeneratorEntryCard, AgentAssetSelectorStack, EntryGeneratorChatHistory, AgentComposerInput, PromptTemplateForm },
 
   props: {
     drawer: { type: Boolean, default: false },
@@ -781,10 +811,13 @@ export default {
       // localStorage each time the panel opens — no live sync needed.
       historyOpen: false,
       historyChats: [],
-      // Prompt templates slide-over (drawer only). `activeTemplate` swaps the
-      // gallery for the clarifying-questions form for the chosen template.
+      // Prompt templates: shown inline as the initial chat content (first 3,
+      // then "More templates" reveals the rest). `templatesOpen` + `activeTemplate`
+      // drive the clarifying-questions form slide-over for templates that need it.
       templatesOpen: false,
       activeTemplate: null,
+      showAllTemplates: false,
+      initialTemplateCount: 3,
       collections: [],
       selectedCollection: '',
       selectedBlueprint: '',
@@ -818,8 +851,6 @@ export default {
         results: [],
         activeIndex: 0,
         loading: false,
-        start: 0, // index of the triggering "@" in the textarea value
-        end: 0, // caret index when the query was captured
         _reqId: 0,
         _debounce: null,
         _blurTimer: null,
@@ -854,6 +885,20 @@ export default {
       return [this.__('Configure'), this.__('Prompt'), this.__('Preview')];
     },
 
+    /** All registered prompt templates, in registry order. */
+    allTemplates() {
+      return promptTemplates;
+    },
+
+    /** Templates shown inline in the initial chat: first 3 unless expanded. */
+    visibleTemplates() {
+      const all = this.allTemplates;
+      if (this.showAllTemplates || all.length <= this.initialTemplateCount) {
+        return all;
+      }
+      return all.slice(0, this.initialTemplateCount);
+    },
+
     /** Deep link into Statamic's asset browser for the previewed ref. */
     assetBrowseUrl() {
       const ref = this.assetPreview.ref || '';
@@ -880,9 +925,29 @@ export default {
       return (this.store.pendingPrompt || '').trim().length >= 10;
     },
 
-    /** Read-only proxy onto the store's attached file. */
+    /**
+     * The wizard's single (chipless) attachment. Drawer attachments carry a
+     * token and render as "@file:" chips instead.
+     */
     attachedFile() {
-      return this.store.pendingAttachedFile;
+      const entry = this.store.pendingAttachedFiles.find((f) => f.token === null);
+      return entry ? entry.file : null;
+    },
+
+    /** Pending attachment metadata by token, for the composer's file chips. */
+    pendingFileMeta() {
+      const meta = {};
+      for (const { token, file } of this.store.pendingAttachedFiles) {
+        if (token) meta[token] = { name: file.name, size: file.size };
+      }
+      return meta;
+    },
+
+    /** Whether the previewed asset is a non-image document (PDF, TXT, …). */
+    assetPreviewIsDocument() {
+      const data = this.assetPreview.data;
+      if (!data || !data.ok || data.kind !== 'asset') return false;
+      return data.preview ? data.preview !== 'image' : data.is_image === false;
     },
 
     promptRecap() {
@@ -1083,11 +1148,11 @@ export default {
   },
 
   methods: {
-    chatHtml(text, mentionTitles) {
+    chatHtml(text, mentionTitles, attachments) {
       const titles = Array.isArray(mentionTitles) && mentionTitles.length
         ? mentionTitles
         : this.store.mentionedTitles;
-      return formatChatMessageHtml(text, titles);
+      return formatChatMessageHtml(text, titles, Array.isArray(attachments) ? attachments : []);
     },
 
     async initializePage() {
@@ -1216,13 +1281,53 @@ export default {
      * that folder. Clicks bubble reliably, so no per-chip binding needed.
      */
     onChatStreamClick(event) {
-      const chip = event.target.closest?.('[data-mention-ref]');
+      const chip = event.target.closest?.('[data-mention-kind]');
       if (!chip) return;
 
-      const ref = chip.getAttribute('data-mention-ref');
       const kind = chip.getAttribute('data-mention-kind') || 'asset';
+
+      if (kind === 'entry') {
+        const title = chip.getAttribute('data-mention-title');
+        if (title) this.openEntryByTitle(title);
+        return;
+      }
+
+      const ref = chip.getAttribute('data-mention-ref');
       if (!ref) return;
 
+      this.openMentionRef(kind, ref);
+    },
+
+    /**
+     * Open an "@Title" entry mention in the CP editor (new tab, so the chat
+     * survives). Chips only carry the title, so it is resolved through the
+     * same entry-search the "@" picker uses.
+     */
+    async openEntryByTitle(title) {
+      try {
+        const { data } = await axios.get('/cp/ai-generate/entry-search', {
+          params: { q: title, limit: 8 },
+        });
+        const results = (Array.isArray(data.results) ? data.results : []).filter((r) => r.kind === 'entry');
+        const match = results.find((r) => (r.title || '').toLowerCase() === title.toLowerCase()) || results[0];
+
+        if (!match || !match.id || !match.collection) {
+          Statamic.$toast?.error?.(this.__('Entry ":title" not found.', { title }));
+          return;
+        }
+
+        const url = `/cp/collections/${encodeURIComponent(match.collection)}/entries/${encodeURIComponent(match.id)}`;
+        const win = window.open(url, '_blank');
+        if (win) {
+          try { win.opener = null; } catch { /* ignore */ }
+        }
+      } catch (e) {
+        Statamic.$toast?.error?.(this.__('Entry ":title" not found.', { title }));
+      }
+    },
+
+    /** Open an asset/folder reference — assets in the preview modal, folders in the browser. */
+    openMentionRef(kind, ref) {
       if (kind === 'folder') {
         const [container, folder = ''] = ref.split('::');
         this.openAssetBrowser(container, folder);
@@ -1230,6 +1335,26 @@ export default {
       }
 
       this.openAssetPreview(kind, ref);
+    },
+
+    /** A chip in the composer was clicked — same affordances as in the transcript. */
+    onComposerChipClick({ kind, text }) {
+      if (kind === 'url') {
+        const win = window.open(text, '_blank');
+        if (win) {
+          try { win.opener = null; } catch { /* ignore */ }
+        }
+        return;
+      }
+
+      if (kind === 'asset' || kind === 'folder') {
+        this.openMentionRef(kind, text.replace(/^@(asset|folder):/, ''));
+        return;
+      }
+
+      if (kind === 'entry') {
+        this.openEntryByTitle(text.replace(/^@/, ''));
+      }
     },
 
     /**
@@ -1269,24 +1394,27 @@ export default {
       const list = (Array.isArray(tokens) ? tokens : [tokens]).filter(Boolean);
       if (!list.length) return;
 
+      // Register FIRST so the composer's re-parse renders the tokens as chips.
+      list.forEach((t) => registerMention(t));
       const current = this.store.pendingPrompt || '';
       const glue = current === '' || current.endsWith(' ') ? '' : ' ';
       this.store.pendingPrompt = current + glue + list.map((t) => `@${t}`).join(' ') + ' ';
-      list.forEach((t) => registerMention(t));
 
-      this.$nextTick(() => {
-        const el = this.$refs.promptTextarea;
-        if (!el) return;
-        el.focus();
-        el.setSelectionRange(el.value.length, el.value.length);
-        this.autoResize({ target: el });
-      });
+      this.$nextTick(() => this.$refs.composer?.focus());
     },
 
     insertPreviewedAssetRef() {
       if (!this.assetPreview.ref) return;
       this.insertRefTokens([`${this.assetPreview.kind}:${this.assetPreview.ref}`]);
       this.closeAssetPreview();
+    },
+
+    /** Document assets: the real preview is Statamic's asset editor (new tab). */
+    openPreviewedAssetInCp() {
+      const win = window.open(this.assetBrowseUrl, '_blank');
+      if (win) {
+        try { win.opener = null; } catch { /* ignore */ }
+      }
     },
 
     onAssetPreviewKeydown(event) {
@@ -1413,6 +1541,9 @@ export default {
     resetForNewRequest() {
       storeReset();
       if (!this.drawer) this.step = 2;
+      this.showAllTemplates = false;
+      this.activeTemplate = null;
+      this.templatesOpen = false;
       this.chatStickToBottom = true;
     },
 
@@ -1431,25 +1562,19 @@ export default {
       if (this.store.generating || this.store.planning) return;
       this.resetForNewRequest();
       this.historyOpen = false;
-      this.$nextTick(() => this.$refs.promptTextarea?.focus?.());
+      this.$nextTick(() => this.$refs.composer?.focus());
     },
 
     // ── Prompt templates (drawer) ──
 
-    toggleTemplates() {
-      if (this.templatesOpen) {
-        this.templatesOpen = false;
-        this.activeTemplate = null;
-        return;
-      }
-      this.historyOpen = false;
-      this.activeTemplate = null;
-      this.templatesOpen = true;
+    templateIconSvg(name) {
+      return TEMPLATE_ICONS[name] || TEMPLATE_ICONS.sparkles;
     },
 
     onTemplateSelect(template) {
       if (Array.isArray(template.questions) && template.questions.length > 0) {
         this.activeTemplate = template;
+        this.templatesOpen = true;
         return;
       }
       this.applyPromptTemplate(template, {});
@@ -1499,54 +1624,34 @@ export default {
     },
 
     /**
-     * Composer keydown: when the mention picker is open, arrows/enter/tab/escape
-     * drive it. Otherwise Enter sends (Shift+Enter = newline).
+     * First right of refusal on composer keydowns: while the mention picker is
+     * open, arrows/enter/tab/escape drive it instead of the editor. Returning
+     * true consumes the key. (Enter-to-send lives in AgentComposerInput.)
      */
-    onComposerKeydown(event) {
-      if (this.mention.open) {
-        if (event.key === 'ArrowDown') {
-          event.preventDefault();
-          this.moveMention(1);
-          return;
-        }
-        if (event.key === 'ArrowUp') {
-          event.preventDefault();
-          this.moveMention(-1);
-          return;
-        }
-        if (event.key === 'Enter' || event.key === 'Tab') {
-          const item = this.mention.results[this.mention.activeIndex];
-          if (item) {
-            event.preventDefault();
-            this.selectMention(item);
-            return;
-          }
-        }
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          this.closeMention();
-          return;
+    composerKeydownInterceptor(event) {
+      if (!this.mention.open) return false;
+
+      if (event.key === 'ArrowDown') {
+        this.moveMention(1);
+        return true;
+      }
+      if (event.key === 'ArrowUp') {
+        this.moveMention(-1);
+        return true;
+      }
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        const item = this.mention.results[this.mention.activeIndex];
+        if (item) {
+          this.selectMention(item);
+          return true;
         }
       }
-
-      if (event.key === 'Enter') {
-        if (event.shiftKey) return;
-        event.preventDefault();
-        this.handleComposerSend();
+      if (event.key === 'Escape') {
+        this.closeMention();
+        return true;
       }
-    },
 
-    onComposerInput(event) {
-      this.autoResize(event);
-      this.updateMentionFromCaret();
-    },
-
-    onComposerKeyup(event) {
-      // Navigation keys are handled in keydown; don't let them re-open/reset.
-      if (this.mention.open && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(event.key)) {
-        return;
-      }
-      this.updateMentionFromCaret();
+      return false;
     },
 
     onComposerBlur() {
@@ -1554,36 +1659,15 @@ export default {
       this.mention._blurTimer = setTimeout(() => this.closeMention(), 120);
     },
 
-    /**
-     * Recompute the active "@query" from the caret position. Opens the picker
-     * when the caret sits inside a mention token started by "@" at a word
-     * boundary; closes it otherwise.
-     */
-    updateMentionFromCaret() {
-      const el = this.$refs.promptTextarea;
-      if (!el || this.store.generating) return this.closeMention();
-
-      const value = el.value || '';
-      const caret = el.selectionStart ?? value.length;
-      const upto = value.slice(0, caret);
-      const at = upto.lastIndexOf('@');
-
-      if (at === -1) return this.closeMention();
-
-      const charBefore = at === 0 ? '' : upto[at - 1];
-      if (charBefore && !/\s/.test(charBefore)) return this.closeMention();
-
-      // The active query is a single whitespace-free token. Once the user types a
-      // space, the mention is considered finished (so "@Eden Tea Time and …" stops
-      // querying), while an already-inserted "@Title" with spaces is just text.
-      const query = upto.slice(at + 1);
-      if (/\s/.test(query) || query.length > 40) return this.closeMention();
-
-      this.mention.start = at;
-      this.mention.end = caret;
-      this.mention.query = query;
+    /** The composer's caret entered/left an "@query" token. */
+    onMentionQuery(payload) {
+      if (!payload || this.store.generating) {
+        if (this.mention.open) this.closeMention();
+        return;
+      }
+      this.mention.query = payload.query;
       this.mention.open = true;
-      this.searchMentions(query);
+      this.searchMentions(payload.query);
     },
 
     searchMentions(query) {
@@ -1619,29 +1703,16 @@ export default {
     },
 
     selectMention(item) {
-      const el = this.$refs.promptTextarea;
-      const value = this.store.pendingPrompt || '';
       // Entries mention by title; assets/folders by precise "kind:container::path"
       // reference — the planner resolves those with list_assets.
       const mentionText = item.kind === 'asset' || item.kind === 'folder'
         ? `${item.kind}:${item.ref}`
         : item.title;
-      const token = `@${mentionText}`;
-      const before = value.slice(0, this.mention.start);
-      const after = value.slice(this.mention.end);
-      const insert = `${token}${after.startsWith(' ') ? '' : ' '}`;
 
-      this.store.pendingPrompt = before + insert + after;
+      // Register FIRST so the chip node renders (and later re-parses) as a chip.
       registerMention(mentionText);
+      this.$refs.composer?.insertMention(mentionText);
       this.closeMention();
-
-      this.$nextTick(() => {
-        if (!el) return;
-        const pos = (before + insert).length;
-        el.focus();
-        el.setSelectionRange(pos, pos);
-        this.autoResize({ target: el });
-      });
     },
 
     closeMention() {
@@ -1672,7 +1743,6 @@ export default {
       // expired server session (continueGeneration reseeds it transparently).
       if (this.drawer && (this.store.chatSessionId || this.store.transcript.length > 0)) {
         continueGeneration(this.store.pendingPrompt);
-        this.resetComposerHeight();
         this.chatStickToBottom = true;
         return;
       }
@@ -1689,12 +1759,10 @@ export default {
 
       startGeneration({
         prompt,
-        attachedFile: this.store.pendingAttachedFile,
         useAutoTarget,
         collection: this.selectedCollection,
         blueprint: this.selectedBlueprint,
       });
-      if (this.drawer) this.resetComposerHeight();
       this.chatStickToBottom = true;
     },
 
@@ -1732,29 +1800,21 @@ export default {
       this.stopConfirmOpen = false;
     },
 
-    autoResize(e) {
-      const el = e.target;
-      el.style.height = 'auto';
-      el.style.height = Math.min(el.scrollHeight, 160) + 'px';
-    },
-
-    resetComposerHeight() {
-      this.$nextTick(() => {
-        const el = this.$refs.promptTextarea;
-        if (el) el.style.height = 'auto';
-      });
-    },
-
     handleDrop(e) {
       this.dragOver = false;
-      const files = e.dataTransfer.files;
-      if (files.length > 0) this.setFile(files[0]);
+      [...e.dataTransfer.files].forEach((file) => this.setFile(file));
     },
 
     handleFileSelect(e) {
-      if (e.target.files.length > 0) this.setFile(e.target.files[0]);
+      [...e.target.files].forEach((file) => this.setFile(file));
+      e.target.value = '';
     },
 
+    /**
+     * Validate and register one attachment. In the drawer it becomes an
+     * inline "@file:" chip in the composer; the wizard keeps its single
+     * chipless attachment (replaced on every pick).
+     */
     setFile(file) {
       const ext = file.name.split('.').pop().toLowerCase();
       if (!['pdf', 'txt'].includes(ext)) {
@@ -1765,20 +1825,35 @@ export default {
         Statamic.$toast.error(this.__('File is too large. Maximum 10 MB.'));
         return;
       }
-      this.store.pendingAttachedFile = file;
+
+      if (!this.drawer) {
+        removePendingFile(null);
+        addPendingFile(file, { withToken: false });
+        return;
+      }
+
+      const token = addPendingFile(file);
+      const current = this.store.pendingPrompt || '';
+      const glue = current === '' || current.endsWith(' ') ? '' : ' ';
+      this.store.pendingPrompt = `${current}${glue}@file:${token} `;
+      this.$nextTick(() => this.$refs.composer?.focus());
     },
 
     removeFile() {
-      this.store.pendingAttachedFile = null;
+      removePendingFile(null);
       if (this.$refs.fileInput) this.$refs.fileInput.value = '';
     },
 
-    formatFileSize(bytes) {
-      if (bytes < 1024) return `${bytes} B`;
-      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    },
+    formatFileSize,
   },
+};
+
+const TEMPLATE_ICONS = {
+  'link': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>',
+  'magnifying-glass': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>',
+  'text-align-left': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M4 6h16M4 12h10M4 18h13"/></svg>',
+  'image': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="1.6"/><path d="M21 15l-5-5L5 21"/></svg>',
+  'sparkles': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></svg>',
 };
 </script>
 

@@ -1,7 +1,11 @@
-/**
- * Aligns loosely with PromptUrlFetcher::extractPublicHttpUrls (http(s) only, word boundary).
- */
-const HTTP_URL_RE = /\bhttps?:\/\/[^\s<>\]\}\)"'`]+/giu;
+import {
+  HTTP_URL_RE,
+  ASSET_FOLDER_MENTION_RE,
+  FILE_MENTION_RE,
+  trimUrlTrailingPunct,
+  chipLabel,
+  formatFileSize,
+} from './composer/promptTokens.js';
 
 function escapeHtml(s) {
   return String(s)
@@ -11,10 +15,6 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-function trimUrlTrailingPunct(raw) {
-  return raw.replace(/[.,;:!?)\]}'"]+$/u, '');
-}
-
 const BOLD_MARKDOWN_RE = /\*\*([^*\n]+?)\*\*/gu;
 
 function formatBoldMarkdown(escapedText) {
@@ -22,8 +22,10 @@ function formatBoldMarkdown(escapedText) {
 }
 
 /**
- * Escape HTML, render **bold** markdown, and wrap detected URLs in
- * <strong class="eg-chat__url"> for safe v-html.
+ * Escape HTML, render **bold** markdown, and turn detected URLs into
+ * new-tab link CHIPS (same look as in the composer, shortened label, full
+ * URL as tooltip). The regex only matches http(s), so the href can never
+ * be a javascript: or data: URL.
  *
  * @param {string|null|undefined} text
  * @returns {string}
@@ -42,7 +44,7 @@ export function formatChatTextWithBoldUrls(text) {
     const raw = m[0];
     const trimmed = trimUrlTrailingPunct(raw);
     const trailing = raw.slice(trimmed.length);
-    out += `<strong class="eg-chat__url">${escapeHtml(trimmed)}</strong>`;
+    out += `<a href="${escapeHtml(trimmed)}" target="_blank" rel="noopener noreferrer" class="eg-chat__chip eg-chat__chip--url" title="${escapeHtml(trimmed)}">${escapeHtml(chipLabel('url', trimmed))}</a>`;
     out += formatBoldMarkdown(escapeHtml(trailing));
     last = m.index + raw.length;
   }
@@ -53,9 +55,6 @@ export function formatChatTextWithBoldUrls(text) {
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
-
-/** "@asset:container::path" / "@folder:container::path" — always chip + hover hooks. */
-const ASSET_FOLDER_MENTION_RE = /@(asset|folder):([a-z0-9_-]+)::([^<\s]+)/giu;
 
 function assetFolderChipHtml(kind, container, path) {
   const ref = `${container}::${path}`;
@@ -77,6 +76,31 @@ function wrapAssetFolderMentionChips(html) {
       return match;
     }
     return assetFolderChipHtml(kind, container, path);
+  });
+}
+
+/**
+ * Wrap "@file:name.pdf" attachment tokens in a file chip (icon + name + size).
+ * `attachments` is the turn's [{token, name, size}] metadata — the display
+ * name and size come from there; an unknown token falls back to itself.
+ *
+ * @param {string} html
+ * @param {Array<{token: ?string, name: string, size: number}>} attachments
+ * @returns {string}
+ */
+function wrapFileMentionChips(html, attachments) {
+  const byToken = new Map(
+    (attachments || []).filter((a) => a && a.token).map((a) => [a.token, a]),
+  );
+
+  return html.replace(new RegExp(FILE_MENTION_RE.source, 'giu'), (match, token) => {
+    const meta = byToken.get(token);
+    const name = meta?.name || token;
+    const size = meta?.size ? `<span class="eg-chat__chip-meta">${escapeHtml(formatFileSize(meta.size))}</span>` : '';
+
+    return `<span class="eg-chat__chip eg-chat__chip--file" title="${escapeHtml(match)}">`
+      + '<span class="eg-chip-icon eg-chip-icon--file" aria-hidden="true"></span>'
+      + `${escapeHtml(name)}${size}</span>`;
   });
 }
 
@@ -105,20 +129,25 @@ function wrapEntryMentionChips(html, titles) {
     const re = new RegExp(`@${escaped}`, 'g');
     out = out.replace(
       re,
-      `<span class="eg-chat__chip"><span class="eg-chat__chip-at">@</span>${escapeHtml(title)}</span>`,
+      `<span class="eg-chat__chip eg-chat__chip--entry" data-mention-kind="entry" data-mention-title="${escapeHtml(title)}"><span class="eg-chat__chip-at">@</span>${escapeHtml(title)}</span>`,
     );
   }
   return out;
 }
 
 /**
- * Full chat message renderer: bold/URL formatting plus "@Title" entry chips.
+ * Full chat message renderer: bold/URL formatting plus entry, asset/folder
+ * and attachment chips.
  *
  * @param {string|null|undefined} text
  * @param {string[]} [mentionTitles]  Titles selected via the "@" entry picker.
+ * @param {Array} [attachments]  The turn's attachment metadata [{token, name, size}].
  * @returns {string}
  */
-export function formatChatMessageHtml(text, mentionTitles = []) {
+export function formatChatMessageHtml(text, mentionTitles = [], attachments = []) {
   const html = formatChatTextWithBoldUrls(text);
-  return wrapEntryMentionChips(wrapAssetFolderMentionChips(html), mentionTitles);
+  return wrapEntryMentionChips(
+    wrapFileMentionChips(wrapAssetFolderMentionChips(html), attachments),
+    mentionTitles,
+  );
 }

@@ -118,8 +118,16 @@ class ServiceProvider extends AddonServiceProvider
             return new PromptUrlFetcher;
         });
 
-        $this->app->singleton(AssetImageDownloader::class, function () {
-            return new AssetImageDownloader;
+        $this->app->singleton(\BoldWeb\StatamicAiAssistant\Services\ImageAltTextGenerator::class, function ($app) {
+            return new \BoldWeb\StatamicAiAssistant\Services\ImageAltTextGenerator(
+                $app->make(AbstractAiService::class),
+            );
+        });
+
+        $this->app->singleton(AssetImageDownloader::class, function ($app) {
+            return new AssetImageDownloader(
+                $app->make(\BoldWeb\StatamicAiAssistant\Services\ImageAltTextGenerator::class),
+            );
         });
 
         $this->app->singleton(RemoteImageFetcher::class, function ($app) {

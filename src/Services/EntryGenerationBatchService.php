@@ -295,11 +295,11 @@ class EntryGenerationBatchService
      * and all prior entries. Recovers a 'completed' or 'cancelled' session.
      * Returns false if the session no longer exists (expired/unknown).
      */
-    public function reopenForFollowUp(string $sessionId, string $prompt, ?int $maxPlanEntries, bool $advancedTools = false): bool
+    public function reopenForFollowUp(string $sessionId, string $prompt, ?int $maxPlanEntries, bool $advancedTools = false, ?string $attachmentContent = null): bool
     {
         $found = false;
 
-        $this->update($sessionId, function (array $session) use ($prompt, $maxPlanEntries, $advancedTools, &$found): array {
+        $this->update($sessionId, function (array $session) use ($prompt, $maxPlanEntries, $advancedTools, $attachmentContent, &$found): array {
             $found = true;
 
             $session['status'] = 'running';
@@ -310,6 +310,10 @@ class EntryGenerationBatchService
             $session['prompt'] = $prompt;
             $session['max_plan_entries'] = $maxPlanEntries !== null ? max(1, $maxPlanEntries) : null;
             $session['advanced_tools'] = $advancedTools;
+            // The attachment is scoped to a single turn: a follow-up replaces
+            // (or clears) whatever was attached on the previous turn, so the
+            // planner injects it only into the newest user message.
+            $session['attachment_content'] = $attachmentContent;
 
             $transcript = is_array($session['transcript'] ?? null) ? $session['transcript'] : [];
             $transcript[] = ['role' => 'user', 'text' => $prompt, 'entry_ids' => [], 'kind' => null];

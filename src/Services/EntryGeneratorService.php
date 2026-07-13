@@ -192,6 +192,10 @@ class EntryGeneratorService
         $maxTokens = (int) config('statamic-ai-assistant.generator_max_tokens', 4000);
         $toolWarnings = [];
 
+        // An attached document is the source — suppress URL fetching so the
+        // model can't go online instead of using the file.
+        $hasAttachment = (string) $attachmentContent !== '';
+
         // Images the LLM copies from the source via save_remote_image land here;
         // merged into the preferred-asset queue below so the resolver assigns
         // them to this entry's image fields (matched by container).
@@ -209,6 +213,7 @@ class EntryGeneratorService
                     $imageContainerHint,
                     true,
                     $streamHeartbeat,
+                    $hasAttachment,
                 );
             } catch (\Throwable $e) {
                 Log::warning('[entry-gen-tool] tool loop failed; falling back to single-shot completion', [
@@ -271,6 +276,7 @@ class EntryGeneratorService
         ?string $imageContainerHint,
         bool $allowImageTool,
         ?callable $streamHeartbeat = null,
+        bool $disableUrlFetch = false,
     ): string {
         // The image tool only makes sense on the create path, where empty asset
         // fields are auto-filled from the preferred-asset queue afterwards. On
@@ -289,6 +295,9 @@ class EntryGeneratorService
 
         $toolHint = "URL HANDLING RULES — these take priority over any later JSON output rule:\n"
             ."0. Only ever fetch URLs the user explicitly provided in their message (or same-site links found INSIDE those fetched pages). NEVER invent, guess, shorten, or try alternative/variant URLs — a fetch of a guessed URL is a mistake and will be refused. If the user provided NO URL, do not fetch anything: write the entry from the CMS context and your own knowledge.\n"
+            .($disableUrlFetch
+                ? "ATTACHMENT RULE (overrides the URL rules above): the user attached a document and its full content is already in your user message under \"--- ATTACHED DOCUMENT CONTENT ---\". That content IS the source — do NOT call fetch_page_content at all, and do NOT use URLs found inside the attachment to go online. Write the entry entirely from the attached document's facts, structure, names, numbers and wording.\n"
+                : '')
             ."1. When the user DID provide one or more http(s) URLs, you MUST call the **fetch_page_content** tool to retrieve them BEFORE producing any output. Never invent or guess content from a URL alone.\n"
             ."2. After fetching, inspect the returned content. If it is a listing or index page (multiple teasers, news cards, 'read more' links, item summaries with detail URLs) on the SAME site, identify the specific item the user asked for and call **fetch_page_content** AGAIN on that item's detail page URL. Write the entry from the detail page body, not from the listing teaser.\n"
             ."3. If the user asked for 'the first', 'the latest', 'the next', 'the second', or a specific item from a listing, pick the URL that matches that intent and fetch it.\n"
@@ -326,7 +335,14 @@ class EntryGeneratorService
         $restrictFetch = (bool) config('statamic-ai-assistant.entry_generator_restrict_fetch_to_prompt_urls', true);
         $allowedFetchHosts = UrlFetchTool::hostsFromMessages($this->promptUrlFetcher, $messages);
 
-        $toolset = [new UrlFetchTool($this->promptUrlFetcher, $allowedFetchHosts, $restrictFetch)];
+        // When the user attached a document, its content is already in the user
+        // message — don't offer fetch_page_content at all, so the model can't go
+        // online instead of using the file (and URLs inside the file can't get
+        // allowlisted). Read/structure/taxonomy tools remain available.
+        $toolset = [];
+        if (! $disableUrlFetch) {
+            $toolset[] = new UrlFetchTool($this->promptUrlFetcher, $allowedFetchHosts, $restrictFetch);
+        }
         if ($useImageTool && $this->imageFetcher !== null) {
             $toolset[] = new SaveImageTool($this->imageFetcher);
         }
@@ -342,6 +358,7 @@ class EntryGeneratorService
         $toolset[] = new ListTaxonomiesTool;
         $toolset[] = new \BoldWeb\StatamicAiAssistant\Tools\ListAssetsTool;
         $toolset[] = new \BoldWeb\StatamicAiAssistant\Tools\UseAssetsTool;
+        $toolset[] = new \BoldWeb\StatamicAiAssistant\Tools\ReadDocumentTool;
         if ($this->aiService->supportsVision()) {
             $toolset[] = new \BoldWeb\StatamicAiAssistant\Tools\AnalyzeImageTool($this->aiService);
         }
@@ -351,14 +368,18 @@ class EntryGeneratorService
 
         // Detect URLs in the user message(s). If any are present, the model MUST
         // call the fetch tool on the first round, otherwise it tends to fabricate
-        // content from the URL slug instead of fetching.
+        // content from the URL slug instead of fetching. Skip this when URL
+        // fetching is disabled (attachment flow): the attachment may contain URLs
+        // but we must NOT fetch them.
         $promptHasUrl = false;
-        foreach ($messages as $m) {
-            $content = $m['content'] ?? '';
-            if (($m['role'] ?? '') === 'user' && is_string($content)
-                && preg_match('~\bhttps?://[^\s<>\]\}\)\"\'`]+~iu', $content)) {
-                $promptHasUrl = true;
-                break;
+        if (! $disableUrlFetch) {
+            foreach ($messages as $m) {
+                $content = $m['content'] ?? '';
+                if (($m['role'] ?? '') === 'user' && is_string($content)
+                    && preg_match('~\bhttps?://[^\s<>\]\}\)\"\'`]+~iu', $content)) {
+                    $promptHasUrl = true;
+                    break;
+                }
             }
         }
 
@@ -2113,6 +2134,14 @@ class EntryGeneratorService
         }
 
         if ($attachmentContent) {
+            // The attached document IS the source material the user wants the
+            // entry built from. Say so explicitly and forbid going online for it
+            // — otherwise the model tends to fetch a URL it spots in the text and
+            // build the entry from that instead of the file the user attached.
+            $message = "The user attached a document whose full content is included below under \"--- ATTACHED DOCUMENT CONTENT ---\". "
+                ."Treat that content as your PRIMARY source for this entry: write the entry from its facts, structure, names, numbers and wording. "
+                ."Do NOT fetch external URLs to source this entry, and do NOT invent content the attachment does not contain.\n\n"
+                .$message;
             $message .= "\n\n--- ATTACHED DOCUMENT CONTENT ---\n\n".$attachmentContent;
         }
 
@@ -3118,6 +3147,8 @@ class EntryGeneratorService
         $maxTokens = (int) config('statamic-ai-assistant.generator_max_tokens', 4000);
         $toolWarnings = [];
 
+        $hasAttachment = (string) $attachmentContent !== '';
+
         if ($useUrlTool) {
             try {
                 $rawResponse = $this->generateContentWithUrlFetchToolLoop(
@@ -3129,6 +3160,7 @@ class EntryGeneratorService
                     null,
                     false,
                     $streamHeartbeat,
+                    $hasAttachment,
                 );
             } catch (\Throwable $e) {
                 Log::warning('[entry-update] tool loop failed; falling back to single-shot completion', [
