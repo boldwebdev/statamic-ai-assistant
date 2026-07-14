@@ -4,6 +4,7 @@ namespace BoldWeb\StatamicAiAssistant\Services;
 
 use BoldWeb\StatamicAiAssistant\Services\Concerns\TranslatesFields;
 use BoldWeb\StatamicAiAssistant\Support\JsonObjectExtractor;
+use BoldWeb\StatamicAiAssistant\Support\JsonRepair;
 use BoldWeb\StatamicAiAssistant\Tools\ChatToolRunner;
 use BoldWeb\StatamicAiAssistant\Tools\ListTaxonomiesTool;
 use BoldWeb\StatamicAiAssistant\Tools\ReadEntryStructureTool;
@@ -20,6 +21,7 @@ use Illuminate\Support\Str;
 use Statamic\Entries\Entry as StatamicEntry;
 use Statamic\Facades\Collection;
 use Statamic\Facades\Entry;
+use Statamic\Facades\Form;
 use Statamic\Facades\Site;
 use Statamic\Facades\Taxonomy;
 use Statamic\Facades\Term;
@@ -344,7 +346,9 @@ class EntryGeneratorService
             $toolset[] = new UrlFetchTool($this->promptUrlFetcher, $allowedFetchHosts, $restrictFetch);
         }
         if ($useImageTool && $this->imageFetcher !== null) {
-            $toolset[] = new SaveImageTool($this->imageFetcher);
+            // Same provenance gate as fetch: only save images from hosts the user
+            // referenced or URLs seen in fetched pages — never invented ones.
+            $toolset[] = new SaveImageTool($this->imageFetcher, $allowedFetchHosts, $restrictFetch);
         }
         $toolset[] = new ReadEntryStructureTool(
             $this->structureSerializer,
@@ -1585,6 +1589,247 @@ class EntryGeneratorService
         return $resolved;
     }
 
+    // ── entries relationship fields ──────────────────────────────────────
+    // Links to OTHER entries. The model outputs the title/slug of an existing
+    // entry; mapEntriesFieldValue resolves those to real ids. Linking a target
+    // that is being created in the SAME batch is not supported (it may not exist
+    // yet, and jobs run in parallel) — such a reference surfaces a warning
+    // instead of silently vanishing.
+
+    /**
+     * @return array{label: string, generatable: true, type: string, collections: array<int, string>, max_items: ?int, description: string}
+     */
+    private function buildEntriesFieldSchemaPayload(Field $field, ?string $instructions): array
+    {
+        $collections = $this->entriesFieldCollectionHandles($field);
+        $maxItems = is_numeric($field->get('max_items')) ? (int) $field->get('max_items') : null;
+
+        $descParts = [];
+        if ($instructions) {
+            $descParts[] = $instructions;
+        }
+        $descParts[] = 'Link EXISTING entries by their exact title (or slug). Only reference entries that already exist'
+            .($collections !== [] ? ' in the collection(s): '.implode(', ', $collections).'.' : '.')
+            .' Never invent an entry. If the target is being created in this same request and does not exist yet, leave this empty and still create the entry — never refuse or abort over a missing link.';
+        $descParts[] = $maxItems === 1
+            ? 'Return a single title string, or an empty string if none applies.'
+            : 'Return an array of titles (empty array if none applies)'.($maxItems !== null ? ", at most {$maxItems}." : '.');
+
+        return [
+            'label' => $field->display(),
+            'generatable' => true,
+            'type' => 'entry_references',
+            'collections' => $collections,
+            'max_items' => $maxItems,
+            'description' => implode(' ', $descParts),
+        ];
+    }
+
+    /**
+     * Resolve the model's entry references (titles/slugs) to real entry ids,
+     * scoped to the field's target collections. Unresolved references become a
+     * warning — never a silent drop.
+     */
+    private function mapEntriesFieldValue(mixed $value, Field $field, array &$warnings): mixed
+    {
+        $refs = [];
+        foreach (is_array($value) ? $value : [$value] as $item) {
+            if (is_string($item) && trim($item) !== '') {
+                $refs[] = trim($item);
+            } elseif (is_array($item) && isset($item['id']) && is_string($item['id'])) {
+                $refs[] = trim($item['id']); // tolerate {id:…}/{title:…} shapes
+            } elseif (is_array($item) && isset($item['title']) && is_string($item['title'])) {
+                $refs[] = trim($item['title']);
+            }
+        }
+
+        if ($refs === []) {
+            return null;
+        }
+
+        $collections = $this->entriesFieldCollectionHandles($field);
+        $ids = [];
+        foreach (array_unique($refs) as $ref) {
+            $id = $this->resolveEntryReference($ref, $collections);
+            if ($id !== null) {
+                $ids[] = $id;
+            } else {
+                $warnings[] = __(':field: could not link ":ref" — no existing entry with that title/slug was found.', [
+                    'field' => $field->display(),
+                    'ref' => Str::limit($ref, 60),
+                ]);
+            }
+        }
+
+        $ids = array_values(array_unique($ids));
+        if ($ids === []) {
+            return null;
+        }
+
+        $maxItems = is_numeric($field->get('max_items')) ? (int) $field->get('max_items') : null;
+        if ($maxItems !== null && count($ids) > $maxItems) {
+            $ids = array_slice($ids, 0, $maxItems);
+        }
+
+        return $maxItems === 1 ? $ids[0] : $ids;
+    }
+
+    /**
+     * Best existing-entry id for a title/slug reference, scoped to $collections
+     * (all collections when empty). Requires a confident title/slug match so a
+     * vague reference never links the wrong entry.
+     */
+    private function resolveEntryReference(string $ref, array $collections): ?string
+    {
+        $needle = $this->normalizeEntryRef($ref);
+        $scopes = $collections === [] ? [null] : $collections;
+
+        foreach ($scopes as $collection) {
+            foreach ($this->findEntriesShortlist($collection, $ref, 10) as $row) {
+                if ($this->normalizeEntryRef((string) ($row['title'] ?? '')) === $needle
+                    || $this->normalizeEntryRef((string) ($row['slug'] ?? '')) === $needle) {
+                    return (string) $row['id'];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /** Case/punctuation-insensitive key so "Salt & Stone" == "salt and stone" == "salt-stone". */
+    private function normalizeEntryRef(string $s): string
+    {
+        $s = mb_strtolower(trim($s));
+        $s = str_replace(['&', '+'], ' and ', $s);
+        $s = preg_replace('~[^a-z0-9]+~u', ' ', $s) ?? $s;
+
+        return trim(preg_replace('~\s+~', ' ', $s) ?? $s);
+    }
+
+    /** @return array<int, string> */
+    private function entriesFieldCollectionHandles(Field $field): array
+    {
+        $configured = $field->get('collections');
+        if (! is_array($configured)) {
+            return [];
+        }
+
+        return array_values(array_filter(array_map(
+            fn ($c) => is_string($c) ? $c : null,
+            $configured,
+        )));
+    }
+
+    // ── form relationship fields ─────────────────────────────────────────
+    // Links to a Statamic Form (a contact form etc.), stored as the form's
+    // HANDLE. The model picks from the site's existing forms (listed in the
+    // schema) by handle or title; mapFormFieldValue validates the choice.
+
+    /**
+     * @return array{label: string, generatable: true, type: string, forms: array<int, array{handle: string, title: string}>, max_items: ?int, description: string}|null
+     */
+    private function buildFormFieldSchemaPayload(Field $field, ?string $instructions): ?array
+    {
+        $forms = $this->availableForms();
+        if ($forms === []) {
+            // No forms exist on the site — nothing the model could validly pick.
+            return null;
+        }
+
+        $maxItems = is_numeric($field->get('max_items')) ? (int) $field->get('max_items') : 1;
+
+        $descParts = [];
+        if ($instructions) {
+            $descParts[] = $instructions;
+        }
+        $descParts[] = 'Link one of the site\'s EXISTING forms by its exact handle from the "forms" list below (match the user\'s intent, e.g. a contact form). Never invent a form handle.';
+        $descParts[] = $maxItems === 1
+            ? 'Return a single handle string, or an empty string if no form applies.'
+            : 'Return an array of handles (empty array if none applies)'.($maxItems > 1 ? ", at most {$maxItems}." : '.');
+
+        return [
+            'label' => $field->display(),
+            'generatable' => true,
+            'type' => 'form_reference',
+            'forms' => $forms,
+            'max_items' => $maxItems,
+            'description' => implode(' ', $descParts),
+        ];
+    }
+
+    /**
+     * Resolve the model's form reference(s) — handle or title — to valid existing
+     * form handles. Unresolved references warn rather than vanish.
+     */
+    private function mapFormFieldValue(mixed $value, Field $field, array &$warnings): mixed
+    {
+        $refs = [];
+        foreach (is_array($value) ? $value : [$value] as $item) {
+            if (is_string($item) && trim($item) !== '') {
+                $refs[] = trim($item);
+            } elseif (is_array($item) && isset($item['handle']) && is_string($item['handle'])) {
+                $refs[] = trim($item['handle']); // tolerate {handle:…}/{id:…} shapes
+            } elseif (is_array($item) && isset($item['id']) && is_string($item['id'])) {
+                $refs[] = trim($item['id']);
+            }
+        }
+
+        if ($refs === []) {
+            return null;
+        }
+
+        $handles = [];
+        foreach (array_unique($refs) as $ref) {
+            $handle = $this->resolveFormReference($ref);
+            if ($handle !== null) {
+                $handles[] = $handle;
+            } else {
+                $warnings[] = __(':field: could not link the form ":ref" — no form with that handle/title exists.', [
+                    'field' => $field->display(),
+                    'ref' => Str::limit($ref, 60),
+                ]);
+            }
+        }
+
+        $handles = array_values(array_unique($handles));
+        if ($handles === []) {
+            return null;
+        }
+
+        $maxItems = is_numeric($field->get('max_items')) ? (int) $field->get('max_items') : 1;
+        if ($maxItems >= 1 && count($handles) > $maxItems) {
+            $handles = array_slice($handles, 0, $maxItems);
+        }
+
+        // A relationship with max_items 1 stores a single handle string.
+        return $maxItems === 1 ? $handles[0] : $handles;
+    }
+
+    /** Match a handle/title reference to an existing form handle (case/punct-insensitive on title). */
+    private function resolveFormReference(string $ref): ?string
+    {
+        $needle = $this->normalizeEntryRef($ref);
+
+        foreach ($this->availableForms() as $form) {
+            if ($form['handle'] === $ref
+                || $this->normalizeEntryRef($form['handle']) === $needle
+                || $this->normalizeEntryRef($form['title']) === $needle) {
+                return $form['handle'];
+            }
+        }
+
+        return null;
+    }
+
+    /** @return array<int, array{handle: string, title: string}> */
+    private function availableForms(): array
+    {
+        return Form::all()
+            ->map(fn ($form) => ['handle' => (string) $form->handle(), 'title' => (string) $form->title()])
+            ->values()
+            ->all();
+    }
+
     private function firstTermValueForTermsField(Field $field, string $siteHandle): mixed
     {
         $ft = $field->fieldtype();
@@ -1655,6 +1900,16 @@ class EntryGeneratorService
 
         if ($type === 'terms') {
             $payload = $this->buildTermsFieldSchemaPayload($field, $siteHandle, $instructions);
+
+            return $payload === null ? null : $this->finalizeSchemaEntry($field, $payload);
+        }
+
+        if ($type === 'entries') {
+            return $this->finalizeSchemaEntry($field, $this->buildEntriesFieldSchemaPayload($field, $instructions));
+        }
+
+        if ($type === 'form') {
+            $payload = $this->buildFormFieldSchemaPayload($field, $instructions);
 
             return $payload === null ? null : $this->finalizeSchemaEntry($field, $payload);
         }
@@ -2014,13 +2269,58 @@ class EntryGeneratorService
         return false;
     }
 
+    /**
+     * Internal schema keys that are noise for the model — present for our own
+     * bookkeeping, never referenced in the prompt rules and never read back.
+     * This is a DENYLIST: only these keys are dropped, so any other key (now or
+     * added in future) is preserved by default and can never be silently lost.
+     */
+    private const SCHEMA_NOISE_KEYS = ['generatable'];
+
+    /**
+     * Encode the field schema for the prompt: strip internal-only noise keys and
+     * emit minified JSON (no pretty-print indentation, unescaped slashes/unicode).
+     * This only shrinks what we SEND — it never changes the field handles, types,
+     * descriptions or constraints the model reads, nor how the response is parsed.
+     */
+    private function encodeSchemaForPrompt(array $fieldSchema): string
+    {
+        return (string) json_encode(
+            $this->stripSchemaNoise($fieldSchema),
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES,
+        );
+    }
+
+    /**
+     * Recursively drop {@see SCHEMA_NOISE_KEYS} at every depth (top level, group
+     * fields, grid row_fields, replicator sets, …). Everything else passes
+     * through untouched.
+     *
+     * @param  array<int|string, mixed>  $schema
+     * @return array<int|string, mixed>
+     */
+    private function stripSchemaNoise(array $schema): array
+    {
+        $clean = [];
+
+        foreach ($schema as $key => $value) {
+            if (is_string($key) && in_array($key, self::SCHEMA_NOISE_KEYS, true)) {
+                continue;
+            }
+
+            $clean[$key] = is_array($value) ? $this->stripSchemaNoise($value) : $value;
+        }
+
+        return $clean;
+    }
+
     private function buildSystemMessage(array $fieldSchema, string $locale): string
     {
         $preface = config('statamic-ai-assistant.prompt_generator_preface',
             'You are a CMS content creation assistant. Generate structured content for website entries. Respond ONLY with a valid JSON object — no markdown fences, no commentary.'
         );
 
-        $schemaJson = json_encode($fieldSchema, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+        $schemaJson = $this->encodeSchemaForPrompt($fieldSchema);
 
         $structuredRules = '';
 
@@ -2063,6 +2363,8 @@ class EntryGeneratorService
             ."- For fields with type \"link\": provide a URL, path, or entry::UUID reference as described in the field description.\n"
             ."- For fields with type \"video_url\": provide a YouTube or video page URL, or an empty string.\n"
             ."- For fields with type \"taxonomy_terms\": use only slugs from the schema \"taxonomies\" lists (exact slug when \"single_taxonomy\" is true; otherwise taxonomy_handle::term_slug).\n"
+            ."- For fields with type \"entry_references\": link ONLY entries that already exist, using their exact title (or slug). Use an array for multiple, a single string when the field allows one, and an empty array/string when none applies. If the entry you were asked to link does not exist yet (e.g. it is being created in this same request), LEAVE THIS FIELD EMPTY and still produce the rest of the entry normally — never refuse, abort, apologise, or demand a taxonomy just because a link target is missing.\n"
+            ."- For fields with type \"form_reference\": pick a form ONLY from that field's \"forms\" list, outputting its exact handle (match the user's intent, e.g. a contact form). Never invent a handle. Single string when the field allows one, otherwise an array; empty when none applies.\n"
             .$structuredRules
             ."- Field-level editorial guidance: when a field in the schema carries \"ai_description\" (what the field is and how it renders on the page) and/or \"writing_guidelines\" (concrete authoring rules such as length, tone, or structure), treat them as binding editorial instructions for THAT field's content — they override generic assumptions you would otherwise make from the handle alone.\n"
             ."- Every field in the schema that includes \"required\": true must have a non-empty, valid value for its type. Never omit those keys, never use empty strings for them, and never use HTML with no visible text. If the user is vague, says to do nothing, or gives minimal instructions, you must still invent sensible placeholder content so the entry would pass blueprint validation.\n"
@@ -2179,8 +2481,21 @@ class EntryGeneratorService
         try {
             $decoded = json_decode($jsonStr, true, 512, JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
-            $this->logUnparseableResponse('generation', $rawResponse, $e->getMessage());
-            throw new \RuntimeException(__('Invalid JSON in AI response: :message', ['message' => $e->getMessage()]));
+            // Cheap local repair of common mid-tier defects (stray unescaped
+            // quotes, trailing commas, truncated tail) BEFORE paying for an LLM
+            // correction round. Re-validated below, so a bad repair costs nothing.
+            $repaired = JsonRepair::repair($response);
+            $repairedObject = JsonObjectExtractor::firstObject($repaired) ?? $repaired;
+            $decoded = json_decode($repairedObject, true);
+
+            if (is_array($decoded)) {
+                Log::info('[entry-gen] recovered malformed JSON via local repair (no LLM retry needed)', [
+                    'error' => $e->getMessage(),
+                ]);
+            } else {
+                $this->logUnparseableResponse('generation', $rawResponse, $e->getMessage());
+                throw new \RuntimeException(__('Invalid JSON in AI response: :message', ['message' => $e->getMessage()]));
+            }
         }
 
         if (! is_array($decoded) || array_is_list($decoded)) {
@@ -2536,6 +2851,14 @@ class EntryGeneratorService
 
         if ($type === 'terms') {
             return $this->mapTermsFieldValue($value, $field, $warnings, $siteHandle);
+        }
+
+        if ($type === 'entries') {
+            return $this->mapEntriesFieldValue($value, $field, $warnings);
+        }
+
+        if ($type === 'form') {
+            return $this->mapFormFieldValue($value, $field, $warnings);
         }
 
         if (in_array($type, self::GEN_RECURSIVE_TYPES)) {
@@ -2907,6 +3230,22 @@ class EntryGeneratorService
 
         if ($type === 'video') {
             $warnings[] = __(':field is required but no video URL was provided. Add a URL in the editor after saving.', [
+                'field' => $field->display(),
+            ]);
+
+            return;
+        }
+
+        if ($type === 'entries') {
+            $warnings[] = __(':field is required but no matching existing entry was found to link. Set it in the editor after saving.', [
+                'field' => $field->display(),
+            ]);
+
+            return;
+        }
+
+        if ($type === 'form') {
+            $warnings[] = __(':field is required but no matching form was found to link. Set it in the editor after saving.', [
                 'field' => $field->display(),
             ]);
 

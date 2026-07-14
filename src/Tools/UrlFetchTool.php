@@ -3,6 +3,7 @@
 namespace BoldWeb\StatamicAiAssistant\Tools;
 
 use BoldWeb\StatamicAiAssistant\Services\PromptUrlFetcher;
+use BoldWeb\StatamicAiAssistant\Support\HostAllowlist;
 use Illuminate\Support\Str;
 
 /**
@@ -73,6 +74,12 @@ class UrlFetchTool implements ChatTool
 
         $decoded = json_decode($json, true);
 
+        // Record provenance so save_remote_image may later pull images that
+        // actually appeared on this page (or its CDN) — but nothing invented.
+        if (is_array($decoded) && ($decoded['ok'] ?? false) !== false) {
+            $context->rememberFetchedContent($url, $json);
+        }
+
         return is_array($decoded) ? $decoded : ['ok' => false, 'error' => 'tool_error'];
     }
 
@@ -117,37 +124,6 @@ class UrlFetchTool implements ChatTool
      */
     private function isUrlAllowed(string $url): bool
     {
-        if ($url === '' || $this->allowedHosts === []) {
-            return false;
-        }
-
-        $host = parse_url($url, PHP_URL_HOST);
-        if (! is_string($host) || $host === '') {
-            return false;
-        }
-
-        $host = $this->normalizeHost($host);
-
-        foreach ($this->allowedHosts as $allowed) {
-            $allowed = $this->normalizeHost((string) $allowed);
-            if ($allowed === '') {
-                continue;
-            }
-
-            if ($host === $allowed
-                || str_ends_with($host, '.'.$allowed)
-                || str_ends_with($allowed, '.'.$host)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private function normalizeHost(string $host): string
-    {
-        $host = strtolower(trim($host));
-
-        return preg_replace('~^www\.~', '', $host) ?? $host;
+        return HostAllowlist::matches($url, $this->allowedHosts);
     }
 }
